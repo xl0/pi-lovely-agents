@@ -434,12 +434,19 @@ remaining deadline cannot help. Detached suspension produces a
 bounded status notification so the task cannot remain silently stuck.
 
 A successful parent turn on the same tuple proves recovery and globally requeues
-suspended runs for that tuple in original acceptance order. `/continue` wakes
-all suspended descendants owned by the current parent, regardless of tuple.
-It then injects a hidden, empty custom message with `triggerTurn: true` and
-Follow-up delivery. This enters Pi's normal retry, compaction, and queue handling
-without adding visible `Continue.` text to the parent transcript or model
-request. Do not call `Agent.continue()` directly.
+suspended runs for that tuple in original acceptance order. When the latest
+parent reply ended with `error` or `aborted`, `/continue` wakes all suspended
+descendants owned by that parent, regardless of tuple. It then injects a hidden,
+empty custom message with `triggerTurn: true` and Follow-up delivery. This enters
+Pi's normal retry, compaction, and queue handling without adding visible
+`Continue.` text to the parent transcript or model request. After a successful
+parent reply, `/continue` is a silent no-op. Do not call `Agent.continue()`
+directly.
+
+An abort during tool execution never automatically re-executes that tool. Pi
+settles and persists its error or success result first; continuation retains
+that result and lets the model decide whether to issue another call. Blind
+replay could duplicate partially completed, non-idempotent effects.
 
 A resumed child receives an internal literal `Continue.` prompt but remains in
 the same logical run. Another limit failure suspends it again. Suspended work
@@ -535,8 +542,9 @@ resent. This closes the send/crash window without duplicating model context.
 
 ## Human commands
 
-- `/continue`: wake owned suspended descendants, then resume an idle parent with
-  a hidden empty custom message
+- `/continue`: after an errored or aborted parent reply, wake owned suspended
+  descendants and resume through a hidden empty custom message; successful
+  replies are a silent no-op
 - `/tasks`: open a live direct-task inspector with state, queue depth, retained
   paths, streaming output, Follow-up/Steer input, stop, and discard. Print/JSON
   modes emit a plain list
@@ -596,24 +604,26 @@ and v1 TUI scope are settled.
 
 ### [ ] 1. Bootstrap, configuration, and roster
 
-#### [ ] 1.1 Package and test baseline
+#### [x] 1.1 Hidden `/continue`
+
+Replace the visible `/continue` prompt with the hidden empty custom message from
+`continue-extension-notes.md`. It refuses while the parent is busy and triggers
+Pi's normal turn path only when the latest assistant reply ended with `error` or
+`aborted`; successful replies are a silent no-op. Descendant wake-up remains a
+no-op until the coordinator exists.
+
+#### [ ] 1.2 Package and test baseline
 
 Add `@xl0/pi-lovely-config` as a runtime dependency and `bun test` to package
 scripts. Establish temp-workspace test helpers. Keep the extension entrypoint
 small enough that later child runtimes can load the same package without
 special cases.
 
-Replace the current visible `/continue` prompt with the hidden empty custom
-message from `continue-extension-notes.md`. Descendant wake-up remains a no-op
-until the coordinator exists.
-
 Done when:
 
-- hidden continue refuses while the parent is busy and triggers a turn while
-  idle
 - `bun test`, `bun run typecheck`, and targeted Biome checks pass
 
-#### [ ] 1.2 Scoped configuration
+#### [ ] 1.3 Scoped configuration
 
 Define `xl0-pi-lovely-agents.json` with `models`, `maxConcurrency`, `maxDepth`,
 `waitMs`, and `expandPromptTemplates`. Load it on `session_start`; reload it
@@ -628,7 +638,7 @@ use the same result.
 Done when tests cover defaults, user/workspace precedence, invalid values,
 multiline models, unresolved/ambiguous models, and editor-driven updates.
 
-#### [ ] 1.3 Agent Definition discovery
+#### [ ] 1.4 Agent Definition discovery
 
 Implement fresh-call discovery for user and nearest trusted project scopes.
 Parse strict frontmatter and body validation, regular files, and Pi-compatible
@@ -639,7 +649,7 @@ Done when table-driven tests cover every field, unknown values, UTF-8
 description bounds, duplicate/shadow cases, trust, broken links, and stable
 ordering/display paths.
 
-#### [ ] 1.4 `agent_roster`
+#### [ ] 1.5 `agent_roster`
 
 Register `agent_roster` with zero-based definition pagination. Return effective
 definitions, diagnostics, model choices, and depth. Enforce whole-record 32 KiB
@@ -790,13 +800,14 @@ restart-to-interrupted conversion.
 #### [ ] 5.2 Recovery triggers
 
 Observe successful parent turns and reopen the matching tuple globally. Extend
-`/continue` to requeue all suspended owned descendants before injecting its
-hidden parent marker. Resume each child within the same logical run through an
-internal literal `Continue.` prompt.
+an eligible `/continue` to requeue all suspended owned descendants before
+injecting its hidden parent marker. Keep it a silent no-op after a successful
+parent reply. Resume each child within the same logical run through an internal
+literal `Continue.` prompt.
 
 Done when tests cover tuple-specific automatic recovery, cross-tuple manual
-recovery, acceptance ordering, ownership/depth boundaries, and repeated quota
-failure.
+recovery after a parent error/abort, successful-parent no-op, acceptance
+ordering, ownership/depth boundaries, and repeated quota failure.
 
 #### [ ] 5.3 Durable notification delivery
 

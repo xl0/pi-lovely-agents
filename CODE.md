@@ -15,8 +15,11 @@ design; `/continue` is available independently.
 The package is ESM. Pi discovers `./extensions` through the package manifest.
 `@earendil-works/pi-coding-agent` is a peer dependency.
 
-`/continue` sends a literal `Continue.` user message when the parent is idle.
-It refuses to queue duplicate work while the parent is already running.
+`/continue` sends a hidden empty custom message with Follow-up delivery and
+`triggerTurn: true` when the parent is idle. This resumes Pi's normal prompt
+path without adding visible prompt text. It refuses to queue duplicate work
+while the parent is already running and does nothing unless the latest
+assistant reply ended with `error` or `aborted`.
 
 ## Tooling and release
 
