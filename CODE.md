@@ -2,18 +2,21 @@
 
 ## Role
 
-Pi package skeleton for `@xl0/pi-lovely-agents`. Runtime behavior has not
-been designed or implemented yet.
+Pi package for durable agent orchestration. The broader runtime is still in
+design; `/continue` is available independently.
 
 ## Layout
 
-- `extensions/lovely-agents/index.ts`: no-op extension entrypoint
+- `extensions/lovely-agents/index.ts`: extension entrypoint and `/continue`
 - `package.json`: package metadata, Pi discovery, and Bun tooling
 - `scripts/release.ts`: interactive release driver
 - `.github/workflows/publish.yml`: tag-triggered npm/GitHub release pipeline
 
 The package is ESM. Pi discovers `./extensions` through the package manifest.
 `@earendil-works/pi-coding-agent` is a peer dependency.
+
+`/continue` sends a literal `Continue.` user message when the parent is idle.
+It refuses to queue duplicate work while the parent is already running.
 
 ## Tooling and release
 

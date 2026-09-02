@@ -4,6 +4,10 @@ Agent orchestration for [Pi](https://github.com/earendil-works/pi).
 
 Runtime behavior is intentionally pending design.
 
+## Commands
+
+- `/continue` — continue the current Pi session after an error or aborted turn
+
 ## Install
 
 ```bash
