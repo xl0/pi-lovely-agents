@@ -24,6 +24,7 @@ export type ResidentAgent = {
 
 export type ParentNotification = Readonly<{ id: string; content: string }>
 export type ParentNotificationRoute = (notification: ParentNotification) => void | Promise<void>
+export type ManagedSessionContext = Readonly<{ depth: number; allowAgents: boolean }>
 
 export type AgentCoordinator = {
 	readonly version: typeof AGENT_COORDINATOR_VERSION
@@ -43,6 +44,8 @@ export type AgentCoordinator = {
 	getResident(taskKey: string): ResidentAgent | undefined
 	bindNotificationRoute(parentKey: string, route: ParentNotificationRoute): () => void
 	getNotificationRoute(parentKey: string): ParentNotificationRoute | undefined
+	bindSessionContext(sessionId: string, context: ManagedSessionContext): () => void
+	getSessionContext(sessionId: string): ManagedSessionContext | undefined
 }
 
 type Waiter = {
@@ -63,6 +66,7 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 	readonly #waiters: Waiter[] = []
 	readonly #residents = new Map<string, ResidentAgent>()
 	readonly #notificationRoutes = new Map<string, ParentNotificationRoute>()
+	readonly #sessionContexts = new Map<string, ManagedSessionContext>()
 	#limit: number
 	#active = 0
 	#acceptanceOrder = 0
@@ -160,6 +164,22 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 	getNotificationRoute(parentKey: string): ParentNotificationRoute | undefined {
 		assertRegistryKey(parentKey)
 		return this.#notificationRoutes.get(parentKey)
+	}
+
+	bindSessionContext(sessionId: string, context: ManagedSessionContext): () => void {
+		assertRegistryKey(sessionId)
+		if (!Number.isSafeInteger(context.depth) || context.depth < 0)
+			throw new Error("Managed session depth must be a nonnegative safe integer")
+		const stored = { ...context }
+		this.#sessionContexts.set(sessionId, stored)
+		return () => {
+			if (this.#sessionContexts.get(sessionId) === stored) this.#sessionContexts.delete(sessionId)
+		}
+	}
+
+	getSessionContext(sessionId: string): ManagedSessionContext | undefined {
+		assertRegistryKey(sessionId)
+		return this.#sessionContexts.get(sessionId)
 	}
 
 	async reacquire(tuple: ModelTuple, signal?: AbortSignal): Promise<void> {
@@ -316,7 +336,8 @@ function isAgentCoordinator(value: unknown): value is AgentCoordinator {
 		typeof candidate.withLentPermit === "function" &&
 		typeof candidate.setMaxConcurrency === "function" &&
 		typeof candidate.bindResident === "function" &&
-		typeof candidate.bindNotificationRoute === "function"
+		typeof candidate.bindNotificationRoute === "function" &&
+		typeof candidate.bindSessionContext === "function"
 	)
 }
 

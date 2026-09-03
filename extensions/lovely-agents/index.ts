@@ -9,6 +9,7 @@ import { loadTaskList, registerRosterTool, registerTaskTools } from "./tools.js"
 export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	let configValue = defaultAgentsConfig
 	let configWarnings: AgentsConfigWarning[] = []
+	let currentDepth = 0
 
 	const applyConfig = (value: AgentsConfig, warnings: AgentsConfigWarning[], ctx: ExtensionContext) => {
 		configValue = value
@@ -25,6 +26,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		try {
+			currentDepth = getAgentCoordinator().getSessionContext(ctx.sessionManager.getSessionId())?.depth ?? 0
 			loadConfig(ctx)
 		} catch (error) {
 			configValue = defaultAgentsConfig
@@ -92,7 +94,8 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 
 	registerRosterTool(pi, {
 		getConfig: () => configValue,
-		getConfigWarnings: () => configWarnings
+		getConfigWarnings: () => configWarnings,
+		getDepth: () => currentDepth
 	})
 	registerTaskTools(pi, { beforeParentLeaseRelease: stopFixtureTimersFor })
 }

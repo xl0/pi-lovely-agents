@@ -1,0 +1,261 @@
+import {
+	type AgentSession,
+	type BuildSystemPromptOptions,
+	createAgentSession,
+	DefaultResourceLoader,
+	getAgentDir,
+	type LoadExtensionsResult,
+	type PromptOptions,
+	type ScopedModel,
+	SessionManager,
+	SettingsManager,
+	type Skill
+} from "@earendil-works/pi-coding-agent"
+import { getAgentCoordinator } from "./coordinator.js"
+import type { AgentDefinition, AgentThinkingLevel } from "./definitions.js"
+import type { TaskStoragePaths } from "./state.js"
+
+const PROMPT_EXTENSION_PATH = "<inline:lovely-agent-prompt>"
+const CREATION_TOOL_NAMES = new Set(["agent"])
+
+export type ChildSessionSelection = {
+	model: ScopedModel["model"]
+	thinking: AgentThinkingLevel
+}
+
+export type ChildToolPolicy = {
+	tools?: string[]
+	excludeTools: string[]
+	depth: number
+	allowAgents: boolean
+}
+
+export type CreateChildSessionOptions = {
+	cwd: string
+	paths: TaskStoragePaths
+	definition: AgentDefinition
+	selection: ChildSessionSelection
+	scopedModels: readonly ScopedModel[]
+	parentDepth: number
+	maximumDepth: number
+	allowAgents: boolean
+	projectTrusted: boolean
+	expectedSessionId?: string
+	agentDir?: string
+}
+
+export type ChildSessionHandle = {
+	session: AgentSession
+	extensionsResult: LoadExtensionsResult
+	depth: number
+	allowAgents: boolean
+	dispose(): void
+}
+
+export function childPromptOptions(expandPromptTemplates: boolean): PromptOptions {
+	return { expandPromptTemplates }
+}
+
+export function resolveChildSessionSelection(options: {
+	callModel?: string
+	callThinking?: AgentThinkingLevel
+	definition: AgentDefinition
+	configuredModels: readonly ScopedModel[]
+	availableModels: readonly ScopedModel["model"][]
+	parentModel: ScopedModel["model"] | undefined
+	parentThinking: AgentThinkingLevel
+}): ChildSessionSelection {
+	let model: ScopedModel["model"] | undefined
+	if (options.callModel) {
+		model = options.configuredModels.find(choice => modelId(choice.model) === options.callModel)?.model
+		if (!model) throw new Error(`Model "${options.callModel}" is not an available configured choice`)
+	} else if (options.definition.model) {
+		model = options.availableModels.find(candidate => modelId(candidate) === options.definition.model)
+		if (!model) throw new Error(`Agent Definition model "${options.definition.model}" is not authenticated`)
+	} else {
+		model = options.parentModel
+		if (!model) throw new Error("No parent model is available")
+	}
+	return {
+		model,
+		thinking: options.callThinking ?? options.definition.thinking ?? options.parentThinking
+	}
+}
+
+export function resolveChildToolPolicy(options: {
+	definitionTools?: readonly string[]
+	parentDepth: number
+	maximumDepth: number
+	allowAgents: boolean
+}): ChildToolPolicy {
+	if (!Number.isSafeInteger(options.parentDepth) || options.parentDepth < 0)
+		throw new Error("Parent depth must be a nonnegative safe integer")
+	if (!Number.isSafeInteger(options.maximumDepth) || options.maximumDepth < 0) {
+		throw new Error("Maximum depth must be a nonnegative safe integer")
+	}
+	const depth = options.parentDepth + 1
+	if (depth > options.maximumDepth) throw new Error(`Agent depth ${depth} exceeds configured maximum ${options.maximumDepth}`)
+	const allowAgents = options.allowAgents && depth < options.maximumDepth
+	const excludeTools = allowAgents ? [] : [...CREATION_TOOL_NAMES]
+	const tools = options.definitionTools?.filter(name => allowAgents || !CREATION_TOOL_NAMES.has(name))
+	return { ...(tools ? { tools } : {}), excludeTools, depth, allowAgents }
+}
+
+export async function createChildSession(options: CreateChildSessionOptions): Promise<ChildSessionHandle> {
+	const policy = resolveChildToolPolicy({
+		...(options.definition.tools ? { definitionTools: options.definition.tools } : {}),
+		parentDepth: options.parentDepth,
+		maximumDepth: options.maximumDepth,
+		allowAgents: options.allowAgents
+	})
+	const agentDir = options.agentDir ?? getAgentDir()
+	const settingsManager = SettingsManager.create(options.cwd, agentDir)
+	settingsManager.setProjectTrusted(options.projectTrusted)
+	const resourceLoader = new DefaultResourceLoader({
+		cwd: options.cwd,
+		agentDir,
+		settingsManager,
+		systemPromptOverride: () => options.definition.systemPrompt,
+		...(options.definition.excludeAgentsMd ? { agentsFilesOverride: () => ({ agentsFiles: [] }) } : {}),
+		extensionFactories: [
+			{
+				name: "lovely-agent-prompt",
+				hidden: true,
+				factory(pi) {
+					pi.on("before_agent_start", event => ({
+						systemPrompt: buildDefinitionSystemPrompt(event.systemPromptOptions)
+					}))
+				}
+			}
+		],
+		extensionsOverride: base => {
+			const composer = base.extensions.find(extension => extension.path === PROMPT_EXTENSION_PATH)
+			if (!composer) return base
+			return { ...base, extensions: [composer, ...base.extensions.filter(extension => extension !== composer)] }
+		}
+	})
+	await resourceLoader.reload()
+	if (!resourceLoader.getExtensions().extensions.some(extension => extension.path === PROMPT_EXTENSION_PATH)) {
+		throw new Error("Could not load the Lovely Agents prompt composer")
+	}
+
+	const sessionManager = SessionManager.open(options.paths.session, options.paths.taskDirectory, options.cwd)
+	const result = await createAgentSession({
+		cwd: options.cwd,
+		agentDir,
+		model: options.selection.model,
+		thinkingLevel: options.selection.thinking,
+		scopedModels: [...options.scopedModels],
+		...(policy.tools ? { tools: policy.tools } : {}),
+		excludeTools: policy.excludeTools,
+		resourceLoader,
+		sessionManager,
+		settingsManager
+	})
+	if (options.expectedSessionId && result.session.sessionId !== options.expectedSessionId) {
+		result.session.dispose()
+		throw new Error(`Child session identity mismatch: expected ${options.expectedSessionId}, found ${result.session.sessionId}`)
+	}
+
+	const unbindContext = getAgentCoordinator().bindSessionContext(result.session.sessionId, {
+		depth: policy.depth,
+		allowAgents: policy.allowAgents
+	})
+	try {
+		await result.session.bindExtensions({ mode: "print" })
+	} catch (error) {
+		unbindContext()
+		result.session.dispose()
+		throw error
+	}
+	let disposed = false
+	return {
+		session: result.session,
+		extensionsResult: result.extensionsResult,
+		depth: policy.depth,
+		allowAgents: policy.allowAgents,
+		dispose() {
+			if (disposed) return
+			disposed = true
+			unbindContext()
+			result.session.dispose()
+		}
+	}
+}
+
+export function buildDefinitionSystemPrompt(options: BuildSystemPromptOptions): string {
+	const body = options.customPrompt?.trim()
+	if (!body) throw new Error("Agent Definition body is empty")
+	const tools = options.selectedTools ?? []
+	const visibleTools = tools.filter(name => options.toolSnippets?.[name])
+	const toolList = visibleTools.length > 0 ? visibleTools.map(name => `- ${name}: ${options.toolSnippets?.[name]}`).join("\n") : "(none)"
+	const guidelines: string[] = []
+	const seen = new Set<string>()
+	const addGuideline = (value: string) => {
+		const guideline = value.trim()
+		if (!guideline || seen.has(guideline)) return
+		seen.add(guideline)
+		guidelines.push(guideline)
+	}
+	const hasBash = tools.includes("bash")
+	const hasPowerShell = tools.includes("powershell")
+	if ((hasBash || hasPowerShell) && !tools.some(name => name === "grep" || name === "find" || name === "ls")) {
+		addGuideline(
+			hasBash && hasPowerShell
+				? "Use bash or PowerShell for file operations like listing, searching, and finding files"
+				: hasPowerShell
+					? "Use PowerShell for file operations like listing, searching, and finding files"
+					: "Use bash for file operations like ls, rg, find"
+		)
+	}
+	for (const guideline of options.promptGuidelines ?? []) addGuideline(guideline)
+	addGuideline("Be concise in your responses")
+	addGuideline("Show file paths clearly when working with files")
+
+	let prompt = `${body}\n\nAvailable tools:\n${toolList}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n\nGuidelines:\n${guidelines.map(value => `- ${value}`).join("\n")}`
+	if (options.appendSystemPrompt) prompt += `\n\n${options.appendSystemPrompt}`
+	if (options.contextFiles && options.contextFiles.length > 0) {
+		prompt += "\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n"
+		for (const file of options.contextFiles) {
+			prompt += `<project_instructions path="${file.path}">\n${file.content}\n</project_instructions>\n\n`
+		}
+		prompt += "</project_context>\n"
+	}
+	const skillReadTool = (["read", "bash"] as const).find(name => tools.includes(name))
+	if (skillReadTool && options.skills && options.skills.length > 0) {
+		prompt += formatSkillsForChild(options.skills, skillReadTool)
+	}
+	prompt += `\nCurrent working directory: ${options.cwd.replace(/\\/g, "/")}\n`
+	return prompt
+}
+
+function modelId(model: ScopedModel["model"]): string {
+	return `${model.provider}/${model.id}`
+}
+
+function formatSkillsForChild(skills: Skill[], fileReadTool: "read" | "bash"): string {
+	const visible = skills.filter(skill => !skill.disableModelInvocation)
+	if (visible.length === 0) return ""
+	const lines = [
+		"",
+		"",
+		"The following skills provide specialized instructions for specific tasks.",
+		`Use the ${fileReadTool} tool to load a skill's file when the task matches its description.`,
+		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+		"",
+		"<available_skills>"
+	]
+	for (const skill of visible) {
+		lines.push("  <skill>")
+		lines.push(`    <name>${escapeXml(skill.name)}</name>`)
+		lines.push(`    <description>${escapeXml(skill.description)}</description>`)
+		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`)
+		lines.push("  </skill>")
+	}
+	lines.push("</available_skills>")
+	return lines.join("\n")
+}
+
+function escapeXml(value: string): string {
+	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;")
+}

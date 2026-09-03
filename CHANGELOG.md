@@ -13,3 +13,5 @@
   `/lovely-agents`.
 - Add the process-global FIFO Agent coordinator, tuple gates, runtime bindings,
   and cooperative permit lending.
+- Add persistent in-process Pi child-session construction with Definition-owned
+  prompts, fixed model/tool policy, extensions, context, and depth gating.

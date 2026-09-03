@@ -652,20 +652,23 @@ Deterministic tests cover saturation, reductions, tuple isolation, cancellation,
 four-parent/four-child and nested deadlocks, immediate detach, and
 reacquisition order.
 
-#### [ ] 3.2 Child session construction
+#### [x] 3.2 Child session construction
 
-Create persistent Pi SDK sessions in-process with the selected fixed
-model/thinking, scoped model choices, tools, cwd, and normal enabled extensions.
-Compose the Definition-owned system prompt from Pi's exposed prompt options;
-include append resources, skills, cwd, and default context while ignoring
-replacement `SYSTEM.md` and honoring `exclude_agents_md`.
+Added persistent in-process Pi SDK child construction at the retained
+`session.jsonl` path. Model/thinking resolution follows call, Definition, then
+parent precedence; effective settings and scoped model choices stay fixed.
+Explicit Definition tools remain a hard allowlist, omitted tools retain normal
+built-ins/extensions, and `agent` is removed unless depth and `allowAgents`
+permit delegation.
 
-Gate Lovely Agent creation tools by `allowAgents` and depth. Apply literal or
-expanded child input according to config. Do not inherit the parent prompt.
+A hidden first extension composes the Definition-owned prompt from Pi's active
+tool metadata, guidelines, append resources, context, skills, and cwd before
+normal extension hooks. `SYSTEM.md` is ignored, `exclude_agents_md` is honored,
+project trust is inherited, and prompt expansion policy is explicit.
 
-Done when integration tests inspect effective tools/system prompts for omitted
-and explicit tool lists, context exclusion, extension hooks, model/thinking
-precedence, depth, and input expansion.
+Tests inspect selection failures, depth/tool policy, prompt composition,
+persistent paths, context inclusion/exclusion, extension loading/startup,
+managed depth, model/thinking, and scoped choices.
 
 #### [ ] 3.3 `agent` and initial run lifecycle
 

@@ -13,6 +13,8 @@ implemented. In-process scheduling and execution are next.
 - `extensions/lovely-agents/management.ts`: unified TUI and development fixtures
 - `extensions/lovely-agents/coordinator.ts`: process-global scheduling, tuple
   gates, and runtime bindings
+- `extensions/lovely-agents/child-session.ts`: fixed child configuration,
+  Definition-owned prompts, and persistent Pi SDK sessions
 - `extensions/lovely-agents/config.ts`: scoped config validation and searchable
   model selection
 - `extensions/lovely-agents/definitions.ts`: fresh, trust-aware Definition
@@ -80,6 +82,16 @@ routes with replacement-safe unbind callbacks. Managed runs carry permits in
 async-local context. Synchronous descendant waits and blocking `task_output`
 can lend that permit, then queue FIFO reacquisition before the caller resumes;
 reacquisition bypasses tuple gates because the caller was already running.
+
+Child sessions use Pi's SDK in-process and own the task's retained
+`session.jsonl`. Selection follows call, Definition, then parent precedence.
+Explicit Definition tools are hard allowlists; omitted tools preserve normal
+built-ins and extensions. Delegation is removed unless both `allowAgents` and
+remaining depth permit it. A hidden first extension composes the Definition
+body with active tool metadata, Pi guidelines, append resources, optional
+AGENTS/CLAUDE context, skills, and cwd before ordinary extension hooks.
+Session-scoped depth is registered before extension startup and removed on
+disposal.
 
 `/lovely-agents` opens one selector for fresh Agent Definitions, durable tasks,
 developer fixtures, and the scoped config editor. Fixture actions are always

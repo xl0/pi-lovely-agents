@@ -34,11 +34,15 @@ describe("process-global Agent coordinator", () => {
 		unbindOldRoute()
 		await coordinator.getNotificationRoute("parent")?.({ id: "notice", content: "done" })
 		expect(delivered).toEqual(["done"])
+		const unbindContext = coordinator.bindSessionContext("session", { depth: 2, allowAgents: false })
+		expect(coordinator.getSessionContext("session")).toEqual({ depth: 2, allowAgents: false })
 
 		unbindResident()
 		unbindRoute()
+		unbindContext()
 		expect(coordinator.getResident("task")).toBeUndefined()
 		expect(coordinator.getNotificationRoute("parent")).toBeUndefined()
+		expect(coordinator.getSessionContext("session")).toBeUndefined()
 	})
 })
 

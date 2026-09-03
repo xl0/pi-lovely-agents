@@ -33,6 +33,7 @@ describe("agent_roster tool", () => {
 			registerRosterTool(api, {
 				getConfig: () => config,
 				getConfigWarnings: () => [],
+				getDepth: () => 1,
 				getAgentDir: () => workspace.agentDir
 			})
 			if (!captured) throw new Error("agent_roster was not registered")
@@ -62,7 +63,7 @@ describe("agent_roster tool", () => {
     path: ../agent/agents/beta.md
 models:
   - anthropic/sonnet
-depth: 0/2`)
+depth: 1/2`)
 		})
 	})
 })
