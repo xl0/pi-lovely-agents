@@ -94,11 +94,7 @@ keeps schemas small and reduces malformed calls.
 
 ### Discover and create
 
-`agent_roster` takes optional pagination:
-
-```ts
-{ offset?: number, limit?: number }
-```
+`agent_roster` takes no arguments.
 
 It returns:
 
@@ -109,14 +105,8 @@ It returns:
 - resolved model choices
 - current and maximum delegation depth
 
-`offset` is the zero-based number of definitions to skip; `limit` is the maximum
-number of definitions to return. The defaults are 0 and 20, with a maximum
-limit of 100. Results include `total`, `returned`, `remaining`, and
-`nextOffset`.
-
-The complete result is capped at 32 KiB. The cap never splits a definition or
-diagnostic; it stops before the next record and reports how many definitions
-and diagnostics were omitted. The roster is never placed in the system prompt.
+The roster is never placed in the system prompt. Model-visible output is compact
+YAML-like text and omits empty/default bookkeeping.
 Generic tool guidance tells the model to call `agent_roster` before delegation
 and after editing definitions.
 
@@ -309,17 +299,12 @@ Tasks are never adopted or garbage-collected automatically.
 ### Model and thinking
 
 Configured `models` are the explicit model choices returned by `agent_roster`
-and accepted by `agent`. If no models are configured, the only explicit choice
-is the current parent model. A bare model name is accepted only when it resolves
-uniquely; `provider/model` is always unambiguous.
+and accepted by `agent`. A searchable multi-select lists authenticated Pi
+models. If none are selected, the only explicit choice is the current parent
+model.
 
 Omitting `model` inherits the current parent model. The effective thinking level
-uses this precedence:
-
-1. call override
-2. definition default
-3. thinking level pinned by the configured model pattern
-4. parent thinking level
+uses call override, then definition default, then the parent thinking level.
 
 Pi clamps unsupported levels. Persist and return the effective model and level.
 Missing authentication is a creation error. Model and thinking are fixed when
@@ -377,7 +362,7 @@ Use `@xl0/pi-lovely-config` with the standard user/workspace precedence:
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| `models` | empty | Models the parent may explicitly select for a child, using Pi's `provider/model[:thinking]` pattern syntax. Empty means the current parent model only. |
+| `models` | `[]` | Models the parent may explicitly select for a child. The searchable multi-select lists authenticated Pi models; empty exposes only the current parent model. |
 | `maxConcurrency` | `4` | Maximum number of agent runs executing in this OS process. |
 | `maxDepth` | `2` | Maximum delegation depth. |
 | `waitMs` | `30000` | Default wait for an initial result. Zero detaches immediately. |
@@ -591,9 +576,9 @@ extensions/lovely-agents/
   ui.ts             commands, status, widget, and inspector
 ```
 
-Tests live beside the module they exercise as `*.test.ts`. Prefer pure helpers
-and temporary directories over mocks; introduce a session/provider seam only
-where an in-process Pi integration cannot be tested directly.
+Tests live under `tests/lovely-agents/`. Prefer pure helpers and temporary
+directories over mocks; introduce a session/provider seam only where an
+in-process Pi integration cannot be tested directly.
 
 ### [x] 0. Design contract
 
@@ -602,61 +587,13 @@ session/run identity, tool schemas, parent ownership, fixed model selection,
 cooperative concurrency, persistence, quota recovery, notification delivery,
 and v1 TUI scope are settled.
 
-### [ ] 1. Bootstrap, configuration, and roster
+### [x] 1. Bootstrap, configuration, and roster
 
-#### [x] 1.1 Hidden `/continue`
-
-Replace the visible `/continue` prompt with the hidden empty custom message from
-`continue-extension-notes.md`. It refuses while the parent is busy and triggers
-Pi's normal turn path only when the latest assistant reply ended with `error` or
-`aborted`; successful replies are a silent no-op. Descendant wake-up remains a
-no-op until the coordinator exists.
-
-#### [ ] 1.2 Package and test baseline
-
-Add `@xl0/pi-lovely-config` as a runtime dependency and `bun test` to package
-scripts. Establish temp-workspace test helpers. Keep the extension entrypoint
-small enough that later child runtimes can load the same package without
-special cases.
-
-Done when:
-
-- `bun test`, `bun run typecheck`, and targeted Biome checks pass
-
-#### [ ] 1.3 Scoped configuration
-
-Define `xl0-pi-lovely-agents.json` with `models`, `maxConcurrency`, `maxDepth`,
-`waitMs`, and `expandPromptTemplates`. Load it on `session_start`; reload it
-after editor writes. Register `/lovely-agents` with `ScopedConfigEditor` and
-surface file warnings without failing the extension.
-
-Resolve configured model patterns with Pi's exported model-scope helpers.
-Expose exact provider/model choices and pinned thinking levels. Keep model
-resolution separate from Agent Definition parsing so both roster and creation
-use the same result.
-
-Done when tests cover defaults, user/workspace precedence, invalid values,
-multiline models, unresolved/ambiguous models, and editor-driven updates.
-
-#### [ ] 1.4 Agent Definition discovery
-
-Implement fresh-call discovery for user and nearest trusted project scopes.
-Parse strict frontmatter and body validation, regular files, and Pi-compatible
-symlinks. Resolve same-scope duplicates, project shadowing, invalid project
-shadowing, and isolated diagnostics deterministically.
-
-Done when table-driven tests cover every field, unknown values, UTF-8
-description bounds, duplicate/shadow cases, trust, broken links, and stable
-ordering/display paths.
-
-#### [ ] 1.5 `agent_roster`
-
-Register `agent_roster` with zero-based definition pagination. Return effective
-definitions, diagnostics, model choices, and depth. Enforce whole-record 32 KiB
-truncation with record counts and `nextOffset`; never slice JSON or UTF-8.
-
-Done when pagination and truncation tests prove that no definition/diagnostic
-record is split and rescanning observes same-turn file edits.
+Added the hidden guarded `/continue`, Bun test baseline, Lovely Config user /
+workspace settings and searchable multi-model selector, strict fresh-call
+Definition discovery, and `agent_roster`. Discovery honors trust,
+nearest-project precedence, invalid shadowing, symlinks, and isolated
+diagnostics.
 
 ### [ ] 2. Durable task foundation
 
@@ -859,3 +796,5 @@ npm pack --dry-run
 Full Biome remains contingent on the unrelated `.vscode/settings.json` being
 formatted or excluded; targeted project checks must pass regardless. Verify the
 packed archive contains runtime dependencies and only intended package files.
+Publish the Lovely Config release containing `multiEnum` before package
+verification; development uses `bun link`.
