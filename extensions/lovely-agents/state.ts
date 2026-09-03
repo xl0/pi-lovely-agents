@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto"
+import { watch } from "node:fs"
 import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises"
-import { basename, dirname, join, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { type Static, Type } from "typebox"
 import { Value } from "typebox/value"
 
@@ -11,6 +12,10 @@ export const STORAGE_GITIGNORE = "*\n!.gitignore\n"
 export const MAX_AGENT_INPUT_BYTES = 64 * 1024
 export const MAX_AGENT_LABEL_BYTES = 80
 export const PARENT_LEASE_VERSION = 1
+export const RETAINED_OUTPUT_MAX_LINES = 2_000
+export const RETAINED_OUTPUT_MAX_BYTES = 50 * 1024
+export const RETAINED_ACTIVITY_PREVIEW_BYTES = 2 * 1024
+export const RETAINED_OUTPUT_MAX_WAIT_MS = 10 * 60 * 1_000
 
 const DIRECTORY_MODE = 0o700
 const FILE_MODE = 0o600
@@ -138,6 +143,51 @@ export type TaskStoragePaths = ParentStoragePaths & {
 
 /** Process-global ownership proof for one parent partition. */
 export type ParentLease = Readonly<ParentLeaseFile & { paths: Readonly<ParentStoragePaths> }>
+
+/** Stable model-visible paths for retained task artifacts. */
+export type RetainedPaths = {
+	output: string
+	activity: string
+	session: string
+}
+
+/** Structured events rendered into the readable output log. */
+export type OutputLogEntry =
+	| { type: "run-start"; sequence: number; kind: "initial" | "followup"; timestamp: number }
+	| { type: "input"; delivery: "initial" | "followup" | "steer"; timestamp: number; content: string }
+	| { type: "assistant"; content: string }
+	| { type: "run-end"; sequence: number; outcome: Static<typeof RunOutcome>; timestamp: number; summary?: string }
+
+/** One bounded tool record rendered into the activity index. */
+export type ActivityLogEntry = {
+	tool: string
+	timestamp: number
+	arguments: string
+	result: string
+	isError: boolean
+	fullOutputPath?: string
+}
+
+export type RetainedOutputReadOptions = {
+	offset?: number
+	limit?: number
+	waitMs?: number
+	signal?: AbortSignal
+}
+
+export type RetainedOutputRead = {
+	text: string
+	startLine: number | null
+	endLine: number | null
+	totalLines: number
+	returnedLines: number
+	nextOffset: number
+	truncated: boolean
+	truncatedBy: "lines" | "bytes" | null
+	timedOut: boolean
+	state: Static<typeof TaskState>
+	paths: RetainedPaths
+}
 
 export type MetadataDiagnostic = {
 	code: "unreadable" | "invalid-json" | "unsupported-version" | "invalid-metadata"
@@ -338,6 +388,68 @@ export async function releaseParentLease(lease: ParentLease): Promise<void> {
 	})
 }
 
+/** Creates empty retained logs without touching Pi's authoritative session. */
+export async function initializeRetainedLogs(paths: TaskStoragePaths): Promise<void> {
+	await Promise.all([ensurePrivateLogFile(paths.output), ensurePrivateLogFile(paths.activity)])
+	await syncDirectory(paths.taskDirectory)
+}
+
+export function appendOutputLog(paths: TaskStoragePaths, entry: OutputLogEntry): Promise<void> {
+	return appendRetainedLog(paths.output, renderOutputLogEntry(entry))
+}
+
+export function appendActivityLog(paths: TaskStoragePaths, entry: ActivityLogEntry): Promise<void> {
+	return appendRetainedLog(paths.activity, renderActivityLogEntry(paths, entry))
+}
+
+export function retainedPaths(paths: TaskStoragePaths): RetainedPaths {
+	return {
+		output: displayWorkspacePath(paths.workspace, paths.output),
+		activity: displayWorkspacePath(paths.workspace, paths.activity),
+		session: displayWorkspacePath(paths.workspace, paths.session)
+	}
+}
+
+export async function countRetainedOutputLines(paths: TaskStoragePaths): Promise<number> {
+	return splitCompleteLines(await readRetainedLog(paths.output)).length
+}
+
+/**
+ * Reads complete lines from output.md. When positioned at the live end, waits
+ * for output growth or a task-state transition.
+ */
+export async function readRetainedOutput(paths: TaskStoragePaths, options: RetainedOutputReadOptions = {}): Promise<RetainedOutputRead> {
+	const offset = options.offset ?? 1
+	const limit = options.limit ?? RETAINED_OUTPUT_MAX_LINES
+	const waitMs = options.waitMs ?? 0
+	assertPositiveInteger(offset, "offset")
+	assertPositiveInteger(limit, "limit")
+	if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > RETAINED_OUTPUT_MAX_WAIT_MS) {
+		throw new Error(`waitMs must be an integer from 0 to ${RETAINED_OUTPUT_MAX_WAIT_MS}`)
+	}
+
+	let output = await readRetainedLog(paths.output)
+	let metadata = await requireTaskMetadata(paths)
+	let lines = splitCompleteLines(output)
+	if (offset > lines.length + 1) throw new Error(`Offset ${offset} is beyond end of output (${lines.length} lines total)`)
+
+	let timedOut = false
+	if (waitMs > 0 && isActiveTaskState(metadata.state) && offset > lines.length) {
+		const changed = await waitForRetainedChange(
+			paths,
+			{ outputBytes: Buffer.byteLength(output), state: metadata.state },
+			waitMs,
+			options.signal
+		)
+		timedOut = !changed
+		output = await readRetainedLog(paths.output)
+		metadata = await requireTaskMetadata(paths)
+		lines = splitCompleteLines(output)
+	}
+
+	return buildRetainedOutputRead(paths, lines, metadata.state, offset, limit, timedOut)
+}
+
 /** Atomically reserves a fresh task directory; existing names are collisions. */
 export async function reserveTaskStorage(
 	parent: ParentStoragePaths,
@@ -468,6 +580,214 @@ function assertMetadataForPath(paths: TaskStoragePaths, metadata: unknown): asse
 	}
 }
 
+function renderOutputLogEntry(entry: OutputLogEntry): string {
+	switch (entry.type) {
+		case "run-start":
+			return `## Run ${entry.sequence} (${entry.kind})\n\nStarted: ${formatTimestamp(entry.timestamp)}\n`
+		case "input":
+			return `\n### ${entry.delivery === "initial" ? "Input" : entry.delivery === "followup" ? "Follow-up" : "Steer"}\n\nDelivered: ${formatTimestamp(entry.timestamp)}\n\n${endLine(entry.content)}`
+		case "assistant":
+			return `\n### Assistant\n\n${endLine(entry.content)}`
+		case "run-end":
+			return `\nOutcome: ${entry.outcome}\nEnded: ${formatTimestamp(entry.timestamp)}${entry.summary ? `\n\n${entry.summary}` : ""}\n\n---\n`
+	}
+}
+
+function renderActivityLogEntry(paths: TaskStoragePaths, entry: ActivityLogEntry): string {
+	const fullOutput = entry.fullOutputPath
+		? `\nFull output: ${isAbsolute(entry.fullOutputPath) ? displayWorkspacePath(paths.workspace, entry.fullOutputPath) : entry.fullOutputPath}\n`
+		: ""
+	return `## ${entry.tool}\n\nTime: ${formatTimestamp(entry.timestamp)}\nStatus: ${entry.isError ? "error" : "ok"}\n\n### Arguments\n\n${previewActivityText(entry.arguments)}\n\n### Result\n\n${previewActivityText(entry.result)}\n${fullOutput}\n---\n`
+}
+
+function previewActivityText(content: string): string {
+	const bytes = Buffer.from(content)
+	if (bytes.length <= RETAINED_ACTIVITY_PREVIEW_BYTES) return content
+
+	const headBudget = Math.floor(RETAINED_ACTIVITY_PREVIEW_BYTES / 2)
+	const tailBudget = RETAINED_ACTIVITY_PREVIEW_BYTES - headBudget
+	let headEnd = headBudget
+	while (headEnd > 0 && isUtf8Continuation(bytes[headEnd])) headEnd--
+	let tailStart = bytes.length - tailBudget
+	while (tailStart < bytes.length && isUtf8Continuation(bytes[tailStart])) tailStart++
+
+	const head = bytes.subarray(0, headEnd).toString("utf8")
+	const tail = bytes.subarray(tailStart).toString("utf8")
+	const omitted = bytes.length - headEnd - (bytes.length - tailStart)
+	return `${head}\n\n[... omitted ${omitted} UTF-8 bytes ...]\n\n${tail}`
+}
+
+function buildRetainedOutputRead(
+	paths: TaskStoragePaths,
+	lines: string[],
+	state: Static<typeof TaskState>,
+	offset: number,
+	requestedLimit: number,
+	timedOut: boolean
+): RetainedOutputRead {
+	const lineLimit = Math.min(requestedLimit, RETAINED_OUTPUT_MAX_LINES)
+	const selected: string[] = []
+	let selectedBytes = 0
+	let index = offset - 1
+	let truncatedBy: RetainedOutputRead["truncatedBy"] = null
+	while (index < lines.length && selected.length < lineLimit) {
+		const line = lines[index]
+		if (line === undefined) break
+		const bytes = Buffer.byteLength(line) + (selected.length > 0 ? 1 : 0)
+		if (selectedBytes + bytes > RETAINED_OUTPUT_MAX_BYTES) {
+			truncatedBy = "bytes"
+			break
+		}
+		selected.push(line)
+		selectedBytes += bytes
+		index++
+	}
+	if (index < lines.length && truncatedBy === null) truncatedBy = "lines"
+
+	const startLine = selected.length > 0 ? offset : null
+	const endLine = selected.length > 0 ? offset + selected.length - 1 : null
+	const nextOffset = endLine === null ? offset : endLine + 1
+	let text = selected.join("\n")
+	if (truncatedBy !== null && selected.length === 0) {
+		text = `[Line ${offset} exceeds 50KB. Inspect ${retainedPaths(paths).output} directly.]`
+	} else if (truncatedBy !== null) {
+		const byteNote = truncatedBy === "bytes" ? " (50KB limit)" : ""
+		text += `\n\n[Showing lines ${offset}-${endLine} of ${lines.length}${byteNote}. Use offset=${nextOffset} to continue.]`
+	}
+
+	return {
+		text,
+		startLine,
+		endLine,
+		totalLines: lines.length,
+		returnedLines: selected.length,
+		nextOffset,
+		truncated: truncatedBy !== null,
+		truncatedBy,
+		timedOut,
+		state,
+		paths: retainedPaths(paths)
+	}
+}
+
+async function requireTaskMetadata(paths: TaskStoragePaths): Promise<TaskMetadata> {
+	const loaded = await readTaskMetadata(paths)
+	if (loaded.status !== "ok") throw new InvalidTaskMetadataError(metadataLoadError(loaded, paths.metadata))
+	return loaded.metadata
+}
+
+async function waitForRetainedChange(
+	paths: TaskStoragePaths,
+	baseline: { outputBytes: number; state: Static<typeof TaskState> },
+	waitMs: number,
+	signal?: AbortSignal
+): Promise<boolean> {
+	if (signal?.aborted) throw abortReason(signal)
+	return new Promise<boolean>((resolvePromise, rejectPromise) => {
+		let settled = false
+		let checking = false
+		let checkPending = false
+		const watcher = watch(paths.taskDirectory, { persistent: false }, () => {
+			requestCheck()
+		})
+		const timer = setTimeout(() => finish(false), waitMs)
+		const onAbort = () => fail(abortReason(signal))
+		const cleanup = () => {
+			clearTimeout(timer)
+			watcher.close()
+			signal?.removeEventListener("abort", onAbort)
+		}
+		const finish = (changed: boolean) => {
+			if (settled) return
+			settled = true
+			cleanup()
+			resolvePromise(changed)
+		}
+		const fail = (error: unknown) => {
+			if (settled) return
+			settled = true
+			cleanup()
+			rejectPromise(error)
+		}
+		const requestCheck = () => {
+			if (checking) {
+				checkPending = true
+				return
+			}
+			void check()
+		}
+		const check = async () => {
+			if (settled) return
+			checking = true
+			try {
+				const current = await retainedObservation(paths)
+				if (current.outputBytes !== baseline.outputBytes || current.state !== baseline.state) finish(true)
+			} catch (error) {
+				fail(error)
+			} finally {
+				checking = false
+				if (checkPending) {
+					checkPending = false
+					requestCheck()
+				}
+			}
+		}
+
+		watcher.once("error", fail)
+		signal?.addEventListener("abort", onAbort, { once: true })
+		requestCheck()
+	})
+}
+
+async function retainedObservation(paths: TaskStoragePaths): Promise<{ outputBytes: number; state: Static<typeof TaskState> }> {
+	let outputBytes = 0
+	try {
+		const stats = await lstat(paths.output)
+		if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Retained log is not a regular file: ${paths.output}`)
+		outputBytes = stats.size
+	} catch (error) {
+		if (!hasCode(error, "ENOENT")) throw error
+	}
+	return { outputBytes, state: (await requireTaskMetadata(paths)).state }
+}
+
+function isActiveTaskState(state: Static<typeof TaskState>): boolean {
+	return state === "queued" || state === "running" || state === "suspended"
+}
+
+function splitCompleteLines(content: string): string[] {
+	if (!content) return []
+	const lines = content.split("\n")
+	if (content.endsWith("\n")) lines.pop()
+	return lines
+}
+
+function displayWorkspacePath(workspace: string, path: string): string {
+	const display = relative(workspace, path)
+	if (display === "" || display === ".." || display.startsWith(`..${sep}`) || isAbsolute(display)) return path
+	return display.split(sep).join("/")
+}
+
+function formatTimestamp(timestamp: number): string {
+	return new Date(timestamp).toISOString()
+}
+
+function endLine(content: string): string {
+	return content.endsWith("\n") ? content : `${content}\n`
+}
+
+function isUtf8Continuation(byte: number | undefined): boolean {
+	return byte !== undefined && (byte & 0xc0) === 0x80
+}
+
+function assertPositiveInteger(value: number, name: string): void {
+	if (!Number.isInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`)
+}
+
+function abortReason(signal?: AbortSignal): unknown {
+	return signal?.reason ?? new Error("Operation aborted")
+}
+
 async function ensureStorageGitignore(root: string): Promise<void> {
 	const path = join(root, ".gitignore")
 	try {
@@ -481,6 +801,44 @@ async function ensureStorageGitignore(root: string): Promise<void> {
 async function assertRegularDirectory(path: string): Promise<void> {
 	const stats = await lstat(path)
 	if (!stats.isDirectory() || stats.isSymbolicLink()) throw new Error(`Lovely Agents storage path is not a regular directory: ${path}`)
+}
+
+async function ensurePrivateLogFile(path: string): Promise<void> {
+	try {
+		await writePrivateFile(path, "")
+		return
+	} catch (error) {
+		if (!hasCode(error, "EEXIST")) throw error
+	}
+	const stats = await lstat(path)
+	if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Retained log is not a regular file: ${path}`)
+	await chmod(path, FILE_MODE)
+}
+
+async function readRetainedLog(path: string): Promise<string> {
+	try {
+		const stats = await lstat(path)
+		if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Retained log is not a regular file: ${path}`)
+		return await readFile(path, "utf8")
+	} catch (error) {
+		if (hasCode(error, "ENOENT")) return ""
+		throw error
+	}
+}
+
+const retainedLogQueues = new Map<string, Promise<void>>()
+
+function appendRetainedLog(path: string, content: string): Promise<void> {
+	return serializeOperation(retainedLogQueues, path, async () => {
+		await ensurePrivateLogFile(path)
+		const handle = await open(path, "a", FILE_MODE)
+		try {
+			await handle.writeFile(content, "utf8")
+			await handle.sync()
+		} finally {
+			await handle.close()
+		}
+	})
 }
 
 async function loadParentLease(path: string): Promise<ParentLeaseLoadResult> {

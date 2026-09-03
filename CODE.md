@@ -4,7 +4,7 @@
 
 Pi package for durable agent orchestration. Configuration, Agent Definition
 discovery, roster inspection, and the durable storage foundation are
-implemented. Retained output is next.
+implemented. Read-only task tools are next.
 
 ## Layout
 
@@ -16,7 +16,7 @@ implemented. Retained output is next.
   discovery and strict validation
 - `extensions/lovely-agents/tools.ts`: `agent_roster` registration and rendering
 - `extensions/lovely-agents/state.ts`: versioned task metadata, private paths,
-  serialized atomic snapshots, and parent-partition leases
+  serialized atomic snapshots, parent leases, and retained logs
 - `tests/lovely-agents/`: extension tests and temp-workspace helpers
 - `package.json`: package metadata, Pi discovery, and Bun tooling
 - `scripts/release.ts`: interactive release driver
@@ -54,6 +54,13 @@ owners cause an explicit conflict; only a valid lease whose PID is definitively
 absent is reclaimed. Simultaneous stale reclamation is best-effort; fresh and
 live-owner acquisition remains atomic. Release verifies the ownership token
 before unlinking.
+
+`output.md` retains run/input/assistant/outcome boundaries; `activity.md`
+retains tool records with UTF-8-safe 2 KiB head/tail previews. Reads use
+1-indexed line offsets, return whole lines under the 2,000-line/50 KiB caps,
+and can long-poll active work until output size or task state changes. Retained
+paths are workspace-relative when possible; `session.jsonl` remains owned by
+Pi.
 
 `/continue` sends a hidden empty custom message with Follow-up delivery and
 `triggerTurn: true` when the parent is idle. This resumes Pi's normal prompt

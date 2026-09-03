@@ -611,16 +611,13 @@ same-process acquisition, explicit live-owner conflicts, stale-PID recovery,
 ownership-checked release, and conservative handling of malformed leases.
 Simultaneous stale takeover is deliberately best-effort.
 
-#### [ ] 2.3 Retained output
+#### [x] 2.3 Retained output
 
-Create `output.md` and `activity.md` writers with documented run/tool
-boundaries. Keep `session.jsonl` authoritative. Implement line counting and
-Pi-style 1-indexed `offset`/line `limit` reads with the 2,000-line/50 KiB cap,
-continuation marker, and long-poll change detection.
-
-Done when tests cover line and byte limits, multi-byte UTF-8 boundaries,
-continuation offsets, live growth, idle immediate return, timeout, and retained
-paths.
+Added private `output.md` and `activity.md` writers with stable run/tool
+boundaries and bounded UTF-8-safe activity previews. Added line counting,
+workspace-relative retained paths, 1-indexed whole-line reads under the
+2,000-line/50 KiB caps, continuation markers, and active-task long-polling.
+Pi remains the sole writer of authoritative `session.jsonl`.
 
 #### [ ] 2.4 `task_list` and `task_output`
 
