@@ -11,3 +11,5 @@
 - Add read-only `task_list` and `task_output` tools.
 - Unify Definition, task, fixture, and configuration management under
   `/lovely-agents`.
+- Add the process-global FIFO Agent coordinator, tuple gates, runtime bindings,
+  and cooperative permit lending.

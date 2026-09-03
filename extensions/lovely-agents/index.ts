@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent"
 import { ScopedConfigEditor } from "@xl0/pi-lovely-config"
 import { type AgentsConfig, type AgentsConfigWarning, createAgentsConfigSpec, defaultAgentsConfig, resolveAgentsConfig } from "./config.js"
+import { getAgentCoordinator } from "./coordinator.js"
 import { discoverAgentDefinitions } from "./definitions.js"
 import { openManagementUi, stopFixtureTimersFor } from "./management.js"
 import { loadTaskList, registerRosterTool, registerTaskTools } from "./tools.js"
@@ -12,6 +13,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	const applyConfig = (value: AgentsConfig, warnings: AgentsConfigWarning[], ctx: ExtensionContext) => {
 		configValue = value
 		configWarnings = warnings
+		getAgentCoordinator(value.maxConcurrency).setMaxConcurrency(value.maxConcurrency)
 		notifyConfigWarnings(ctx, warnings)
 	}
 	const loadConfig = (ctx: ExtensionContext) => {
@@ -27,6 +29,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		} catch (error) {
 			configValue = defaultAgentsConfig
 			configWarnings = []
+			getAgentCoordinator(defaultAgentsConfig.maxConcurrency).setMaxConcurrency(defaultAgentsConfig.maxConcurrency)
 			ctx.ui.notify(`Lovely Agents config error: ${errorMessage(error)}`, "error")
 		}
 	})

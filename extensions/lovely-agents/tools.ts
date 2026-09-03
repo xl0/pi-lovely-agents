@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import type { AgentsConfig, AgentsConfigWarning, ModelChoice } from "./config.js"
 import { resolveConfiguredModels } from "./config.js"
+import { getAgentCoordinator } from "./coordinator.js"
 import { type AgentDefinition, discoverAgentDefinitions } from "./definitions.js"
 import {
 	acquireParentLease,
@@ -265,12 +266,15 @@ export function registerTaskTools(
 			}
 			if (loaded.metadata.discardedAt !== null) throw new Error(`Task ${params.id} has been discarded`)
 
-			const output = await readRetainedOutput(paths, {
-				...(params.offset !== undefined ? { offset: params.offset } : {}),
-				...(params.limit !== undefined ? { limit: params.limit } : {}),
-				...(params.waitMs !== undefined ? { waitMs: params.waitMs } : {}),
-				...(signal ? { signal } : {})
-			})
+			const readOutput = () =>
+				readRetainedOutput(paths, {
+					...(params.offset !== undefined ? { offset: params.offset } : {}),
+					...(params.limit !== undefined ? { limit: params.limit } : {}),
+					...(params.waitMs !== undefined ? { waitMs: params.waitMs } : {}),
+					...(signal ? { signal } : {})
+				})
+			const shouldLend = (params.waitMs ?? 0) > 0 && isActiveState(loaded.metadata.state)
+			const output = shouldLend ? await getAgentCoordinator().withLentPermit(readOutput, signal) : await readOutput()
 			return buildTaskOutputToolResult(params.id, loaded.metadata.queuedFollowUps.length, output)
 		}
 	})

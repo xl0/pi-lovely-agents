@@ -11,6 +11,8 @@ implemented. In-process scheduling and execution are next.
 - `extensions/lovely-agents/index.ts`: extension registration, management
   command, and `/continue`
 - `extensions/lovely-agents/management.ts`: unified TUI and development fixtures
+- `extensions/lovely-agents/coordinator.ts`: process-global scheduling, tuple
+  gates, and runtime bindings
 - `extensions/lovely-agents/config.ts`: scoped config validation and searchable
   model selection
 - `extensions/lovely-agents/definitions.ts`: fresh, trust-aware Definition
@@ -70,6 +72,14 @@ summaries without descendant Task References. All direct rows and diagnostics
 are returned at once. `task_output` rejects foreign/discarded tasks and exposes
 retained line ranges with optional long-polling. Semantic session shutdown
 releases the parent lease; reload keeps it.
+
+One versioned coordinator is shared through a package-owned `globalThis`
+symbol. Its acceptance-ordered semaphore skips closed provider/model tuples,
+drains config reductions, and tracks resident runtimes and parent notification
+routes with replacement-safe unbind callbacks. Managed runs carry permits in
+async-local context. Synchronous descendant waits and blocking `task_output`
+can lend that permit, then queue FIFO reacquisition before the caller resumes;
+reacquisition bypasses tuple gates because the caller was already running.
 
 `/lovely-agents` opens one selector for fresh Agent Definitions, durable tasks,
 developer fixtures, and the scoped config editor. Fixture actions are always

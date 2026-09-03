@@ -639,19 +639,18 @@ removes only marked fixture directories, including nested fixture partitions.
 
 ### [ ] 3. In-process Agent execution
 
-#### [ ] 3.1 Process-global coordinator
+#### [x] 3.1 Process-global coordinator
 
-Store one versioned coordinator on `globalThis` under a package-owned symbol so
-parent and child extension runtimes, including `/reload`, share task residency,
-tuple gates, notification routes, and one FIFO Agent semaphore.
+Added one versioned process-global coordinator with reload-safe resident and
+notification bindings, exact provider/model gates, and an acceptance-ordered
+FIFO Agent semaphore. Config changes resize it without aborting active work.
+Managed async context supports cooperative permit lending for nested waits and
+blocking `task_output`; reacquisition is FIFO and bypasses gates for work that
+was already running.
 
-Implement cooperative permit lending around synchronous descendant waits and
-blocking `task_output`, with reacquisition before the caller's model loop
-continues. Apply config reductions by draining rather than aborting.
-
-Done when deterministic scheduler tests reproduce and resolve the
-four-parents/four-children deadlock, nested lending, immediate detach, FIFO
-reacquisition, cancellation, and lowered concurrency.
+Deterministic tests cover saturation, reductions, tuple isolation, cancellation,
+four-parent/four-child and nested deadlocks, immediate detach, and
+reacquisition order.
 
 #### [ ] 3.2 Child session construction
 
