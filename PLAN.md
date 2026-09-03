@@ -135,7 +135,7 @@ children. The inventory uses `task_list` ordering and whole-record truncation.
 ### Control existing tasks
 
 ```ts
-task_list({ offset?: number, limit?: number })
+task_list({})
 task_output({ id: TaskRef, offset?: number, limit?: number, waitMs?: number })
 task_input({ id: TaskRef, content: string, delivery?: "followup" | "steer" })
 task_stop({ id: TaskRef })
@@ -168,12 +168,15 @@ Rows are grouped in this order:
 5. `idle`
 
 Within a group, the newest update comes first; Task Reference is the stable
-tie-breaker. `offset` is a zero-based task count and `limit` is a task count.
-The defaults are 0 and 20, with a maximum limit of 100. Results include
-`total`, `returned`, `remaining`, and `nextOffset`. The complete result is
-capped at 32 KiB; the cap stops at a task or diagnostic boundary and reports
-omitted records, not only omitted bytes. Discarded tasks are hidden. Corrupt
-records appear separately as diagnostics rather than synthetic task rows.
+tie-breaker. Every direct task and diagnostic is returned in one result with
+the total task count. Discarded tasks are hidden. Corrupt records appear
+separately as diagnostics rather than synthetic task rows.
+
+Task reads acquire the exact parent's partition lease. Descendant summaries
+read atomic snapshots from nested partitions without taking control of those
+partitions; they are informational and may race nested updates. Semantic
+session shutdown releases an acquired direct lease, while reload preserves it
+through the process-global registry.
 
 ### Reading output
 
@@ -530,15 +533,13 @@ resent. This closes the send/crash window without duplicating model context.
 - `/continue`: after an errored or aborted parent reply, wake owned suspended
   descendants and resume through a hidden empty custom message; successful
   replies are a silent no-op
-- one management command: inspect Agent Definitions and direct tasks, stream
-  output, send Follow-up/Steer input, stop/discard tasks, and edit scoped config.
-  The current `/lovely-agents` config editor is interim; settle the final name
-  with the phase 6 UI. Print/JSON modes emit a plain task list.
+- `/lovely-agents`: inspect Agent Definitions and direct tasks, create/remove
+  development fixtures, and edit scoped config. As task controls become
+  available, this same UI gains live output, Follow-up/Steer, stop, and discard.
 
-In interactive mode, a compact status shows active Agent and future Background
-Bash counts. A below-editor task widget shows the active rows. Down on an empty
-editor, or the management command, opens the live inspector. This keeps the
-main Pi session active; it does not rebind the TUI to the child's session file.
+The management command keeps the main Pi session active; it never rebinds the
+TUI to a child session file. Compact status, below-editor active rows,
+empty-editor Down, and live task controls arrive after execution exists.
 
 There is no parallel slash-command syntax for every model tool.
 
@@ -595,7 +596,7 @@ Definition discovery, and `agent_roster`. Discovery honors trust,
 nearest-project precedence, invalid shadowing, symlinks, and isolated
 diagnostics.
 
-### [ ] 2. Durable task foundation
+### [x] 2. Durable task foundation and management
 
 #### [x] 2.1 State schema and private storage
 
@@ -619,15 +620,22 @@ workspace-relative retained paths, 1-indexed whole-line reads under the
 2,000-line/50 KiB caps, continuation markers, and active-task long-polling.
 Pi remains the sole writer of authoritative `session.jsonl`.
 
-#### [ ] 2.4 `task_list` and `task_output`
+#### [x] 2.4 `task_list` and `task_output`
 
-Register read-only task tools over fixture metadata before execution exists.
-List direct children in the specified state order, aggregate descendants without
-leaking IDs, report queued Follow-ups/output lines, and isolate corrupt records.
+Added leased read-only tools over durable metadata. `task_list` provides stable
+state/recency ordering, the complete direct-task set, tombstone filtering,
+isolated diagnostics, output counts, retained paths, and recursive descendant
+summaries without nested references. `task_output` enforces direct ownership
+and exposes bounded retained ranges with continuation and long-poll metadata.
 
-Done when tests cover record pagination, stable ordering, tombstone filtering,
-ownership boundaries, descendant aggregation, output continuation, and whole
-task-record truncation.
+#### [x] 2.5 Interactive management UI
+
+Expanded `/lovely-agents` into one interactive entry point for fresh Agent
+Definition discovery, durable direct-task inspection, developer fixtures, and
+the existing scoped config editor. The always-visible developer menu can seed
+all states/outcomes, queued Follow-ups, descendants, tombstones, corrupt
+metadata, large UTF-8 output, and a short live transition. Cleanup explicitly
+removes only marked fixture directories, including nested fixture partitions.
 
 ### [ ] 3. In-process Agent execution
 
@@ -748,17 +756,14 @@ Done when crash-window tests cover persist-before-send, send-before-observe,
 observe-before-mark, parent offline/reopen, transcript deduplication, payload
 bounds, and descendant summaries.
 
-### [ ] 6. Human UI and release readiness
+### [ ] 6. Live controls and release readiness
 
-#### [ ] 6.1 Unified management UI
+#### [ ] 6.1 Live task controls and status
 
-Replace the interim config-only command with one human-facing command for Agent
-Definitions, task management, and scoped config. Show compact active counts
-with `setStatus` and active rows in a below-editor widget. Open the command or
-Down on an empty editor into a custom live inspector. Support navigation, live
-output, Follow-up/Steer entry, stop, discard, paths, queue state, and settings
-without rebinding the main Pi session. Settle the final command name in this
-phase.
+Extend the unified `/lovely-agents` UI after task controls exist. Show compact
+active counts with `setStatus` and active rows in a below-editor widget. Support
+live output, Follow-up/Steer entry, stop, discard, and queue state without
+rebinding the main Pi session. Down on an empty editor opens the task view.
 
 Keep print/JSON behavior noninteractive and plain. Share rendering state through
 the coordinator so child events request parent TUI updates without polling.

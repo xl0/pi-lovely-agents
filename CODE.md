@@ -4,17 +4,18 @@
 
 Pi package for durable agent orchestration. Configuration, Agent Definition
 discovery, roster inspection, and the durable storage foundation are
-implemented. Read-only task tools are next.
+implemented. In-process scheduling and execution are next.
 
 ## Layout
 
-- `extensions/lovely-agents/index.ts`: extension registration, config UI, and
-  `/continue`
+- `extensions/lovely-agents/index.ts`: extension registration, management
+  command, and `/continue`
+- `extensions/lovely-agents/management.ts`: unified TUI and development fixtures
 - `extensions/lovely-agents/config.ts`: scoped config validation and searchable
   model selection
 - `extensions/lovely-agents/definitions.ts`: fresh, trust-aware Definition
   discovery and strict validation
-- `extensions/lovely-agents/tools.ts`: `agent_roster` registration and rendering
+- `extensions/lovely-agents/tools.ts`: roster and read-only task tools
 - `extensions/lovely-agents/state.ts`: versioned task metadata, private paths,
   serialized atomic snapshots, parent leases, and retained logs
 - `tests/lovely-agents/`: extension tests and temp-workspace helpers
@@ -61,6 +62,24 @@ retains tool records with UTF-8-safe 2 KiB head/tail previews. Reads use
 and can long-poll active work until output size or task state changes. Retained
 paths are workspace-relative when possible; `session.jsonl` remains owned by
 Pi.
+
+`task_list` scans only the exact parent-session partition under its lease,
+hides tombstones, isolates corrupt direct records, and sorts by state then
+recency. Direct rows include retained paths and bounded recursive descendant
+summaries without descendant Task References. All direct rows and diagnostics
+are returned at once. `task_output` rejects foreign/discarded tasks and exposes
+retained line ranges with optional long-polling. Semantic session shutdown
+releases the parent lease; reload keeps it.
+
+`/lovely-agents` opens one selector for fresh Agent Definitions, durable tasks,
+developer fixtures, and the scoped config editor. Fixture actions are always
+visible for now. They seed states/outcomes plus queued, nested, discarded,
+corrupt, large UTF-8, and live-transition cases. Cleanup removes only
+owner-marked `.fixture` task directories across direct and nested partitions.
+Definition previews include their complete system-prompt body. Definition/task
+detail views never rebind Pi's active session. Live fixture timers use a
+process-global registry so reload preserves them and semantic shutdown stops
+them before releasing the parent lease.
 
 `/continue` sends a hidden empty custom message with Follow-up delivery and
 `triggerTurn: true` when the parent is idle. This resumes Pi's normal prompt

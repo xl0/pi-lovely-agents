@@ -1,7 +1,9 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent"
 import { ScopedConfigEditor } from "@xl0/pi-lovely-config"
 import { type AgentsConfig, type AgentsConfigWarning, createAgentsConfigSpec, defaultAgentsConfig, resolveAgentsConfig } from "./config.js"
-import { registerRosterTool } from "./tools.js"
+import { discoverAgentDefinitions } from "./definitions.js"
+import { openManagementUi, stopFixtureTimersFor } from "./management.js"
+import { loadTaskList, registerRosterTool, registerTaskTools } from "./tools.js"
 
 export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	let configValue = defaultAgentsConfig
@@ -30,26 +32,38 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	})
 
 	pi.registerCommand("lovely-agents", {
-		description: "Configure Lovely Agents settings",
+		description: "Manage Lovely Agent definitions, tasks, fixtures, and settings",
 		async handler(_args, ctx) {
 			if (ctx.mode !== "tui") return
 			try {
-				const config = loadConfig(ctx)
-				await ctx.ui.custom<void>(
-					(tui, theme, _keybindings, done) =>
-						new ScopedConfigEditor({
-							tui,
-							theme,
-							config,
-							onChange(config) {
-								const loaded = resolveAgentsConfig(config)
-								applyConfig(loaded.value, loaded.warnings, ctx)
-							},
-							done
-						})
-				)
+				await openManagementUi(ctx, {
+					discoverDefinitions: () =>
+						discoverAgentDefinitions({
+							cwd: ctx.cwd,
+							projectTrusted: ctx.isProjectTrusted(),
+							toolNames: pi.getAllTools().map(tool => tool.name),
+							models: ctx.modelRegistry.getAll()
+						}),
+					loadTasks: async () => (await loadTaskList(ctx.cwd, ctx.sessionManager.getSessionId())).details,
+					openConfig: async () => {
+						const config = loadConfig(ctx)
+						await ctx.ui.custom<void>(
+							(tui, theme, _keybindings, done) =>
+								new ScopedConfigEditor({
+									tui,
+									theme,
+									config,
+									onChange(config) {
+										const loaded = resolveAgentsConfig(config)
+										applyConfig(loaded.value, loaded.warnings, ctx)
+									},
+									done
+								})
+						)
+					}
+				})
 			} catch (error) {
-				ctx.ui.notify(`Lovely Agents config error: ${errorMessage(error)}`, "error")
+				ctx.ui.notify(`Lovely Agents management error: ${errorMessage(error)}`, "error")
 			}
 		}
 	})
@@ -77,6 +91,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		getConfig: () => configValue,
 		getConfigWarnings: () => configWarnings
 	})
+	registerTaskTools(pi, { beforeParentLeaseRelease: stopFixtureTimersFor })
 }
 
 export function latestReplyWasInterrupted(entries: readonly SessionEntry[]): boolean {

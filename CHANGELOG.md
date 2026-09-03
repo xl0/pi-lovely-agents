@@ -8,3 +8,6 @@
 - Add versioned task metadata and private atomic workspace storage.
 - Add exclusive parent-partition leases with stale-process recovery.
 - Add private retained logs with bounded reads and long-polling.
+- Add read-only `task_list` and `task_output` tools.
+- Unify Definition, task, fixture, and configuration management under
+  `/lovely-agents`.

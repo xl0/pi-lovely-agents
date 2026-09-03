@@ -388,6 +388,15 @@ export async function releaseParentLease(lease: ParentLease): Promise<void> {
 	})
 }
 
+/** Releases a registered lease by identity after a semantic parent close. */
+export async function releaseParentLeaseFor(cwd: string, parentSessionId: string): Promise<boolean> {
+	const path = parentStoragePaths(cwd, parentSessionId).lease
+	const lease = parentLeaseState().leases.get(path)
+	if (!lease) return false
+	await releaseParentLease(lease)
+	return true
+}
+
 /** Creates empty retained logs without touching Pi's authoritative session. */
 export async function initializeRetainedLogs(paths: TaskStoragePaths): Promise<void> {
 	await Promise.all([ensurePrivateLogFile(paths.output), ensurePrivateLogFile(paths.activity)])
@@ -762,7 +771,7 @@ function splitCompleteLines(content: string): string[] {
 	return lines
 }
 
-function displayWorkspacePath(workspace: string, path: string): string {
+export function displayWorkspacePath(workspace: string, path: string): string {
 	const display = relative(workspace, path)
 	if (display === "" || display === ".." || display.startsWith(`..${sep}`) || isAbsolute(display)) return path
 	return display.split(sep).join("/")

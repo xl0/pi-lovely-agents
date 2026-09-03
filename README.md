@@ -3,20 +3,26 @@
 Agent orchestration for [Pi](https://github.com/earendil-works/pi).
 
 The durable execution runtime is under construction. Definition discovery,
-configuration, and roster inspection are available.
+configuration, retained task inspection, and the management UI are available.
 
 ## Commands
 
 - `/continue` — continue the current Pi session after an error or aborted turn
-- `/lovely-agents` — edit user/workspace settings
+- `/lovely-agents` — inspect Definitions/tasks, create test fixtures, and edit
+  user/workspace settings
 
 ## Tools
 
 - `agent_roster` — list effective Agent Definitions, model choices, diagnostics,
   and delegation depth
+- `task_list` — list every durable direct task owned by this Pi session
+- `task_output` — read or wait for retained task output
 
 Definitions are Markdown files in `~/.pi/agent/agents/` or the nearest trusted
 `.pi/agents/` ancestor. Project definitions override user definitions by name.
+The management UI's always-visible developer section creates dummy durable
+tasks, including state/outcome, nesting, corruption, large-output, and live
+cases. Its cleanup action deletes only directories carrying its fixture marker.
 
 ## Install
 
