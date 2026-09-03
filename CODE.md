@@ -3,8 +3,8 @@
 ## Role
 
 Pi package for durable agent orchestration. Configuration, Agent Definition
-discovery, and roster inspection are implemented; durable task execution is
-next.
+discovery, roster inspection, and the durable storage foundation are
+implemented. Parent leases and retained output are next.
 
 ## Layout
 
@@ -15,6 +15,8 @@ next.
 - `extensions/lovely-agents/definitions.ts`: fresh, trust-aware Definition
   discovery and strict validation
 - `extensions/lovely-agents/tools.ts`: `agent_roster` registration and rendering
+- `extensions/lovely-agents/state.ts`: versioned task metadata, private paths,
+  and serialized atomic snapshots
 - `tests/lovely-agents/`: extension tests and temp-workspace helpers
 - `package.json`: package metadata, Pi discovery, and Bun tooling
 - `scripts/release.ts`: interactive release driver
@@ -37,6 +39,13 @@ Definition model names resolve exactly against the full catalog.
 
 `agent_roster` returns effective definitions, diagnostics, and model choices as
 compact YAML-like model output. Full structured details remain available to Pi.
+
+Task state is stored under `.pi/lovely-agents/<parent-session-id>/<task-ref>/`.
+Task directories are reserved atomically with collision-checked `a_` references.
+Metadata is strictly validated against its path and v1 schema before use.
+Writes are serialized per task and use a private same-directory temporary file,
+file fsync, rename, and directory fsync. Malformed and unsupported snapshots
+remain untouched.
 
 `/continue` sends a hidden empty custom message with Follow-up delivery and
 `triggerTurn: true` when the parent is idle. This resumes Pi's normal prompt

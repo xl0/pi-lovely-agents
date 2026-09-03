@@ -503,7 +503,7 @@ sent as a notification.
 
 Detached initial runs and Follow-ups produce one completion notification when
 they succeed or fail. Explicit stop does not notify because the tool result or
-`/tasks` UI already reports it. Quota Suspension may produce one nonterminal
+management UI already reports it. Quota Suspension may produce one nonterminal
 status notification.
 
 A completion notification includes:
@@ -530,15 +530,15 @@ resent. This closes the send/crash window without duplicating model context.
 - `/continue`: after an errored or aborted parent reply, wake owned suspended
   descendants and resume through a hidden empty custom message; successful
   replies are a silent no-op
-- `/tasks`: open a live direct-task inspector with state, queue depth, retained
-  paths, streaming output, Follow-up/Steer input, stop, and discard. Print/JSON
-  modes emit a plain list
-- `/lovely-agents`: edit scoped configuration in TUI
+- one management command: inspect Agent Definitions and direct tasks, stream
+  output, send Follow-up/Steer input, stop/discard tasks, and edit scoped config.
+  The current `/lovely-agents` config editor is interim; settle the final name
+  with the phase 6 UI. Print/JSON modes emit a plain task list.
 
 In interactive mode, a compact status shows active Agent and future Background
 Bash counts. A below-editor task widget shows the active rows. Down on an empty
-editor, or `/tasks`, opens the live inspector. This keeps the main Pi session
-active; it does not rebind the TUI to the child's session file.
+editor, or the management command, opens the live inspector. This keeps the
+main Pi session active; it does not rebind the TUI to the child's session file.
 
 There is no parallel slash-command syntax for every model tool.
 
@@ -597,19 +597,12 @@ diagnostics.
 
 ### [ ] 2. Durable task foundation
 
-#### [ ] 2.1 State schema and private storage
+#### [x] 2.1 State schema and private storage
 
-Define versioned metadata types and runtime validation before reading untrusted
-disk state. Implement Task Reference generation, parent/task paths, owner-only
-directories/files, and first-use `.gitignore` creation without overwrite.
-
-Implement per-task serialized mutation and atomic snapshot writes through a
-same-directory temporary file, file fsync, rename, and directory fsync where
-supported. Keep malformed or unsupported metadata untouched.
-
-Done when tests cover ID shape/collisions, permissions where supported,
-`.gitignore` preservation, interrupted writes, malformed/newer metadata, and
-concurrent mutation ordering.
+Added strict v1 metadata, safe parent/task paths, atomically reserved Task
+References, owner-only storage, non-destructive `.gitignore` creation, and
+serialized fsynced snapshot replacement. Invalid and unsupported snapshots are
+reported without modification.
 
 #### [ ] 2.2 Parent partition lease
 
@@ -763,12 +756,15 @@ bounds, and descendant summaries.
 
 ### [ ] 6. Human UI and release readiness
 
-#### [ ] 6.1 Task status and live inspector
+#### [ ] 6.1 Unified management UI
 
-Show compact active counts with `setStatus` and active rows in a below-editor
-widget. Open `/tasks` or Down on an empty editor into a custom live inspector.
-Support navigation, live output, Follow-up/Steer entry, stop, discard, paths,
-and queue state without rebinding the main Pi session.
+Replace the interim config-only command with one human-facing command for Agent
+Definitions, task management, and scoped config. Show compact active counts
+with `setStatus` and active rows in a below-editor widget. Open the command or
+Down on an empty editor into a custom live inspector. Support navigation, live
+output, Follow-up/Steer entry, stop, discard, paths, queue state, and settings
+without rebinding the main Pi session. Settle the final command name in this
+phase.
 
 Keep print/JSON behavior noninteractive and plain. Share rendering state through
 the coordinator so child events request parent TUI updates without polling.
