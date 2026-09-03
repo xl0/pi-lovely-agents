@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto"
-import { chmod, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises"
+import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
 import { type Static, Type } from "typebox"
 import { Value } from "typebox/value"
@@ -10,11 +10,14 @@ export const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
 export const STORAGE_GITIGNORE = "*\n!.gitignore\n"
 export const MAX_AGENT_INPUT_BYTES = 64 * 1024
 export const MAX_AGENT_LABEL_BYTES = 80
+export const PARENT_LEASE_VERSION = 1
 
 const DIRECTORY_MODE = 0o700
 const FILE_MODE = 0o600
 const MAX_TASK_REFERENCE_ATTEMPTS = 100
+const MAX_LEASE_ACQUIRE_ATTEMPTS = 10
 const DEFINITION_NAME_PATTERN = "^[a-z0-9][a-z0-9_-]{0,63}$"
+const LEASE_STATE_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/parent-leases/v1")
 
 const RunId = Type.String({ pattern: "^r_[0-9a-f]{16}$" })
 const Timestamp = Type.Integer({ minimum: 0 })
@@ -68,6 +71,15 @@ const Notification = Type.Object(
 	},
 	{ additionalProperties: false }
 )
+const ParentLeaseFileSchema = Type.Object(
+	{
+		version: Type.Literal(PARENT_LEASE_VERSION),
+		pid: Type.Integer({ minimum: 1 }),
+		token: Type.String({ pattern: "^[0-9a-f]{32}$" }),
+		createdAt: Timestamp
+	},
+	{ additionalProperties: false }
+)
 
 /** Durable current snapshot for one agent session. */
 export const TaskMetadataSchema = Type.Object(
@@ -103,6 +115,7 @@ export const TaskMetadataSchema = Type.Object(
 )
 
 export type TaskMetadata = Static<typeof TaskMetadataSchema>
+type ParentLeaseFile = Static<typeof ParentLeaseFileSchema>
 
 /** Filesystem locations owned by one parent Pi session. */
 export type ParentStoragePaths = {
@@ -123,6 +136,9 @@ export type TaskStoragePaths = ParentStoragePaths & {
 	activity: string
 }
 
+/** Process-global ownership proof for one parent partition. */
+export type ParentLease = Readonly<ParentLeaseFile & { paths: Readonly<ParentStoragePaths> }>
+
 export type MetadataDiagnostic = {
 	code: "unreadable" | "invalid-json" | "unsupported-version" | "invalid-metadata"
 	message: string
@@ -134,10 +150,38 @@ export type MetadataLoadResult =
 	| { status: "missing" }
 	| { status: "invalid"; diagnostic: MetadataDiagnostic }
 
+type ParentLeaseLoadResult = { status: "ok"; lease: ParentLeaseFile } | { status: "missing" } | { status: "invalid"; message: string }
+
+type ParentLeaseState = {
+	version: typeof PARENT_LEASE_VERSION
+	leases: Map<string, ParentLease>
+	queues: Map<string, Promise<void>>
+}
+
 export class InvalidTaskMetadataError extends Error {
 	constructor(message: string) {
 		super(message)
 		this.name = "InvalidTaskMetadataError"
+	}
+}
+
+export class ParentLeaseError extends Error {
+	readonly code: string = "LOVELY_AGENTS_PARENT_LEASE"
+
+	constructor(message: string) {
+		super(message)
+		this.name = "ParentLeaseError"
+	}
+}
+
+export class ParentLeaseConflictError extends ParentLeaseError {
+	override readonly code = "LOVELY_AGENTS_PARENT_LEASE_CONFLICT"
+	readonly ownerPid: number
+
+	constructor(path: string, ownerPid: number) {
+		super(`Lovely Agents parent partition is owned by live process ${ownerPid}: ${path}`)
+		this.name = "ParentLeaseConflictError"
+		this.ownerPid = ownerPid
 	}
 }
 
@@ -200,6 +244,98 @@ export async function ensureParentStorage(cwd: string, parentSessionId: string):
 	await chmod(paths.parentDirectory, DIRECTORY_MODE)
 	await ensureStorageGitignore(paths.root)
 	return paths
+}
+
+/**
+ * Acquires one durable parent-partition lease. Duplicate calls in this process
+ * return the same lease, including across extension runtime reloads.
+ */
+export async function acquireParentLease(cwd: string, parentSessionId: string): Promise<ParentLease> {
+	const paths = await ensureParentStorage(cwd, parentSessionId)
+	const state = parentLeaseState()
+	return serializeOperation(state.queues, paths.lease, async () => {
+		const existing = state.leases.get(paths.lease)
+		if (existing) {
+			const loaded = await loadParentLease(paths.lease)
+			if (loaded.status === "ok" && loaded.lease.pid === existing.pid && loaded.lease.token === existing.token) {
+				return existing
+			}
+			state.leases.delete(paths.lease)
+			throw new ParentLeaseError(`Process-global lease ownership no longer matches ${paths.lease}`)
+		}
+
+		const leaseFile: ParentLeaseFile = {
+			version: PARENT_LEASE_VERSION,
+			pid: process.pid,
+			token: randomBytes(16).toString("hex"),
+			createdAt: Date.now()
+		}
+		const candidate = `${paths.lease}.${process.pid}.${leaseFile.token}.tmp`
+		await writePrivateFile(candidate, `${JSON.stringify(leaseFile)}\n`)
+		try {
+			for (let attempt = 0; attempt < MAX_LEASE_ACQUIRE_ATTEMPTS; attempt++) {
+				try {
+					await link(candidate, paths.lease)
+					try {
+						await syncDirectory(paths.parentDirectory)
+					} catch (error) {
+						await removeIfPresent(paths.lease)
+						throw error
+					}
+					const lease = Object.freeze({ ...leaseFile, paths: Object.freeze({ ...paths }) })
+					state.leases.set(paths.lease, lease)
+					return lease
+				} catch (error) {
+					if (!hasCode(error, "EEXIST")) throw error
+				}
+
+				const loaded = await loadParentLease(paths.lease)
+				if (loaded.status === "missing") continue
+				if (loaded.status === "invalid") {
+					throw new ParentLeaseError(`Cannot acquire invalid parent lease ${paths.lease}: ${loaded.message}`)
+				}
+				if (processIsAlive(loaded.lease.pid)) {
+					throw new ParentLeaseConflictError(paths.lease, loaded.lease.pid)
+				}
+
+				const confirmed = await loadParentLease(paths.lease)
+				if (confirmed.status !== "ok" || confirmed.lease.pid !== loaded.lease.pid || confirmed.lease.token !== loaded.lease.token) {
+					continue
+				}
+				try {
+					await unlink(paths.lease)
+					await syncDirectory(paths.parentDirectory)
+				} catch (error) {
+					if (!hasCode(error, "ENOENT")) throw error
+				}
+			}
+			throw new ParentLeaseError(`Unable to acquire changing parent lease: ${paths.lease}`)
+		} finally {
+			await removeIfPresent(candidate)
+		}
+	})
+}
+
+/** Releases only the matching process-global lease; repeated release is safe. */
+export async function releaseParentLease(lease: ParentLease): Promise<void> {
+	const state = parentLeaseState()
+	await serializeOperation(state.queues, lease.paths.lease, async () => {
+		if (state.leases.get(lease.paths.lease) !== lease) return
+
+		const loaded = await loadParentLease(lease.paths.lease)
+		if (loaded.status === "missing") {
+			state.leases.delete(lease.paths.lease)
+			return
+		}
+		if (loaded.status === "invalid" || loaded.lease.pid !== lease.pid || loaded.lease.token !== lease.token) {
+			state.leases.delete(lease.paths.lease)
+			throw new ParentLeaseError(`Refusing to release a parent lease no longer owned by this process: ${lease.paths.lease}`)
+		}
+
+		await unlink(lease.paths.lease)
+		state.leases.delete(lease.paths.lease)
+		await syncDirectory(lease.paths.parentDirectory)
+	})
 }
 
 /** Atomically reserves a fresh task directory; existing names are collisions. */
@@ -334,25 +470,55 @@ function assertMetadataForPath(paths: TaskStoragePaths, metadata: unknown): asse
 
 async function ensureStorageGitignore(root: string): Promise<void> {
 	const path = join(root, ".gitignore")
-	let handle: Awaited<ReturnType<typeof open>> | undefined
-	let complete = false
 	try {
-		handle = await open(path, "wx", FILE_MODE)
-		await handle.writeFile(STORAGE_GITIGNORE, "utf8")
-		await handle.sync()
-		complete = true
+		await writePrivateFile(path, STORAGE_GITIGNORE)
 	} catch (error) {
 		if (hasCode(error, "EEXIST")) return
 		throw error
-	} finally {
-		await handle?.close()
-		if (handle && !complete) await removeIfPresent(path)
 	}
 }
 
 async function assertRegularDirectory(path: string): Promise<void> {
 	const stats = await lstat(path)
 	if (!stats.isDirectory() || stats.isSymbolicLink()) throw new Error(`Lovely Agents storage path is not a regular directory: ${path}`)
+}
+
+async function loadParentLease(path: string): Promise<ParentLeaseLoadResult> {
+	let source: string
+	try {
+		const stats = await lstat(path)
+		if (!stats.isFile() || stats.isSymbolicLink()) return { status: "invalid", message: "lease is not a regular file" }
+		source = await readFile(path, "utf8")
+	} catch (error) {
+		if (hasCode(error, "ENOENT")) return { status: "missing" }
+		return { status: "invalid", message: errorMessage(error) }
+	}
+
+	let value: unknown
+	try {
+		value = JSON.parse(source)
+	} catch (error) {
+		return { status: "invalid", message: errorMessage(error) }
+	}
+	if (!Value.Check(ParentLeaseFileSchema, value)) {
+		const error = Value.Errors(ParentLeaseFileSchema, value)[0]
+		return { status: "invalid", message: error ? `${error.instancePath || "/"} ${error.message}` : "invalid lease data" }
+	}
+	return { status: "ok", lease: value }
+}
+
+async function writePrivateFile(path: string, content: string): Promise<void> {
+	let handle: Awaited<ReturnType<typeof open>> | undefined
+	let complete = false
+	try {
+		handle = await open(path, "wx", FILE_MODE)
+		await handle.writeFile(content, "utf8")
+		await handle.sync()
+		complete = true
+	} finally {
+		await handle?.close()
+		if (handle && !complete) await removeIfPresent(path)
+	}
 }
 
 async function atomicWriteMetadata(path: string, metadata: TaskMetadata): Promise<void> {
@@ -389,16 +555,56 @@ async function syncDirectory(path: string): Promise<void> {
 const metadataMutationQueues = new Map<string, Promise<void>>()
 
 function serializeMetadataMutation<T>(path: string, operation: () => Promise<T>): Promise<T> {
-	const preceding = metadataMutationQueues.get(path) ?? Promise.resolve()
+	return serializeOperation(metadataMutationQueues, path, operation)
+}
+
+function serializeOperation<T>(queues: Map<string, Promise<void>>, path: string, operation: () => Promise<T>): Promise<T> {
+	const preceding = queues.get(path) ?? Promise.resolve()
 	const result = preceding.then(operation)
 	const tail = result.then(
 		() => undefined,
 		() => undefined
 	)
-	metadataMutationQueues.set(path, tail)
+	queues.set(path, tail)
 	return result.finally(() => {
-		if (metadataMutationQueues.get(path) === tail) metadataMutationQueues.delete(path)
+		if (queues.get(path) === tail) queues.delete(path)
 	})
+}
+
+function parentLeaseState(): ParentLeaseState {
+	const globals = globalThis as unknown as { [key: symbol]: unknown }
+	const existing = globals[LEASE_STATE_SYMBOL]
+	if (existing !== undefined) {
+		if (!isParentLeaseState(existing)) throw new ParentLeaseError("Incompatible process-global Lovely Agents lease state")
+		return existing
+	}
+	const state: ParentLeaseState = {
+		version: PARENT_LEASE_VERSION,
+		leases: new Map(),
+		queues: new Map()
+	}
+	globals[LEASE_STATE_SYMBOL] = state
+	return state
+}
+
+function isParentLeaseState(value: unknown): value is ParentLeaseState {
+	return (
+		isRecord(value) &&
+		property(value, "version") === PARENT_LEASE_VERSION &&
+		property(value, "leases") instanceof Map &&
+		property(value, "queues") instanceof Map
+	)
+}
+
+function processIsAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0)
+		return true
+	} catch (error) {
+		if (hasCode(error, "ESRCH")) return false
+		if (hasCode(error, "EPERM")) return true
+		throw error
+	}
 }
 
 function invalidMetadata(path: string, code: MetadataDiagnostic["code"], message: string): MetadataLoadResult {

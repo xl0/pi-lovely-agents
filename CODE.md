@@ -4,7 +4,7 @@
 
 Pi package for durable agent orchestration. Configuration, Agent Definition
 discovery, roster inspection, and the durable storage foundation are
-implemented. Parent leases and retained output are next.
+implemented. Retained output is next.
 
 ## Layout
 
@@ -16,7 +16,7 @@ implemented. Parent leases and retained output are next.
   discovery and strict validation
 - `extensions/lovely-agents/tools.ts`: `agent_roster` registration and rendering
 - `extensions/lovely-agents/state.ts`: versioned task metadata, private paths,
-  and serialized atomic snapshots
+  serialized atomic snapshots, and parent-partition leases
 - `tests/lovely-agents/`: extension tests and temp-workspace helpers
 - `package.json`: package metadata, Pi discovery, and Bun tooling
 - `scripts/release.ts`: interactive release driver
@@ -46,6 +46,14 @@ Metadata is strictly validated against its path and v1 schema before use.
 Writes are serialized per task and use a private same-directory temporary file,
 file fsync, rename, and directory fsync. Malformed and unsupported snapshots
 remain untouched.
+
+Each open parent partition has a versioned PID/token `.lease`, published through
+an atomic no-overwrite link. A package-symbol process-global registry reuses the
+same lease across extension runtimes and serializes local acquisition. Live
+owners cause an explicit conflict; only a valid lease whose PID is definitively
+absent is reclaimed. Simultaneous stale reclamation is best-effort; fresh and
+live-owner acquisition remains atomic. Release verifies the ownership token
+before unlinking.
 
 `/continue` sends a hidden empty custom message with Follow-up delivery and
 `triggerTurn: true` when the parent is idle. This resumes Pi's normal prompt

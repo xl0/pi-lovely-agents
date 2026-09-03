@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test"
-import { chmod, mkdir, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readdir, readFile, stat, symlink, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import {
+	acquireParentLease,
 	createTaskReference,
 	ensureParentStorage,
 	mutateTaskMetadata,
+	ParentLeaseConflictError,
+	ParentLeaseError,
 	parentStoragePaths,
 	readTaskMetadata,
+	releaseParentLease,
 	reserveTaskStorage,
 	STORAGE_GITIGNORE,
 	TASK_METADATA_VERSION,
@@ -61,6 +65,93 @@ describe("private task storage", () => {
 			const paths = await reserveTaskStorage(parent, () => references.shift() ?? "a_cafebabe")
 			expect(paths.taskRef).toBe("a_cafebabe")
 			if (process.platform !== "win32") expect((await stat(paths.taskDirectory)).mode & 0o077).toBe(0)
+		})
+	})
+})
+
+describe("parent partition leases", () => {
+	test("acquires once per process, reuses across runtimes, and releases idempotently", async () => {
+		await withTempWorkspace(async workspace => {
+			const [first, concurrent] = await Promise.all([
+				acquireParentLease(workspace.cwd, "parent-session"),
+				acquireParentLease(workspace.cwd, "parent-session")
+			])
+			const reused = await acquireParentLease(workspace.cwd, "parent-session")
+			expect(concurrent).toBe(first)
+			expect(reused).toBe(first)
+			expect(JSON.parse(await readFile(first.paths.lease, "utf8"))).toEqual({
+				version: first.version,
+				pid: process.pid,
+				token: first.token,
+				createdAt: first.createdAt
+			})
+			if (process.platform !== "win32") expect((await stat(first.paths.lease)).mode & 0o077).toBe(0)
+
+			await releaseParentLease(first)
+			await releaseParentLease(first)
+			await expect(stat(first.paths.lease)).rejects.toMatchObject({ code: "ENOENT" })
+
+			const reacquired = await acquireParentLease(workspace.cwd, "parent-session")
+			expect(reacquired.token).not.toBe(first.token)
+			await releaseParentLease(reacquired)
+		})
+	})
+
+	test("rejects a lease owned by a live process", async () => {
+		await withTempWorkspace(async workspace => {
+			const paths = await ensureParentStorage(workspace.cwd, "parent-session")
+			const source = `${JSON.stringify({
+				version: 1,
+				pid: process.pid,
+				token: "1".repeat(32),
+				createdAt: 1
+			})}\n`
+			await writeFile(paths.lease, source, { mode: 0o600 })
+
+			await expect(acquireParentLease(workspace.cwd, "parent-session")).rejects.toBeInstanceOf(ParentLeaseConflictError)
+			expect(await readFile(paths.lease, "utf8")).toBe(source)
+		})
+	})
+
+	test("reclaims only a valid lease whose process is gone", async () => {
+		await withTempWorkspace(async workspace => {
+			const paths = await ensureParentStorage(workspace.cwd, "parent-session")
+			const staleToken = "2".repeat(32)
+			await writeFile(paths.lease, `${JSON.stringify({ version: 1, pid: deadProcessId(), token: staleToken, createdAt: 1 })}\n`, {
+				mode: 0o600
+			})
+
+			const lease = await acquireParentLease(workspace.cwd, "parent-session")
+			expect(lease.pid).toBe(process.pid)
+			expect(lease.token).not.toBe(staleToken)
+			await releaseParentLease(lease)
+		})
+	})
+
+	test("leaves malformed leases untouched", async () => {
+		await withTempWorkspace(async workspace => {
+			const paths = await ensureParentStorage(workspace.cwd, "parent-session")
+			await writeFile(paths.lease, "{broken", { mode: 0o600 })
+
+			await expect(acquireParentLease(workspace.cwd, "parent-session")).rejects.toBeInstanceOf(ParentLeaseError)
+			expect(await readFile(paths.lease, "utf8")).toBe("{broken")
+		})
+	})
+
+	test("never releases a lease with a different ownership token", async () => {
+		await withTempWorkspace(async workspace => {
+			const lease = await acquireParentLease(workspace.cwd, "parent-session")
+			await unlink(lease.paths.lease)
+			const replacement = `${JSON.stringify({
+				version: 1,
+				pid: process.pid,
+				token: "3".repeat(32),
+				createdAt: 1
+			})}\n`
+			await writeFile(lease.paths.lease, replacement, { mode: 0o600 })
+
+			await expect(releaseParentLease(lease)).rejects.toThrow("no longer owned")
+			expect(await readFile(lease.paths.lease, "utf8")).toBe(replacement)
 		})
 	})
 })
@@ -169,4 +260,15 @@ function metadata(paths: TaskStoragePaths): TaskMetadata {
 		createdAt: 1,
 		updatedAt: 1
 	}
+}
+
+function deadProcessId(): number {
+	for (const candidate of [2_147_483_647, 1_000_000_000, 99_999_999]) {
+		try {
+			process.kill(candidate, 0)
+		} catch (error) {
+			if (error instanceof Error && "code" in error && error.code === "ESRCH") return candidate
+		}
+	}
+	throw new Error("Could not find an unused process ID for the stale-lease test")
 }

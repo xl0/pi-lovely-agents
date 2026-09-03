@@ -604,15 +604,12 @@ References, owner-only storage, non-destructive `.gitignore` creation, and
 serialized fsynced snapshot replacement. Invalid and unsupported snapshots are
 reported without modification.
 
-#### [ ] 2.2 Parent partition lease
+#### [x] 2.2 Parent partition lease
 
-Acquire an exclusive PID/token lease before task reads or controls. Reuse the
-lease across same-process extension runtimes and `/reload`; release on semantic
-parent close. Reclaim only provably stale process leases. A live conflicting
-process returns an explicit Lovely Agents error.
-
-Done when tests cover first acquisition, same-process reuse, live contention,
-stale reclamation, and release.
+Added an atomic versioned PID/token lease with process-global reuse, serialized
+same-process acquisition, explicit live-owner conflicts, stale-PID recovery,
+ownership-checked release, and conservative handling of malformed leases.
+Simultaneous stale takeover is deliberately best-effort.
 
 #### [ ] 2.3 Retained output
 
