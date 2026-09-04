@@ -4,6 +4,7 @@ import { registerAgentTool } from "./agent.js"
 import { type AgentsConfig, type AgentsConfigWarning, createAgentsConfigSpec, defaultAgentsConfig, resolveAgentsConfig } from "./config.js"
 import { getAgentCoordinator } from "./coordinator.js"
 import { discoverAgentDefinitions } from "./definitions.js"
+import { reconcileParentTasks, stopOwnedTaskTree } from "./lifecycle.js"
 import { openManagementUi, stopFixtureTimersFor } from "./management.js"
 import { loadTaskList, registerRosterTool, registerTaskTools } from "./tools.js"
 
@@ -34,6 +35,19 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			configWarnings = []
 			getAgentCoordinator(defaultAgentsConfig.maxConcurrency).setMaxConcurrency(defaultAgentsConfig.maxConcurrency)
 			ctx.ui.notify(`Lovely Agents config error: ${errorMessage(error)}`, "error")
+		}
+		if (_event.reason !== "reload") {
+			try {
+				const reconciled = await reconcileParentTasks(ctx.cwd, ctx.sessionManager.getSessionId())
+				if (reconciled.interrupted > 0) {
+					ctx.ui.notify(`Lovely Agents marked ${reconciled.interrupted} stale task(s) interrupted.`, "warning")
+				}
+				if (reconciled.diagnostics.length > 0) {
+					ctx.ui.notify(`Lovely Agents skipped ${reconciled.diagnostics.length} invalid task(s) during recovery.`, "warning")
+				}
+			} catch (error) {
+				ctx.ui.notify(`Lovely Agents recovery failed: ${errorMessage(error)}`, "warning")
+			}
 		}
 	})
 
@@ -99,7 +113,15 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		getDepth: () => currentDepth
 	})
 	registerAgentTool(pi, { getConfig: () => configValue })
-	registerTaskTools(pi, { beforeParentLeaseRelease: stopFixtureTimersFor })
+	registerTaskTools(pi, {
+		beforeParentLeaseRelease: async (cwd, parentSessionId) => {
+			try {
+				await stopFixtureTimersFor(cwd, parentSessionId)
+			} finally {
+				await stopOwnedTaskTree(cwd, parentSessionId)
+			}
+		}
+	})
 }
 
 export function latestReplyWasInterrupted(entries: readonly SessionEntry[]): boolean {

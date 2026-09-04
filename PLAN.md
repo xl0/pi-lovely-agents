@@ -686,15 +686,17 @@ Tests cover synchronous success/failure, queue-time and immediate detachment,
 cancellation, post-detach completion, retained assistant/tool output, private
 session creation, and cache-stable reopening.
 
-#### [ ] 3.4 Parent lifecycle and restart reconciliation
+#### [x] 3.4 Parent lifecycle and restart reconciliation
 
-Recursively stop owned work on graceful quit/new/resume/fork, but preserve it
-across reload. On startup, keep reusable idle tasks and convert stale
-queued/running/suspended work to interrupted while clearing Follow-ups.
+Graceful quit/new/resume/fork recursively stops resident and retained
+descendants, clears queued Follow-ups, waits for resident disposal, and releases
+every owned partition lease. Reload skips cleanup so process-global residents
+and leases remain bound to the replacement runtime.
 
-Done when lifecycle tests cover every shutdown reason, recursive descendants,
-reload rebinding, crash fixtures, orphan retention, and one reconciled
-interruption notification record.
+Non-reload startup reconciles the exact parent partition. Stable idle and
+already-interrupted tasks remain reusable; stale queued/running/suspended work
+becomes interrupted with one deterministic notification record. Malformed and
+orphaned storage remains untouched and is reported nonfatally.
 
 ### [ ] 4. Agent controls
 

@@ -17,6 +17,8 @@ implemented. In-process scheduling and execution are next.
   Definition-owned prompts, and persistent Pi SDK sessions
 - `extensions/lovely-agents/agent.ts`: `agent` creation tool and initial-run
   lifecycle
+- `extensions/lovely-agents/lifecycle.ts`: graceful recursive shutdown and
+  restart reconciliation
 - `extensions/lovely-agents/config.ts`: scoped config validation and searchable
   model selection
 - `extensions/lovely-agents/definitions.ts`: fresh, trust-aware Definition
@@ -103,6 +105,13 @@ outcome across completion/stop races. Synchronous waits lend managed parent
 permits; zero or expired waits only stamp detachment and never restart work.
 Accepted child failures are task outcomes, not failed tool calls. Idle child
 runtimes dispose while their private Pi session file remains cold-loadable.
+
+On quit/new/resume/fork, the outgoing runtime recursively stops resident and
+retained descendants before releasing exact-parent leases. Reload skips this
+path, preserving process-global residents. Non-reload startup scans only the
+exact parent partition: stale active states become `interrupted`, queued
+Follow-ups clear, and one deterministic interruption notification is retained.
+Stable idle/interrupted records and malformed/orphaned files are never deleted.
 
 `/lovely-agents` opens one selector for fresh Agent Definitions, durable tasks,
 developer fixtures, and the scoped config editor. Fixture actions are always

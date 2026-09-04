@@ -17,3 +17,5 @@
   prompts, fixed model/tool policy, extensions, context, and depth gating.
 - Add the durable `agent` creation tool with scheduled initial runs, retained
   event logs, bounded waiting, detachment, and cancellation.
+- Add recursive parent-session shutdown and restart reconciliation for stale
+  accepted work.

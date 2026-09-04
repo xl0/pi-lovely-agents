@@ -252,6 +252,7 @@ class InitialAgentRun implements ResidentAgent {
 		this.#scheduleAbort.abort(new Error("Agent run stopped"))
 		await this.#child.session.abort()
 		await this.settle("stopped")
+		await this.#completion.promise
 	}
 
 	dispose(): void {

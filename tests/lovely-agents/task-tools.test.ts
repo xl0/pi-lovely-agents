@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { stat, writeFile } from "node:fs/promises"
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI, ExtensionContext, SessionShutdownEvent } from "@earendil-works/pi-coding-agent"
 import {
 	ensureParentStorage,
 	initializeRetainedLogs,
@@ -131,9 +131,9 @@ describe("read-only task tools", () => {
 			expect(JSON.stringify(parent?.descendants)).not.toContain("a_10000001")
 
 			const leasePath = (await ensureParentStorage(workspace.cwd, "parent-session")).lease
-			await captured.shutdown?.({ reason: "reload" }, ctx)
+			await captured.shutdown?.({ type: "session_shutdown", reason: "reload" }, ctx)
 			expect((await stat(leasePath)).isFile()).toBe(true)
-			await captured.shutdown?.({ reason: "quit" }, ctx)
+			await captured.shutdown?.({ type: "session_shutdown", reason: "quit" }, ctx)
 			await expect(stat(leasePath)).rejects.toMatchObject({ code: "ENOENT" })
 		})
 	})
@@ -187,7 +187,7 @@ describe("read-only task tools", () => {
 			await expect(captured.tools.get("task_output")?.execute("discarded", { id: "a_00000002" }, undefined, ctx)).rejects.toThrow(
 				"discarded"
 			)
-			await captured.shutdown?.({ reason: "quit" }, ctx)
+			await captured.shutdown?.({ type: "session_shutdown", reason: "quit" }, ctx)
 		})
 	})
 
@@ -197,6 +197,20 @@ describe("read-only task tools", () => {
 		expect(result.details.tasks).toHaveLength(100)
 		expect(result.details.total).toBe(100)
 		expect(result.content[0].text).toContain(`id: ${rows[99]?.id}`)
+	})
+
+	test("runs semantic shutdown cleanup for every replacement reason but not reload", async () => {
+		await withTempWorkspace(async workspace => {
+			const cleaned: string[] = []
+			const captured = captureTaskTools(async (_cwd, _parentSessionId) => {
+				cleaned.push("cleanup")
+			})
+			const ctx = taskContext(workspace.cwd)
+			for (const reason of ["quit", "new", "resume", "fork", "reload"] as const) {
+				await captured.shutdown?.({ type: "session_shutdown", reason }, ctx)
+			}
+			expect(cleaned).toHaveLength(4)
+		})
 	})
 })
 
@@ -273,12 +287,12 @@ type CapturedTool = {
 	): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown }>
 }
 
-function captureTaskTools(): {
+function captureTaskTools(beforeParentLeaseRelease?: (cwd: string, parentSessionId: string) => void | Promise<void>): {
 	tools: Map<string, CapturedTool>
-	shutdown?: (event: { reason: "quit" | "reload" }, ctx: ExtensionContext) => Promise<void>
+	shutdown?: (event: SessionShutdownEvent, ctx: ExtensionContext) => Promise<void>
 } {
 	const tools = new Map<string, CapturedTool>()
-	let shutdown: ((event: { reason: "quit" | "reload" }, ctx: ExtensionContext) => Promise<void>) | undefined
+	let shutdown: ((event: SessionShutdownEvent, ctx: ExtensionContext) => Promise<void>) | undefined
 	const api = {
 		registerTool(tool: { name: string; execute: (...args: unknown[]) => unknown }) {
 			tools.set(tool.name, {
@@ -289,11 +303,11 @@ function captureTaskTools(): {
 					}>
 			})
 		},
-		on(event: string, handler: (event: { reason: "quit" | "reload" }, ctx: ExtensionContext) => Promise<void>) {
+		on(event: string, handler: (event: SessionShutdownEvent, ctx: ExtensionContext) => Promise<void>) {
 			if (event === "session_shutdown") shutdown = handler
 		}
 	} as unknown as ExtensionAPI
-	registerTaskTools(api)
+	registerTaskTools(api, beforeParentLeaseRelease ? { beforeParentLeaseRelease } : {})
 	return { tools, ...(shutdown ? { shutdown } : {}) }
 }
 

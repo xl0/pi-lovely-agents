@@ -25,6 +25,11 @@ The management UI's always-visible developer section creates dummy durable
 tasks, including state/outcome, nesting, corruption, large-output, and live
 cases. Its cleanup action deletes only directories carrying its fixture marker.
 
+Durable state lives under `<cwd>/.pi/lovely-agents/`, partitioned by the exact
+parent Pi session. Quit and session replacement recursively stop owned work;
+reload keeps it running. After an unclean restart, stale accepted work is
+retained as `interrupted`.
+
 ## Install
 
 ```bash
