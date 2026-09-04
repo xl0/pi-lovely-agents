@@ -1,3 +1,4 @@
+import { lstat, open } from "node:fs/promises"
 import {
 	type AgentSession,
 	type BuildSystemPromptOptions,
@@ -139,6 +140,7 @@ export async function createChildSession(options: CreateChildSessionOptions): Pr
 		throw new Error("Could not load the Lovely Agents prompt composer")
 	}
 
+	await reserveSessionFile(options.paths.session)
 	const sessionManager = SessionManager.open(options.paths.session, options.paths.taskDirectory, options.cwd)
 	const result = await createAgentSession({
 		cwd: options.cwd,
@@ -258,4 +260,19 @@ function formatSkillsForChild(skills: Skill[], fileReadTool: "read" | "bash"): s
 
 function escapeXml(value: string): string {
 	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;")
+}
+
+async function reserveSessionFile(path: string): Promise<void> {
+	try {
+		const file = await open(path, "wx", 0o600)
+		await file.close()
+	} catch (error) {
+		if (!hasCode(error, "EEXIST")) throw error
+		const stats = await lstat(path)
+		if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Child session path is not a regular file: ${path}`)
+	}
+}
+
+function hasCode(error: unknown, code: string): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === code
 }

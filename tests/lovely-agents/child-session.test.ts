@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { stat } from "node:fs/promises"
 import { join } from "node:path"
 import { createSyntheticSourceInfo, ModelRuntime, type ScopedModel, type Skill } from "@earendil-works/pi-coding-agent"
 import {
@@ -176,8 +177,10 @@ describe("persistent child session construction", () => {
 				projectTrusted: true,
 				agentDir: workspace.agentDir
 			})
+			const childSessionId = handle.session.sessionId
 			try {
 				expect(handle.session.sessionFile).toBe(paths.session)
+				expect((await stat(paths.session)).mode & 0o777).toBe(0o600)
 				expect(`${handle.session.model?.provider}/${handle.session.model?.id}`).toBe("anthropic/claude-sonnet-4-5")
 				expect(handle.session.thinkingLevel).toBe("off")
 				expect(handle.session.scopedModels.map(choice => choice.model.id)).toEqual(["claude-sonnet-4-5"])
@@ -192,6 +195,23 @@ describe("persistent child session construction", () => {
 				delete testGlobals.__lovelyChildHookStarted
 			}
 			expect(getAgentCoordinator().getSessionContext(handle.session.sessionId)).toBeUndefined()
+			expect(await Bun.file(paths.session).text()).toContain(childSessionId)
+			const reopened = await createChildSession({
+				cwd: workspace.cwd,
+				paths,
+				definition: { ...inheritedDefinition, tools: ["read", "child_hook"] },
+				selection: { model: selectedModel, thinking: "off" },
+				scopedModels: [{ model: selectedModel }],
+				parentDepth: 0,
+				maximumDepth: 2,
+				allowAgents: false,
+				projectTrusted: true,
+				expectedSessionId: childSessionId,
+				agentDir: workspace.agentDir
+			})
+			expect(reopened.session.sessionId).toBe(childSessionId)
+			reopened.dispose()
+			delete testGlobals.__lovelyChildHookStarted
 
 			const excludedPaths = await reserveTaskStorage(await ensureParentStorage(workspace.cwd, "parent-session"), () => "a_87654321")
 			await initializeRetainedLogs(excludedPaths)

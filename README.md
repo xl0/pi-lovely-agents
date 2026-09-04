@@ -15,6 +15,7 @@ configuration, retained task inspection, and the management UI are available.
 
 - `agent_roster` — list effective Agent Definitions, model choices, diagnostics,
   and delegation depth
+- `agent` — create a durable Agent Session and start its initial run
 - `task_list` — list every durable direct task owned by this Pi session
 - `task_output` — read or wait for retained task output
 

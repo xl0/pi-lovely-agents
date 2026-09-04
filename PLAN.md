@@ -670,19 +670,21 @@ Tests inspect selection failures, depth/tool policy, prompt composition,
 persistent paths, context inclusion/exclusion, extension loading/startup,
 managed depth, model/thinking, and scoped choices.
 
-#### [ ] 3.3 `agent` and initial run lifecycle
+#### [x] 3.3 `agent` and initial run lifecycle
 
-Register `agent`, validate all input before acceptance, durably create metadata
-and logs, then enqueue the first run. Implement wait-from-acceptance semantics,
-`waitMs: 0`, detachment without restart, synchronous cancellation ownership,
-structured accepted failures, and first-writer-wins completion/stop races.
+Registered `agent` with fresh Definition/model validation before filesystem
+acceptance. Accepted work durably records metadata and run/input boundaries,
+queues through the global coordinator, streams assistant/tool events into
+retained logs, and settles completion/stop races once.
 
-Stream session events into retained logs. Dispose idle child runtimes and
-cold-load the same `session.jsonl` later without changing its Pi UUID.
+Waiting starts at durable acceptance. Immediate and timed detachment leave the
+same run executing; pre-detach cancellation stops it while later parent aborts
+do not. Results include bounded output and direct-task inventory. Idle runtimes
+dispose, and the persistent Pi UUID reopens from the retained `session.jsonl`.
 
-Done when integration tests cover success/failure before timeout, queue-time
-detachment, immediate detach, cancellation before/after detach, log contents,
-cache-stable cold loading, and rich creation results.
+Tests cover synchronous success/failure, queue-time and immediate detachment,
+cancellation, post-detach completion, retained assistant/tool output, private
+session creation, and cache-stable reopening.
 
 #### [ ] 3.4 Parent lifecycle and restart reconciliation
 

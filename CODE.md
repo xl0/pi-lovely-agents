@@ -15,6 +15,8 @@ implemented. In-process scheduling and execution are next.
   gates, and runtime bindings
 - `extensions/lovely-agents/child-session.ts`: fixed child configuration,
   Definition-owned prompts, and persistent Pi SDK sessions
+- `extensions/lovely-agents/agent.ts`: `agent` creation tool and initial-run
+  lifecycle
 - `extensions/lovely-agents/config.ts`: scoped config validation and searchable
   model selection
 - `extensions/lovely-agents/definitions.ts`: fresh, trust-aware Definition
@@ -92,6 +94,15 @@ body with active tool metadata, Pi guidelines, append resources, optional
 AGENTS/CLAUDE context, skills, and cwd before ordinary extension hooks.
 Session-scoped depth is registered before extension startup and removed on
 disposal.
+
+`agent` validates Definition, depth, model, label, and prompt before reserving
+storage. Durable acceptance records queued metadata plus run/input log
+boundaries before global scheduling. The resident runtime moves queued work to
+running, writes assistant/tool events serially, and commits one terminal
+outcome across completion/stop races. Synchronous waits lend managed parent
+permits; zero or expired waits only stamp detachment and never restart work.
+Accepted child failures are task outcomes, not failed tool calls. Idle child
+runtimes dispose while their private Pi session file remains cold-loadable.
 
 `/lovely-agents` opens one selector for fresh Agent Definitions, durable tasks,
 developer fixtures, and the scoped config editor. Fixture actions are always

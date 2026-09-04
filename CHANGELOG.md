@@ -15,3 +15,5 @@
   and cooperative permit lending.
 - Add persistent in-process Pi child-session construction with Definition-owned
   prompts, fixed model/tool policy, extensions, context, and depth gating.
+- Add the durable `agent` creation tool with scheduled initial runs, retained
+  event logs, bounded waiting, detachment, and cancellation.

@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent"
 import { ScopedConfigEditor } from "@xl0/pi-lovely-config"
+import { registerAgentTool } from "./agent.js"
 import { type AgentsConfig, type AgentsConfigWarning, createAgentsConfigSpec, defaultAgentsConfig, resolveAgentsConfig } from "./config.js"
 import { getAgentCoordinator } from "./coordinator.js"
 import { discoverAgentDefinitions } from "./definitions.js"
@@ -97,6 +98,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		getConfigWarnings: () => configWarnings,
 		getDepth: () => currentDepth
 	})
+	registerAgentTool(pi, { getConfig: () => configValue })
 	registerTaskTools(pi, { beforeParentLeaseRelease: stopFixtureTimersFor })
 }
 
