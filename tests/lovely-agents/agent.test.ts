@@ -116,6 +116,54 @@ describe("agent tool", () => {
 		})
 	})
 
+	test("suspends terminal provider limits and closes only that model tuple", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const fake = fakeChild(async child => child.assistantError("HTTP 429 too many requests"))
+			const blocked = fakeChild(async child => child.assistant("unexpected"))
+			const children = [fake.handle, blocked.handle]
+			const tools = captureAgentTools(workspace.agentDir, async () => {
+				const child = children.shift()
+				if (!child) throw new Error("No fake child remains")
+				return child
+			})
+			const coordinator = getAgentCoordinator()
+			const tuple = { provider: selectedModel.provider, model: selectedModel.id }
+			coordinator.openTuple(tuple)
+			try {
+				const result = await tools.agent.execute(
+					"create",
+					{ definition: "reviewer", label: "Limited review", prompt: "Inspect" },
+					undefined,
+					taskContext(workspace.cwd)
+				)
+				const details = result.details as AgentCreationResult
+				expect(details).toMatchObject({ state: "suspended", latestOutcome: null, detached: false })
+				expect(coordinator.isTupleOpen(tuple)).toBe(false)
+				const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
+				const loaded = await readTaskMetadata(paths)
+				expect(loaded.status === "ok" ? loaded.metadata.activeRun?.state : null).toBe("suspended")
+				expect(fake.disposed).toBe(false)
+
+				const queued = await tools.agent.execute(
+					"queued",
+					{ definition: "reviewer", label: "Blocked review", prompt: "Inspect later", waitMs: 0 },
+					undefined,
+					taskContext(workspace.cwd)
+				)
+				expect(queued.details).toMatchObject({ state: "queued", detached: true })
+				expect(blocked.prompts).toHaveLength(0)
+				await tools.stop.execute("stop-queued", { id: (queued.details as AgentCreationResult).id }, undefined, taskContext(workspace.cwd))
+
+				const stopped = await tools.stop.execute("stop", { id: details.id }, undefined, taskContext(workspace.cwd))
+				expect(stopped.details).toMatchObject({ state: "idle", latestOutcome: "stopped" })
+			} finally {
+				coordinator.openTuple(tuple)
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
+			}
+		})
+	})
+
 	test("stops accepted synchronous work when the caller aborts", async () => {
 		await withTempWorkspace(async workspace => {
 			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
@@ -765,12 +813,18 @@ type FakeChild = {
 	steers: string[]
 	steerExpansions: Array<boolean | undefined>
 	assistant(text: string): void
+	assistantError(errorMessage: string): void
 	tool(name: string, args: unknown, resultValue: unknown): void
 }
 
 function fakeChild(runPrompt: (child: FakeChild) => Promise<void>, deliverSteers = true): FakeChild {
 	const listeners = new Set<(event: AgentSessionEvent) => void>()
-	const messages: Array<{ role: "assistant"; content: Array<{ type: "text"; text: string }>; stopReason: "stop" }> = []
+	const messages: Array<{
+		role: "assistant"
+		content: Array<{ type: "text"; text: string }>
+		stopReason: "stop" | "error"
+		errorMessage?: string
+	}> = []
 	const aborted = deferred<void>()
 	let disposed = false
 	let streaming = false
@@ -787,6 +841,11 @@ function fakeChild(runPrompt: (child: FakeChild) => Promise<void>, deliverSteers
 		},
 		assistant(text: string) {
 			const message = { role: "assistant" as const, content: [{ type: "text" as const, text }], stopReason: "stop" as const }
+			messages.push(message)
+			for (const listener of listeners) listener({ type: "message_end", message } as unknown as AgentSessionEvent)
+		},
+		assistantError(errorMessage: string) {
+			const message = { role: "assistant" as const, content: [], stopReason: "error" as const, errorMessage }
 			messages.push(message)
 			for (const listener of listeners) listener({ type: "message_end", message } as unknown as AgentSessionEvent)
 		},

@@ -735,16 +735,14 @@ tool results use bounded head/tail previews with full Ctrl+O expansion.
 
 ### [ ] 5. Quota recovery and notifications
 
-#### [ ] 5.1 Provider-limit classification and tuple gates
+#### [x] 5.1 Provider-limit classification and tuple gates
 
-Classify terminal quota/rate/billing/`ResourceExhausted` failures after Pi retry
-handling while excluding overload, 5xx, network, and timeout failures. Suspend
-the failed run, close its exact provider/model gate, preserve acceptance order,
-and let already-running siblings drain.
-
-Done when provider-fixture tests cover every included/excluded error family,
-independent tuples, queued/new work, sibling draining, repeated suspension, and
-restart-to-interrupted conversion.
+Terminal quota/rate/billing/`ResourceExhausted` failures now suspend their
+logical run after Pi retry handling and close the exact provider/model gate.
+Overload, 5xx, network, and timeout failures remain ordinary failures. Closed
+tuples retain queued acceptance order while running siblings drain and other
+tuples continue. Provider matrices, runtime suspension/new-work blocking,
+sibling draining, independent tuples, and restart reconciliation are tested.
 
 #### [ ] 5.2 Recovery triggers
 

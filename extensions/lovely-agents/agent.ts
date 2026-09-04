@@ -15,6 +15,7 @@ import { resolveConfiguredModels } from "./config.js"
 import { type AgentReservation, getAgentCoordinator, type ModelTuple, type ResidentAgent, type ResidentInputResult } from "./coordinator.js"
 import { type AgentDefinition, discoverAgentDefinitions } from "./definitions.js"
 import { stopOwnedTaskTree, stopTask } from "./lifecycle.js"
+import { isProviderLimitError } from "./provider-limits.js"
 import { renderExpandableResult } from "./rendering.js"
 import {
 	acquireParentLease,
@@ -390,6 +391,7 @@ class AgentRuntime implements ResidentAgent {
 	#disposed = false
 	#awaitingPrimaryInput = false
 	#lastAssistantOutcome: NonNullable<TaskMetadata["latestOutcome"]> | undefined
+	#providerLimitReached = false
 
 	constructor(paths: TaskStoragePaths, child: ChildSessionHandle, metadata: TaskMetadata, expandPromptTemplates: boolean) {
 		this.#paths = paths
@@ -557,7 +559,10 @@ class AgentRuntime implements ResidentAgent {
 			while (!this.#stopRequested) {
 				const activeRun = await this.nextRun()
 				if (!activeRun) break
-				await this.executeRun(activeRun)
+				if (await this.executeRun(activeRun)) {
+					await waitForAbort(this.#scheduleAbort.signal)
+					break
+				}
 			}
 		} finally {
 			this.dispose()
@@ -593,10 +598,12 @@ class AgentRuntime implements ResidentAgent {
 		return selected.run
 	}
 
-	private async executeRun(run: NonNullable<TaskMetadata["activeRun"]>): Promise<void> {
+	private async executeRun(run: NonNullable<TaskMetadata["activeRun"]>): Promise<boolean> {
 		let outcome: NonNullable<TaskMetadata["latestOutcome"]> = "failed"
 		this.#lastAssistantOutcome = undefined
+		this.#providerLimitReached = false
 		let settled = false
+		let suspended = false
 		try {
 			await this.reserveRun(run).run(async () => {
 				if (this.#stopRequested) return
@@ -638,6 +645,10 @@ class AgentRuntime implements ResidentAgent {
 					await this.#eventWrites
 					outcome = this.#stopRequested ? "stopped" : "failed"
 				}
+				if (!this.#stopRequested && this.#providerLimitReached) {
+					suspended = await this.suspend(run)
+					if (suspended) return
+				}
 				const promoted = await this.settle(run, outcome, this.#stopRequested)
 				settled = true
 				if (promoted) this.reserveRun(promoted).activate()
@@ -647,10 +658,30 @@ class AgentRuntime implements ResidentAgent {
 			outcome = this.#stopRequested ? "stopped" : "failed"
 		}
 		this.#reservations.delete(run.id)
-		if (!settled) {
+		if (!settled && !suspended) {
 			const promoted = await this.settle(run, outcome, this.#stopRequested)
 			if (promoted) this.reserveRun(promoted).activate()
 		}
+		return suspended
+	}
+
+	private async suspend(run: NonNullable<TaskMetadata["activeRun"]>): Promise<boolean> {
+		getAgentCoordinator().closeTuple(this.#tuple)
+		let won = false
+		const timestamp = Date.now()
+		await mutateTaskMetadata(this.#paths, metadata => {
+			const activeRun = metadata.activeRun
+			if (!activeRun || activeRun.id !== run.id) return metadata
+			won = true
+			return {
+				...metadata,
+				state: "suspended",
+				activeRun: { ...activeRun, state: "suspended" },
+				updatedAt: timestamp
+			}
+		})
+		if (won && run.id === this.#initialRunId) this.#initialCompletion.resolve(undefined)
+		return won
 	}
 
 	private async detach(): Promise<void> {
@@ -726,6 +757,7 @@ class AgentRuntime implements ResidentAgent {
 		}
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantOutcome = event.message.stopReason === "error" || event.message.stopReason === "aborted" ? "failed" : "succeeded"
+			this.#providerLimitReached = event.message.stopReason === "error" && isProviderLimitError(event.message.errorMessage)
 			const content = event.message.content
 				.filter(part => part.type === "text")
 				.map(part => part.text)
@@ -930,6 +962,11 @@ function renderUnknown(value: unknown): string {
 
 function abortError(signal: AbortSignal): Error {
 	return signal.reason instanceof Error ? signal.reason : new Error("Agent creation aborted")
+}
+
+function waitForAbort(signal: AbortSignal): Promise<void> {
+	if (signal.aborted) return Promise.resolve()
+	return new Promise(resolve => signal.addEventListener("abort", () => resolve(), { once: true }))
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve(value: T | PromiseLike<T>): void } {

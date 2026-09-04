@@ -109,6 +109,12 @@ Inactive reservations hold Follow-up acceptance order without consuming
 capacity; atomic promotion activates the next reservation before the current
 permit is released.
 
+Terminal quota, billing, budget, usage-limit, rate-limit/429, and
+`ResourceExhausted` assistant errors suspend the active run and close its exact
+provider/model tuple gate. Overload, 5xx, network, and timeout failures remain
+ordinary failed runs. Closing a gate blocks queued and newly accepted work on
+that tuple without aborting running siblings or delaying other tuples.
+
 Child sessions use Pi's SDK in-process and own the task's retained
 `session.jsonl`. Selection follows call, Definition, then parent precedence.
 Explicit Definition tools are hard allowlists; omitted tools preserve normal

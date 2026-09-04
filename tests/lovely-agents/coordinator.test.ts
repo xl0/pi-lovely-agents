@@ -134,6 +134,34 @@ describe("Agent scheduling", () => {
 		alphaPermit.release()
 	})
 
+	test("closes a tuple for new work while running siblings drain", async () => {
+		const coordinator = createAgentCoordinator(2)
+		const first = await coordinator.acquire({ tuple: alpha })
+		const sibling = await coordinator.acquire({ tuple: alpha })
+		coordinator.closeTuple(alpha)
+
+		let blockedStarted = false
+		const blockedPromise = coordinator.acquire({ tuple: alpha }).then(permit => {
+			blockedStarted = true
+			return permit
+		})
+		first.release()
+		await tick()
+		expect(blockedStarted).toBe(false)
+		expect(coordinator.activeCount).toBe(1)
+
+		const independent = await coordinator.acquire({ tuple: beta })
+		expect(coordinator.activeCount).toBe(2)
+		independent.release()
+		sibling.release()
+		expect(coordinator.activeCount).toBe(0)
+
+		coordinator.openTuple(alpha)
+		const blocked = await blockedPromise
+		expect(blockedStarted).toBe(true)
+		blocked.release()
+	})
+
 	test("removes cancelled capacity waiters", async () => {
 		const coordinator = createAgentCoordinator(1)
 		const active = await coordinator.acquire({ tuple: alpha })
