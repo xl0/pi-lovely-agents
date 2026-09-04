@@ -80,6 +80,13 @@ export async function stopOwnedTaskTree(cwd: string, parentSessionId: string): P
 	await stopPartition(cwd, parentSessionId, new Set())
 }
 
+/** Stops one retained task through its resident runtime when available. */
+export async function stopTask(paths: TaskStoragePaths): Promise<void> {
+	const resident = getAgentCoordinator().getResident(paths.taskDirectory)
+	if (resident) await resident.stop()
+	else await settleStopped(paths)
+}
+
 async function stopPartition(cwd: string, parentSessionId: string, visited: Set<string>): Promise<void> {
 	if (visited.has(parentSessionId)) return
 	visited.add(parentSessionId)
@@ -93,9 +100,7 @@ async function stopPartition(cwd: string, parentSessionId: string, visited: Set<
 			const loaded = await readTaskMetadata(paths)
 			if (loaded.status !== "ok") continue
 			try {
-				const resident = getAgentCoordinator().getResident(paths.taskDirectory)
-				if (resident) await resident.stop()
-				else await settleStopped(paths)
+				await stopTask(paths)
 			} catch (error) {
 				errors.push(error)
 			}

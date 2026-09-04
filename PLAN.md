@@ -724,16 +724,14 @@ queue limits/positions, concurrent acceptance, sequential success/failure,
 literal and duplicate Steers, delivery omission, completion races, fixed cold
 configuration, and queued counts.
 
-#### [ ] 4.2 Stop and discard
+#### [x] 4.2 Stop and discard
 
-Implement idempotent `task_stop` and `task_discard`. Stop aborts/removes active
-or queued work, clears Follow-ups, preserves the reusable session, and resolves
-completion races once. Discard stops first, durably tombstones, hides from
-listing, rejects later I/O, and retains files.
-
-Done when tests cover queued/running/suspended/idle calls, repeated calls,
-stop/completion ordering, descendant behavior, queue clearing, tombstone
-visibility, and retained paths.
+Added idempotent `task_stop` and `task_discard`: first-writer-wins settlement,
+Follow-up clearing, recursive descendant stop, permanent retained tombstones,
+and hidden/rejected post-discard model I/O. Task lists group by state with
+relative times, retained output is a flat tagged user/agent stream without
+per-line indentation, and tool activity headers expose concise arguments. Long
+tool results use bounded head/tail previews with full Ctrl+O expansion.
 
 ### [ ] 5. Quota recovery and notifications
 

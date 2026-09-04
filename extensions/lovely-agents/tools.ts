@@ -2,11 +2,13 @@ import type { Dirent } from "node:fs"
 import { readdir } from "node:fs/promises"
 import { dirname } from "node:path"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { Text } from "@earendil-works/pi-tui"
 import { Type } from "typebox"
 import type { AgentsConfig, AgentsConfigWarning, ModelChoice } from "./config.js"
 import { resolveConfiguredModels } from "./config.js"
 import { getAgentCoordinator } from "./coordinator.js"
 import { type AgentDefinition, discoverAgentDefinitions } from "./definitions.js"
+import { renderExpandableResult } from "./rendering.js"
 import {
 	acquireParentLease,
 	countRetainedOutputLines,
@@ -125,6 +127,12 @@ export function registerRosterTool(
 		promptSnippet: "List available Lovely Agent definitions and model choices",
 		promptGuidelines: ["Call agent_roster before delegating work and after editing Agent Definition files."],
 		parameters: Type.Object({}),
+		renderCall(_args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("agent_roster")), 0, 0)
+		},
+		renderResult(result, { expanded }, theme) {
+			return renderExpandableResult(result, expanded, theme)
+		},
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			const config = options.getConfig()
 			const resolvedModels = await resolveConfiguredModels(config, ctx)
@@ -236,6 +244,12 @@ export function registerTaskTools(
 		promptSnippet: "List durable tasks owned by this session",
 		promptGuidelines: ["Use task_list to inspect existing work before starting duplicate agents."],
 		parameters: Type.Object({}, { additionalProperties: false }),
+		renderCall(_args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("task_list")), 0, 0)
+		},
+		renderResult(result, { expanded }, theme) {
+			return renderExpandableResult(result, expanded, theme)
+		},
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			return loadTaskList(ctx.cwd, ctx.sessionManager.getSessionId())
 		}
@@ -256,6 +270,23 @@ export function registerTaskTools(
 			},
 			{ additionalProperties: false }
 		),
+		renderCall(args, theme) {
+			const range = [
+				args.offset ? `offset=${args.offset}` : "",
+				args.limit ? `limit=${args.limit}` : "",
+				args.waitMs ? `wait=${args.waitMs}ms` : ""
+			]
+				.filter(Boolean)
+				.join(" ")
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("task_output"))}${args.id ? ` ${theme.fg("muted", args.id)}` : ""}${range ? ` ${theme.fg("dim", range)}` : ""}`,
+				0,
+				0
+			)
+		},
+		renderResult(result, { expanded }, theme) {
+			return renderExpandableResult(result, expanded, theme)
+		},
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const parentSessionId = ctx.sessionManager.getSessionId()
 			const lease = await acquireParentLease(ctx.cwd, parentSessionId)
@@ -319,12 +350,11 @@ export function buildTaskOutputToolResult(
 	const result: TaskOutputResult = { id, queuedFollowUps, ...output }
 	const range = result.returnedLines > 0 ? `${result.startLine}-${result.endLine}/${result.totalLines}` : `none/${result.totalLines}`
 	const lines = [
-		`task: ${result.id}`,
-		`state: ${result.state}; queued_followups: ${result.queuedFollowUps}; lines: ${range}`,
-		`source: ${yamlScalar(result.paths.output)}`,
-		...(result.timedOut ? ["timed_out: true"] : []),
-		"output:",
-		result.text || "(no output)"
+		`task_output state=${result.state} queued=${result.queuedFollowUps} lines=${range}`,
+		`source=${yamlScalar(result.paths.output)}`,
+		...(result.timedOut ? ["timed_out=true"] : []),
+		"",
+		result.text || "(no events)"
 	]
 	return { content: [{ type: "text", text: lines.join("\n") }], details: result }
 }
@@ -471,36 +501,46 @@ function compareTaskRows(left: TaskListRow, right: TaskListRow): number {
 
 function renderTaskListResult(result: TaskListResult): string {
 	const lines = result.tasks.length === 0 ? ["tasks: []"] : ["tasks:"]
-	for (const task of result.tasks) {
-		lines.push(`  - id: ${task.id}`)
-		lines.push(`    kind: ${task.kind}`)
-		lines.push(`    label: ${yamlScalar(task.label)}`)
-		lines.push(`    definition: ${task.definition}`)
-		lines.push(`    state: ${task.state}`)
-		lines.push(`    outcome: ${task.latestOutcome ?? "none"}`)
-		lines.push(`    model: ${yamlScalar(task.model)}`)
-		lines.push(`    thinking: ${task.thinking}`)
-		lines.push(`    created_at: ${task.createdAt}`)
-		lines.push(`    updated_at: ${task.updatedAt}`)
-		if (task.acceptedAt !== null) lines.push(`    accepted_at: ${task.acceptedAt}`)
-		if (task.startedAt !== null) lines.push(`    started_at: ${task.startedAt}`)
-		if (task.detachedAt !== null) lines.push(`    detached_at: ${task.detachedAt}`)
-		lines.push(`    queued_followups: ${task.queuedFollowUps}`)
-		lines.push(`    output_lines: ${task.outputLines ?? "unknown"}`)
-		lines.push(`    descendants: ${renderDescendantSummary(task.descendants)}`)
-		lines.push(`    task_dir: ${yamlScalar(dirname(task.paths.output))}`)
+	const now = Date.now()
+	for (const state of Object.keys(TASK_STATE_ORDER) as TaskMetadata["state"][]) {
+		const tasks = result.tasks.filter(task => task.state === state)
+		if (tasks.length === 0) continue
+		lines.push(`  ${state}:`)
+		for (const task of tasks) {
+			lines.push(`    - ${task.kind} ${task.definition} ${task.id}: ${yamlScalar(task.label)}`)
+			if (state === "idle" || state === "interrupted") lines.push(`      outcome: ${task.latestOutcome ?? "none"}`)
+			lines.push(`      model: ${yamlScalar(`${task.model}:${task.thinking}`)}`)
+			lines.push(`      queued_followups: ${task.queuedFollowUps}`)
+			lines.push(`      output_lines: ${task.outputLines ?? "unknown"}`)
+			if (task.descendants.total > 0) lines.push(`      descendants: ${renderDescendantSummary(task.descendants)}`)
+			lines.push(`      created: ${relativeTime(task.createdAt, now)}`)
+			lines.push(`      updated: ${relativeTime(task.updatedAt, now)}`)
+			lines.push(`      dir: ${yamlScalar(dirname(task.paths.output))}`)
+		}
 	}
 	if (result.diagnostics.length > 0) {
 		lines.push("diagnostics:")
 		for (const diagnostic of result.diagnostics) {
-			lines.push(`  - code: ${diagnostic.code}`)
-			lines.push(`    message: ${yamlScalar(diagnostic.message)}`)
+			lines.push(`  - ${diagnostic.code}${diagnostic.id ? ` ${diagnostic.id}` : ""}: ${yamlScalar(diagnostic.message)}`)
 			lines.push(`    path: ${yamlScalar(diagnostic.path)}`)
-			if (diagnostic.id) lines.push(`    id: ${diagnostic.id}`)
 		}
 	}
-	lines.push(`total: ${result.total}`)
 	return lines.join("\n")
+}
+
+function relativeTime(timestamp: number, now: number): string {
+	let seconds = Math.floor(Math.max(0, now - timestamp) / 1_000)
+	if (seconds === 0) return "now"
+	if (seconds < 60) return `${seconds}s ago`
+	const minutes = Math.floor(seconds / 60)
+	seconds %= 60
+	if (minutes < 60) return `${minutes}m${seconds ? `${seconds}s` : ""} ago`
+	const hours = Math.floor(minutes / 60)
+	const remainingMinutes = minutes % 60
+	if (hours < 24) return `${hours}h${remainingMinutes ? `${remainingMinutes}m` : ""} ago`
+	const days = Math.floor(hours / 24)
+	const remainingHours = hours % 24
+	return `${days}d${remainingHours ? `${remainingHours}h` : ""} ago`
 }
 
 function renderDescendantSummary(summary: DescendantSummary): string {

@@ -19,6 +19,7 @@ import {
 	releaseParentLeaseFor,
 	taskStoragePaths
 } from "../../extensions/lovely-agents/state.js"
+import { loadTaskList } from "../../extensions/lovely-agents/tools.js"
 import { definitionSource, withTempWorkspace } from "./test-helpers.js"
 
 const selectedModel = model("anthropic", "sonnet")
@@ -58,6 +59,7 @@ describe("agent tool", () => {
 			expect(result.content[0]?.text).not.toContain("tasks:")
 			expect(await readFile(resolve(workspace.cwd, details.output.paths.activity), "utf8")).toContain("## read")
 			expect(fake.prompts).toEqual([{ text: "Inspect this change", expandPromptTemplates: false }])
+			while (!fake.disposed) await Bun.sleep(1)
 			expect(fake.disposed).toBe(true)
 			expect(getAgentCoordinator().residentCount).toBe(0)
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
@@ -210,8 +212,8 @@ describe("task_input tool", () => {
 			await waitForRunCount(paths, 3)
 			expect(fake.prompts.map(prompt => prompt.text)).toEqual(["initial", "follow one", "follow two"])
 			const output = await readFile(paths.output, "utf8")
-			expect(output).toContain("## Run 2 (followup)")
-			expect(output).toContain("### Follow-up")
+			expect(output).toContain("<run 2 followup>")
+			expect(output).toContain("<user>\nfollow one")
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
 		})
 	})
@@ -280,7 +282,7 @@ describe("task_input tool", () => {
 			finish.resolve(undefined)
 			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
 			await waitForRunCount(paths, 1)
-			expect(await readFile(paths.output, "utf8")).toContain("### Steer")
+			expect(await readFile(paths.output, "utf8")).toContain("<steer>\nchange direction")
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
 		})
 	})
@@ -311,7 +313,7 @@ describe("task_input tool", () => {
 			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
 			await waitForRunCount(paths, 1)
 			const output = await readFile(paths.output, "utf8")
-			expect(output.match(/### Steer/g)).toHaveLength(2)
+			expect(output.match(/<steer>/g)).toHaveLength(2)
 			expect(output.match(/same steer/g)).toHaveLength(2)
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
 		})
@@ -571,6 +573,120 @@ describe("task_input tool", () => {
 	})
 })
 
+describe("task lifecycle controls", () => {
+	test("cancels queued work before it starts", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const coordinator = getAgentCoordinator()
+			coordinator.setMaxConcurrency(1)
+			const blocker = await coordinator.acquire({ tuple: { provider: "other", model: "busy" } })
+			const fake = fakeChild(async child => child.assistant("unexpected"))
+			const tools = captureAgentTools(workspace.agentDir, async () => fake.handle, { ...config, maxConcurrency: 1 })
+			const ctx = taskContext(workspace.cwd)
+			try {
+				const created = await tools.agent.execute(
+					"create",
+					{ definition: "reviewer", label: "Review", prompt: "wait", waitMs: 0 },
+					undefined,
+					ctx
+				)
+				const id = (created.details as AgentCreationResult).id
+				const stopped = await tools.stop.execute("stop", { id }, undefined, ctx)
+				expect(stopped.details).toMatchObject({ id, state: "idle", latestOutcome: "stopped" })
+				expect(fake.prompts).toHaveLength(0)
+			} finally {
+				blocker.release()
+				coordinator.setMaxConcurrency(2)
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
+			}
+		})
+	})
+
+	test("stops running work, clears Follow-ups, and is idempotent", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const fake = fakeChild(async child => {
+				await child.aborted
+				throw new Error("aborted")
+			})
+			const tools = captureAgentTools(workspace.agentDir, async () => fake.handle)
+			const ctx = taskContext(workspace.cwd)
+			const created = await tools.agent.execute(
+				"create",
+				{ definition: "reviewer", label: "Review", prompt: "wait", waitMs: 0 },
+				undefined,
+				ctx
+			)
+			const id = (created.details as AgentCreationResult).id
+			while (fake.prompts.length === 0) await Bun.sleep(1)
+			await tools.input.execute("follow", { id, content: "later" }, undefined, ctx)
+
+			const first = await tools.stop.execute("stop", { id }, undefined, ctx)
+			expect(first.details).toMatchObject({ id, action: "stop", state: "idle", latestOutcome: "stopped", queuedFollowUps: 0 })
+			const second = await tools.stop.execute("stop-again", { id }, undefined, ctx)
+			expect(second.details).toMatchObject({ id, state: "idle", latestOutcome: "stopped", queuedFollowUps: 0 })
+			expect(fake.prompts).toHaveLength(1)
+			await releaseParentLeaseFor(workspace.cwd, "parent-session")
+		})
+	})
+
+	test("preserves an idle completion and settles retained suspended work", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const fake = fakeChild(async child => child.assistant("done"))
+			const tools = captureAgentTools(workspace.agentDir, async () => fake.handle)
+			const ctx = taskContext(workspace.cwd)
+			const created = await tools.agent.execute("create", { definition: "reviewer", label: "Review", prompt: "finish" }, undefined, ctx)
+			const details = created.details as AgentCreationResult
+			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
+			const idle = await tools.stop.execute("stop-idle", { id: details.id }, undefined, ctx)
+			expect(idle.details).toMatchObject({ state: "idle", latestOutcome: "succeeded" })
+
+			await mutateTaskMetadata(paths, metadata => ({
+				...metadata,
+				state: "suspended",
+				activeRun: {
+					id: "r_1111111111111111",
+					sequence: 2,
+					kind: "followup",
+					state: "suspended",
+					input: "retry",
+					acceptedAt: Date.now(),
+					startedAt: Date.now()
+				},
+				lastRunSequence: 3,
+				queuedFollowUps: [{ id: "r_2222222222222222", sequence: 3, content: "later", acceptedAt: Date.now() }],
+				updatedAt: Date.now()
+			}))
+			const suspended = await tools.stop.execute("stop-suspended", { id: details.id }, undefined, ctx)
+			expect(suspended.details).toMatchObject({ state: "idle", latestOutcome: "stopped", queuedFollowUps: 0 })
+			await releaseParentLeaseFor(workspace.cwd, "parent-session")
+		})
+	})
+
+	test("discards permanently without deleting retained files", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const fake = fakeChild(async child => child.assistant("done"))
+			const tools = captureAgentTools(workspace.agentDir, async () => fake.handle)
+			const ctx = taskContext(workspace.cwd)
+			const created = await tools.agent.execute("create", { definition: "reviewer", label: "Review", prompt: "finish" }, undefined, ctx)
+			const details = created.details as AgentCreationResult
+
+			const discarded = await tools.discard.execute("discard", { id: details.id }, undefined, ctx)
+			expect(discarded.details).toMatchObject({ id: details.id, action: "discard", discarded: true })
+			const again = await tools.discard.execute("discard-again", { id: details.id }, undefined, ctx)
+			expect(again.details).toMatchObject({ id: details.id, discarded: true })
+			const listed = await loadTaskList(workspace.cwd, "parent-session")
+			expect(listed.details.tasks).toHaveLength(0)
+			expect(await readFile(resolve(workspace.cwd, details.output.paths.output), "utf8")).toContain("done")
+			await expect(tools.input.execute("input", { id: details.id, content: "later" }, undefined, ctx)).rejects.toThrow("has been discarded")
+			await expect(tools.stop.execute("stop", { id: details.id }, undefined, ctx)).rejects.toThrow("has been discarded")
+			await releaseParentLeaseFor(workspace.cwd, "parent-session")
+		})
+	})
+})
+
 type CapturedAgentTool = {
 	execute(
 		toolCallId: string,
@@ -583,6 +699,8 @@ type CapturedAgentTool = {
 type CapturedAgentTools = {
 	agent: CapturedAgentTool
 	input: CapturedAgentTool
+	stop: CapturedAgentTool
+	discard: CapturedAgentTool
 }
 
 function captureAgentTool(agentDir: string, child: ChildSessionHandle, toolConfig: AgentsConfig = config): CapturedAgentTool {
@@ -618,8 +736,10 @@ function captureAgentTools(
 	})
 	const agent = captured.get("agent")
 	const input = captured.get("task_input")
-	if (!agent || !input) throw new Error("agent tools were not registered")
-	return { agent, input }
+	const stop = captured.get("task_stop")
+	const discard = captured.get("task_discard")
+	if (!agent || !input || !stop || !discard) throw new Error("agent tools were not registered")
+	return { agent, input, stop, discard }
 }
 
 function taskContext(cwd: string): ExtensionContext {

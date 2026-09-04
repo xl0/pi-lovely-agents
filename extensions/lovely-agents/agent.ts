@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto"
 import { rm } from "node:fs/promises"
 import type { AgentSessionEvent, ExtensionAPI, ExtensionContext, ScopedModel } from "@earendil-works/pi-coding-agent"
+import { Text } from "@earendil-works/pi-tui"
 import { Type } from "typebox"
 import {
 	type ChildSessionHandle,
@@ -13,6 +14,8 @@ import type { AgentsConfig } from "./config.js"
 import { resolveConfiguredModels } from "./config.js"
 import { type AgentReservation, getAgentCoordinator, type ModelTuple, type ResidentAgent, type ResidentInputResult } from "./coordinator.js"
 import { type AgentDefinition, discoverAgentDefinitions } from "./definitions.js"
+import { stopOwnedTaskTree, stopTask } from "./lifecycle.js"
+import { renderExpandableResult } from "./rendering.js"
 import {
 	acquireParentLease,
 	appendActivityLog,
@@ -26,6 +29,7 @@ import {
 	readRetainedOutput,
 	readTaskMetadata,
 	reserveTaskStorage,
+	retainedPaths,
 	TASK_METADATA_VERSION,
 	TASK_REFERENCE_PATTERN,
 	type TaskMetadata,
@@ -96,6 +100,16 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 			},
 			{ additionalProperties: false }
 		),
+		renderCall(args, theme) {
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("agent"))}${args.definition ? ` ${theme.fg("muted", args.definition)}` : ""}${args.label ? ` ${theme.fg("dim", JSON.stringify(args.label))}` : ""}`,
+				0,
+				0
+			)
+		},
+		renderResult(result, { expanded }, theme) {
+			return renderExpandableResult(result, expanded, theme)
+		},
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (signal?.aborted) throw abortError(signal)
 			const config = options.getConfig()
@@ -227,6 +241,16 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 			},
 			{ additionalProperties: false }
 		),
+		renderCall(args, theme) {
+			const delivery = args.delivery ?? "followup"
+			const content = args.content ?? ""
+			const preview = content.length > 60 ? `${content.slice(0, 57)}...` : content
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("task_input"))}${args.id ? ` ${theme.fg("muted", args.id)}` : ""} ${theme.fg("dim", `${delivery}${preview ? ` ${JSON.stringify(preview)}` : ""}`)}`,
+				0,
+				0
+			)
+		},
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (signal?.aborted) throw abortError(signal)
 			validateInput(params.content, "content", MAX_AGENT_INPUT_BYTES)
@@ -274,6 +298,74 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 			}
 		}
 	})
+
+	for (const action of ["stop", "discard"] as const) {
+		pi.registerTool({
+			name: `task_${action}`,
+			label: action === "stop" ? "Task Stop" : "Task Discard",
+			description:
+				action === "stop"
+					? "Stop active or queued work for an owned Lovely Agent task while preserving its session."
+					: "Stop and durably discard an owned Lovely Agent task while retaining its files.",
+			promptSnippet: action === "stop" ? "Stop work for a durable task" : "Discard a durable task",
+			parameters: Type.Object(
+				{ id: Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" }) },
+				{ additionalProperties: false }
+			),
+			renderCall(args, theme) {
+				return new Text(`${theme.fg("toolTitle", theme.bold(`task_${action}`))}${args.id ? ` ${theme.fg("muted", args.id)}` : ""}`, 0, 0)
+			},
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				const lease = await acquireParentLease(ctx.cwd, ctx.sessionManager.getSessionId())
+				const paths = taskStoragePaths(lease.paths, params.id)
+				let loaded = await readTaskMetadata(paths)
+				if (loaded.status === "missing") throw new Error(`Unknown Task Reference: ${params.id}`)
+				if (loaded.status === "invalid") throw new Error(loaded.diagnostic.message)
+				if (action === "stop" && loaded.metadata.discardedAt !== null) {
+					throw new Error(`Task ${params.id} has been discarded`)
+				}
+				if (loaded.metadata.discardedAt === null) {
+					await stopTask(paths)
+					if (action === "discard") {
+						const discardedAt = Date.now()
+						await mutateTaskMetadata(paths, metadata => ({
+							...metadata,
+							discardedAt,
+							queuedFollowUps: [],
+							updatedAt: discardedAt
+						}))
+						// Fence input accepted between the initial stop and tombstone.
+						await stopTask(paths)
+					}
+					await stopOwnedTaskTree(ctx.cwd, loaded.metadata.childSessionId)
+					loaded = await readTaskMetadata(paths)
+					if (loaded.status !== "ok") throw new Error(`Could not read task ${params.id}`)
+				}
+				const metadata = loaded.metadata
+				const details = {
+					id: metadata.taskRef,
+					action,
+					state: metadata.state,
+					latestOutcome: metadata.latestOutcome,
+					discarded: metadata.discardedAt !== null,
+					queuedFollowUps: metadata.queuedFollowUps.length,
+					paths: retainedPaths(paths)
+				}
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								action === "discard"
+									? `${details.id}: discarded (${details.state}; files retained)`
+									: `${details.id}: stop complete (${details.state}; outcome ${details.latestOutcome ?? "none"}; ${details.queuedFollowUps} queued)`
+						}
+					],
+					details
+				}
+			}
+		})
+	}
 }
 
 class AgentRuntime implements ResidentAgent {

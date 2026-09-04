@@ -3,8 +3,8 @@
 ## Role
 
 Pi package for durable in-process agent orchestration. Definition discovery,
-configuration, scheduled execution, retained inspection, Follow-up/Steer
-control, restart recovery, and the management UI are implemented.
+configuration, scheduled execution, retained inspection, Follow-up/Steer and
+stop/discard controls, restart recovery, and the management UI are implemented.
 
 ## Layout
 
@@ -15,8 +15,8 @@ control, restart recovery, and the management UI are implemented.
   gates, and runtime bindings
 - `extensions/lovely-agents/child-session.ts`: fixed child configuration,
   Definition-owned prompts, and persistent Pi SDK sessions
-- `extensions/lovely-agents/agent.ts`: `agent` creation tool and initial-run
-  lifecycle
+- `extensions/lovely-agents/agent.ts`: agent creation, execution, input, stop,
+  and discard tools
 - `extensions/lovely-agents/lifecycle.ts`: graceful recursive shutdown and
   restart reconciliation
 - `extensions/lovely-agents/config.ts`: scoped config validation and searchable
@@ -51,7 +51,7 @@ compact YAML-like model output. Full structured details remain available to Pi.
 
 Task state is stored under `.pi/lovely-agents/<parent-session-id>/<task-ref>/`.
 Task directories are reserved atomically with collision-checked `a_` references.
-Metadata is strictly validated against its path and v1 schema before use.
+Metadata is strictly validated against its path and v2 schema before use.
 Writes are serialized per task and use a private same-directory temporary file,
 file fsync, rename, and directory fsync. Malformed and unsupported snapshots
 remain untouched.
@@ -71,8 +71,10 @@ absent is reclaimed. Simultaneous stale reclamation is best-effort; fresh and
 live-owner acquisition remains atomic. Release verifies the ownership token
 before unlinking.
 
-`output.md` retains run/input/assistant/outcome boundaries; `activity.md`
-retains tool records with UTF-8-safe 2 KiB head/tail previews. Reads use
+`output.md` retains runs as a flat tagged user/agent event stream without
+timestamps or per-line indentation; `activity.md` retains tool records with
+bounded single-line argument headers and UTF-8-safe 2 KiB head/tail previews.
+Reads use
 1-indexed line offsets, return whole lines under the 2,000-line/50 KiB caps,
 and can long-poll active work until output size or task state changes. Retained
 paths are workspace-relative when possible; `session.jsonl` remains owned by
@@ -86,10 +88,15 @@ are returned at once. `task_output` rejects foreign/discarded tasks and exposes
 retained line ranges with optional long-polling. Semantic session shutdown
 releases the parent lease; reload keeps it.
 
-Model-visible task rendering avoids repeating structured details: list rows
-show one shared task directory, output reads show only their source file, input
-acknowledgements use one line, and agent creation omits redundant task
-inventory. Full artifact paths and metadata remain in tool `details`.
+Model-visible task rendering avoids repeating structured details. Lists group
+tasks by state, combine model/thinking, show only relative creation/update
+times, omit empty descendant summaries, and expose one task directory. Output
+reads render the selected event range and source file. Input acknowledgements
+use one line, and agent creation omits redundant task inventory. Full artifact
+paths and exact metadata remain in tool `details`. Potentially long Lovely
+Agent, roster, list, and output tool results show a ten-line head/tail preview;
+the configured `app.tools.expand` binding (Ctrl+O by default) reveals the full
+fetched result.
 
 One versioned coordinator is shared through a package-owned `globalThis`
 symbol. Its acceptance-ordered semaphore skips closed provider/model tuples,
@@ -129,6 +136,14 @@ after their user message is observed, so stop/crash can drop undelivered input.
 Non-running Steers deterministically become Follow-ups under the task mutation
 lane. Idle/interrupted tasks cold-load from the retained immutable recipe and
 expected Pi UUID, without rescanning mutable Definitions.
+
+`task_stop` aborts resident execution or cancels retained queued/suspended work,
+clears Follow-ups, recursively stops descendants, and preserves the task's
+session for later input. Completion and stop settle the active run by matching
+its durable ID, so the first transition wins. `task_discard` performs the same
+stop before writing a permanent tombstone. Discarded files remain retained,
+while listing and later model I/O hide or reject the task; repeated discard is
+idempotent.
 
 On quit/new/resume/fork, the outgoing runtime recursively stops resident and
 retained descendants before releasing exact-parent leases. Reload skips this

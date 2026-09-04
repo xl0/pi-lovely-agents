@@ -620,21 +620,36 @@ function assertMetadataForPath(paths: TaskStoragePaths, metadata: unknown): asse
 function renderOutputLogEntry(entry: OutputLogEntry): string {
 	switch (entry.type) {
 		case "run-start":
-			return `## Run ${entry.sequence} (${entry.kind})\n\nStarted: ${formatTimestamp(entry.timestamp)}\n`
+			return `<run ${entry.sequence} ${entry.kind}>\n`
 		case "input":
-			return `\n### ${entry.delivery === "initial" ? "Input" : entry.delivery === "followup" ? "Follow-up" : "Steer"}\n\nDelivered: ${formatTimestamp(entry.timestamp)}\n\n${endLine(entry.content)}`
+			return taggedBlockEntry(entry.delivery === "steer" ? "steer" : "user", entry.content)
 		case "assistant":
-			return `\n### Assistant\n\n${endLine(entry.content)}`
+			return taggedBlockEntry("agent", entry.content)
 		case "run-end":
-			return `\nOutcome: ${entry.outcome}\nEnded: ${formatTimestamp(entry.timestamp)}${entry.summary ? `\n\n${entry.summary}` : ""}\n\n---\n`
+			return `<outcome ${entry.outcome}>\n${entry.summary ? taggedBlockEntry("summary", entry.summary) : ""}\n`
 	}
+}
+
+function taggedBlockEntry(tag: string, content: string): string {
+	const normalized = content.replace(/\r\n?/g, "\n").replace(/\n+$/, "")
+	return `<${tag}>\n${normalized}\n`
 }
 
 function renderActivityLogEntry(paths: TaskStoragePaths, entry: ActivityLogEntry): string {
 	const fullOutput = entry.fullOutputPath
 		? `\nFull output: ${isAbsolute(entry.fullOutputPath) ? displayWorkspacePath(paths.workspace, entry.fullOutputPath) : entry.fullOutputPath}\n`
 		: ""
-	return `## ${entry.tool}\n\nTime: ${formatTimestamp(entry.timestamp)}\nStatus: ${entry.isError ? "error" : "ok"}\n\n### Arguments\n\n${previewActivityText(entry.arguments)}\n\n### Result\n\n${previewActivityText(entry.result)}\n${fullOutput}\n---\n`
+	const headerArguments = activityHeaderArguments(entry.arguments)
+	return `## ${entry.tool}${headerArguments ? ` ${headerArguments}` : ""}\n\nTime: ${formatTimestamp(entry.timestamp)}\nStatus: ${entry.isError ? "error" : "ok"}\n\n### Arguments\n\n${previewActivityText(entry.arguments)}\n\n### Result\n\n${previewActivityText(entry.result)}\n${fullOutput}\n---\n`
+}
+
+function activityHeaderArguments(content: string): string {
+	const singleLine = content.replace(/\s+/g, " ").trim()
+	const bytes = Buffer.from(singleLine)
+	if (bytes.length <= 160) return singleLine
+	let end = 157
+	while (end > 0 && isUtf8Continuation(bytes[end])) end--
+	return `${bytes.subarray(0, end).toString("utf8")}...`
 }
 
 function previewActivityText(content: string): string {
@@ -807,10 +822,6 @@ export function displayWorkspacePath(workspace: string, path: string): string {
 
 function formatTimestamp(timestamp: number): string {
 	return new Date(timestamp).toISOString()
-}
-
-function endLine(content: string): string {
-	return content.endsWith("\n") ? content : `${content}\n`
 }
 
 function isUtf8Continuation(byte: number | undefined): boolean {

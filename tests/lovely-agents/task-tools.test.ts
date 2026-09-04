@@ -129,7 +129,14 @@ describe("read-only task tools", () => {
 				activeLabels: ["Nested running", "Nested suspended"]
 			})
 			expect(JSON.stringify(parent?.descendants)).not.toContain("a_10000001")
-			expect(full.content[0]?.text).toContain("task_dir: .pi/lovely-agents/parent-session/a_00000001")
+			expect(full.content[0]?.text).toContain("running:")
+			expect(full.content[0]?.text).toContain('agent reviewer a_00000001: "Older running"')
+			expect(full.content[0]?.text).toContain("model: anthropic/sonnet:high")
+			expect(full.content[0]?.text).toContain("created:")
+			expect(full.content[0]?.text).toContain("updated:")
+			expect(full.content[0]?.text).toContain("dir: .pi/lovely-agents/parent-session/a_00000001")
+			expect(full.content[0]?.text).not.toContain("created_at:")
+			expect(full.content[0]?.text).not.toContain("accepted_at:")
 			expect(full.content[0]?.text).not.toContain("activity.md")
 			expect(full.content[0]?.text).not.toContain("session.jsonl")
 
@@ -182,8 +189,9 @@ describe("read-only task tools", () => {
 				totalLines: 3,
 				nextOffset: 3
 			})
+			expect(result.content[0]?.text).toContain("task_output state=running queued=1 lines=2-2/3")
 			expect(result.content[0]?.text).toContain("second\n\n[Showing lines 2-2 of 3. Use offset=3 to continue.]")
-			expect(result.content[0]?.text).toContain("source: .pi/lovely-agents/parent-session/a_00000001/output.md")
+			expect(result.content[0]?.text).toContain("source=.pi/lovely-agents/parent-session/a_00000001/output.md")
 			expect(result.content[0]?.text).not.toContain("activity.md")
 
 			await expect(captured.tools.get("task_output")?.execute("nested", { id: "a_10000001" }, undefined, ctx)).rejects.toThrow(
@@ -201,7 +209,7 @@ describe("read-only task tools", () => {
 		const result = buildTaskListToolResult({ rows, diagnostics: [] })
 		expect(result.details.tasks).toHaveLength(100)
 		expect(result.details.total).toBe(100)
-		expect(result.content[0].text).toContain(`id: ${rows[99]?.id}`)
+		expect(result.content[0].text).toContain(rows[99]?.id ?? "missing")
 	})
 
 	test("runs semantic shutdown cleanup for every replacement reason but not reload", async () => {
