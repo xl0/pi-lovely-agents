@@ -70,6 +70,31 @@ describe("Agent scheduling", () => {
 		third.release()
 	})
 
+	test("reserves acceptance order before work becomes eligible", async () => {
+		const coordinator = createAgentCoordinator(1)
+		const blocker = await coordinator.acquire({ tuple: alpha })
+		const order: string[] = []
+		const earlier = coordinator.reserve({ tuple: alpha, acceptanceOrder: coordinator.nextAcceptanceOrder() })
+		const earlierRun = earlier.run(async () => {
+			order.push("earlier")
+		})
+		const laterRun = coordinator.run({ tuple: alpha }, async () => {
+			order.push("later")
+		})
+		blocker.release()
+		await Promise.all([earlierRun, laterRun])
+		expect(order).toEqual(["earlier", "later"])
+	})
+
+	test("does not let an inactive reservation block eligible work", async () => {
+		const coordinator = createAgentCoordinator(1)
+		const reserved = coordinator.reserve({ tuple: alpha })
+		await coordinator.run({ tuple: alpha }, async () => {})
+		expect(coordinator.activeCount).toBe(0)
+		reserved.cancel()
+		expect(coordinator.queuedCount).toBe(0)
+	})
+
 	test("drains after a concurrency reduction without aborting active work", async () => {
 		const coordinator = createAgentCoordinator(2)
 		const first = await coordinator.acquire({ tuple: alpha })

@@ -1,5 +1,6 @@
 import type { Dirent } from "node:fs"
 import { readdir } from "node:fs/promises"
+import { dirname } from "node:path"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import type { AgentsConfig, AgentsConfigWarning, ModelChoice } from "./config.js"
@@ -275,7 +276,12 @@ export function registerTaskTools(
 				})
 			const shouldLend = (params.waitMs ?? 0) > 0 && isActiveState(loaded.metadata.state)
 			const output = shouldLend ? await getAgentCoordinator().withLentPermit(readOutput, signal) : await readOutput()
-			return buildTaskOutputToolResult(params.id, loaded.metadata.queuedFollowUps.length, output)
+			const refreshed = await readTaskMetadata(paths)
+			return buildTaskOutputToolResult(
+				params.id,
+				refreshed.status === "ok" ? refreshed.metadata.queuedFollowUps.length : loaded.metadata.queuedFollowUps.length,
+				output
+			)
 		}
 	})
 
@@ -314,15 +320,9 @@ export function buildTaskOutputToolResult(
 	const range = result.returnedLines > 0 ? `${result.startLine}-${result.endLine}/${result.totalLines}` : `none/${result.totalLines}`
 	const lines = [
 		`task: ${result.id}`,
-		`state: ${result.state}`,
-		`queued_followups: ${result.queuedFollowUps}`,
-		`lines: ${range}`,
-		`next_offset: ${result.nextOffset}`,
-		`timed_out: ${result.timedOut}`,
-		"paths:",
-		`  output: ${yamlScalar(result.paths.output)}`,
-		`  activity: ${yamlScalar(result.paths.activity)}`,
-		`  session: ${yamlScalar(result.paths.session)}`,
+		`state: ${result.state}; queued_followups: ${result.queuedFollowUps}; lines: ${range}`,
+		`source: ${yamlScalar(result.paths.output)}`,
+		...(result.timedOut ? ["timed_out: true"] : []),
 		"output:",
 		result.text || "(no output)"
 	]
@@ -488,10 +488,7 @@ function renderTaskListResult(result: TaskListResult): string {
 		lines.push(`    queued_followups: ${task.queuedFollowUps}`)
 		lines.push(`    output_lines: ${task.outputLines ?? "unknown"}`)
 		lines.push(`    descendants: ${renderDescendantSummary(task.descendants)}`)
-		lines.push("    paths:")
-		lines.push(`      output: ${yamlScalar(task.paths.output)}`)
-		lines.push(`      activity: ${yamlScalar(task.paths.activity)}`)
-		lines.push(`      session: ${yamlScalar(task.paths.session)}`)
+		lines.push(`    task_dir: ${yamlScalar(dirname(task.paths.output))}`)
 	}
 	if (result.diagnostics.length > 0) {
 		lines.push("diagnostics:")

@@ -2,9 +2,9 @@
 
 ## Role
 
-Pi package for durable agent orchestration. Configuration, Agent Definition
-discovery, roster inspection, and the durable storage foundation are
-implemented. In-process scheduling and execution are next.
+Pi package for durable in-process agent orchestration. Definition discovery,
+configuration, scheduled execution, retained inspection, Follow-up/Steer
+control, restart recovery, and the management UI are implemented.
 
 ## Layout
 
@@ -23,7 +23,7 @@ implemented. In-process scheduling and execution are next.
   model selection
 - `extensions/lovely-agents/definitions.ts`: fresh, trust-aware Definition
   discovery and strict validation
-- `extensions/lovely-agents/tools.ts`: roster and read-only task tools
+- `extensions/lovely-agents/tools.ts`: roster and task inspection tools
 - `extensions/lovely-agents/state.ts`: versioned task metadata, private paths,
   serialized atomic snapshots, parent leases, and retained logs
 - `tests/lovely-agents/`: extension tests and temp-workspace helpers
@@ -56,6 +56,13 @@ Writes are serialized per task and use a private same-directory temporary file,
 file fsync, rename, and directory fsync. Malformed and unsupported snapshots
 remain untouched.
 
+Metadata v2 retains the immutable child-session recipe: Definition prompt,
+explicit-vs-omitted tool policy, context exclusion, and scoped model identities.
+It also retains scheduler acceptance order for active and queued runs. Earlier
+metadata versions are rejected rather than cold-loaded with wider capabilities.
+Metadata and retained-log queues are process-global so surviving runtimes and
+new extension instances remain serialized across reload.
+
 Each open parent partition has a versioned PID/token `.lease`, published through
 an atomic no-overwrite link. A package-symbol process-global registry reuses the
 same lease across extension runtimes and serializes local acquisition. Live
@@ -79,6 +86,11 @@ are returned at once. `task_output` rejects foreign/discarded tasks and exposes
 retained line ranges with optional long-polling. Semantic session shutdown
 releases the parent lease; reload keeps it.
 
+Model-visible task rendering avoids repeating structured details: list rows
+show one shared task directory, output reads show only their source file, input
+acknowledgements use one line, and agent creation omits redundant task
+inventory. Full artifact paths and metadata remain in tool `details`.
+
 One versioned coordinator is shared through a package-owned `globalThis`
 symbol. Its acceptance-ordered semaphore skips closed provider/model tuples,
 drains config reductions, and tracks resident runtimes and parent notification
@@ -86,6 +98,9 @@ routes with replacement-safe unbind callbacks. Managed runs carry permits in
 async-local context. Synchronous descendant waits and blocking `task_output`
 can lend that permit, then queue FIFO reacquisition before the caller resumes;
 reacquisition bypasses tuple gates because the caller was already running.
+Inactive reservations hold Follow-up acceptance order without consuming
+capacity; atomic promotion activates the next reservation before the current
+permit is released.
 
 Child sessions use Pi's SDK in-process and own the task's retained
 `session.jsonl`. Selection follows call, Definition, then parent precedence.
@@ -105,6 +120,15 @@ outcome across completion/stop races. Synchronous waits lend managed parent
 permits; zero or expired waits only stamp detachment and never restart work.
 Accepted child failures are task outcomes, not failed tool calls. Idle child
 runtimes dispose while their private Pi session file remains cold-loadable.
+
+`task_input` defaults to durable Follow-up. Active work retains up to 32 ordered
+Follow-ups; settlement atomically promotes the queue head, and each run gets a
+separate Pi prompt/outcome in the same session. Running Steers use Pi's queue
+with the configured literal/template behavior. The runtime records Steers only
+after their user message is observed, so stop/crash can drop undelivered input.
+Non-running Steers deterministically become Follow-ups under the task mutation
+lane. Idle/interrupted tasks cold-load from the retained immutable recipe and
+expected Pi UUID, without rescanning mutable Definitions.
 
 On quit/new/resume/fork, the outgoing runtime recursively stops resident and
 retained descendants before releasing exact-parent leases. Reload skips this

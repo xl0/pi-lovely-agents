@@ -129,8 +129,8 @@ not be unique, and are limited to 1–80 UTF-8 bytes after trimming.
 
 Creation returns the new task's stable identity, definition/label, state and
 latest outcome, effective model/thinking, detachment state, bounded output,
-retained paths, descendant summary, and a bounded inventory of existing direct
-children. The inventory uses `task_list` ordering and whole-record truncation.
+retained paths, and descendant summary. Model-visible text stays focused on the
+new task; existing direct children remain available through `task_list`.
 
 ### Control existing tasks
 
@@ -187,6 +187,8 @@ keeps complete lines from the head of the requested range and is capped at
 
 The result includes the returned line range, total current lines, next offset,
 current task state, queued Follow-up count, and paths to every retained log.
+Structured details retain all artifact paths; model-visible lists show one task
+directory and output reads show only the selected source.
 Truncated results use Pi's continuation messages:
 
 ```text
@@ -476,6 +478,10 @@ state/outcome, fixed model settings, run state, queued Follow-ups, tombstone,
 and notifications. Per-task mutations are serialized. A durable mutation is
 acknowledged only after temp write, fsync, and atomic rename.
 
+Version 2 also retains the immutable Definition prompt/tool/context recipe,
+fixed scoped model identities, and scheduler acceptance order. Earlier
+versions are rejected rather than rebuilt from mutable Definitions.
+
 One PID lease protects each open parent partition. Reload and same-process
 rebind reuse it. A second live OS process opening the same parent session gets an
 explicit Lovely Agents read/control failure instead of risking corruption. A
@@ -700,16 +706,23 @@ orphaned storage remains untouched and is reported nonfatally.
 
 ### [ ] 4. Agent controls
 
-#### [ ] 4.1 Follow-up and Steer
+#### [x] 4.1 Follow-up and Steer
 
-Implement durable Follow-up acceptance, 32-entry queue limits, queue positions,
-and sequential runs in one Agent Session. Implement running Steer through Pi's
-queue; under the task lock, fall back to Follow-up whenever no run remains
-active. Persist only delivered Steers in logs.
+`task_input` durably accepts up to 32 queued Follow-ups with stable sequence and
+global acceptance order. The resident runtime atomically settles each run and
+promotes the oldest Follow-up, reserves scheduler position before eligibility,
+and executes each as a separate prompt in the same Pi session.
 
-Done when tests cover every source state, running/completion races, effective
-delivery, queued count in all task results, dropped undelivered Steers, and cold
-Follow-ups.
+A Steer enters Pi's live steering queue only while the matching session is
+running. Completion, queued, suspended, idle, and interrupted races fall back
+to a Follow-up under the process-global task lane. Only observed Steer
+deliveries enter retained output; stop drops pending deliveries.
+
+Cold Follow-ups reopen the same Pi UUID from an immutable v2 session recipe,
+independent of later Definition/config edits. Tests cover all source states,
+queue limits/positions, concurrent acceptance, sequential success/failure,
+literal and duplicate Steers, delivery omission, completion races, fixed cold
+configuration, and queued counts.
 
 #### [ ] 4.2 Stop and discard
 

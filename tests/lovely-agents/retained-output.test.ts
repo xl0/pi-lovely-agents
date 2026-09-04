@@ -179,6 +179,12 @@ function metadata(paths: TaskStoragePaths, state: "idle" | "running"): TaskMetad
 		thinking: "high",
 		depth: 1,
 		allowAgents: false,
+		sessionConfig: {
+			systemPrompt: "Review work.",
+			tools: null,
+			excludeAgentsMd: false,
+			scopedModels: [{ provider: "anthropic", id: "sonnet" }]
+		},
 		state,
 		latestOutcome: null,
 		lastRunSequence: state === "running" ? 1 : 0,

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto"
 import { rm } from "node:fs/promises"
-import type { AgentSessionEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import type { AgentSessionEvent, ExtensionAPI, ExtensionContext, ScopedModel } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import {
 	type ChildSessionHandle,
@@ -11,8 +11,8 @@ import {
 } from "./child-session.js"
 import type { AgentsConfig } from "./config.js"
 import { resolveConfiguredModels } from "./config.js"
-import { getAgentCoordinator, type ModelTuple, type ResidentAgent } from "./coordinator.js"
-import { discoverAgentDefinitions } from "./definitions.js"
+import { type AgentReservation, getAgentCoordinator, type ModelTuple, type ResidentAgent, type ResidentInputResult } from "./coordinator.js"
+import { type AgentDefinition, discoverAgentDefinitions } from "./definitions.js"
 import {
 	acquireParentLease,
 	appendActivityLog,
@@ -21,13 +21,16 @@ import {
 	initializeRetainedLogs,
 	MAX_AGENT_INPUT_BYTES,
 	MAX_AGENT_LABEL_BYTES,
+	MAX_QUEUED_FOLLOWUPS,
 	mutateTaskMetadata,
 	readRetainedOutput,
 	readTaskMetadata,
 	reserveTaskStorage,
 	TASK_METADATA_VERSION,
+	TASK_REFERENCE_PATTERN,
 	type TaskMetadata,
 	type TaskStoragePaths,
+	taskStoragePaths,
 	writeTaskMetadata
 } from "./state.js"
 import { loadTaskList } from "./tools.js"
@@ -53,14 +56,28 @@ export type AgentCreationResult = {
 	depth: number
 	allowAgents: boolean
 	detached: boolean
+	queuedFollowUps: number
 	output: Awaited<ReturnType<typeof readRetainedOutput>>
 	tasks: Awaited<ReturnType<typeof loadTaskList>>["details"]
 }
 
-export function registerAgentTool(
-	pi: ExtensionAPI,
-	options: { getConfig: () => AgentsConfig; createChild?: typeof createChildSession; getAgentDir?: () => string }
-): void {
+export type TaskInputResult = {
+	id: string
+	requestedDelivery: "followup" | "steer"
+	effectiveDelivery: "followup" | "steer"
+	queuePosition: number | null
+	state: TaskMetadata["state"]
+	latestOutcome: TaskMetadata["latestOutcome"]
+	queuedFollowUps: number
+}
+
+export type AgentToolOptions = {
+	getConfig: () => AgentsConfig
+	createChild?: typeof createChildSession
+	getAgentDir?: () => string
+}
+
+export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): void {
 	pi.registerTool({
 		name: "agent",
 		label: "Agent",
@@ -130,6 +147,7 @@ export function registerAgentTool(
 				})
 				const acceptedAt = Date.now()
 				const runId = createRunId()
+				const acceptanceOrder = coordinator.nextAcceptanceOrder()
 				const metadata: TaskMetadata = {
 					version: TASK_METADATA_VERSION,
 					kind: "agent",
@@ -142,12 +160,23 @@ export function registerAgentTool(
 					thinking: child.session.thinkingLevel,
 					depth: child.depth,
 					allowAgents: child.allowAgents,
+					sessionConfig: {
+						systemPrompt: definition.systemPrompt,
+						tools: definition.tools ?? null,
+						excludeAgentsMd: definition.excludeAgentsMd ?? false,
+						scopedModels: configuredModels.models.map(choice => ({
+							provider: choice.model.provider,
+							id: choice.model.id,
+							...(choice.thinkingLevel ? { thinkingLevel: choice.thinkingLevel } : {})
+						}))
+					},
 					state: "queued",
 					latestOutcome: null,
 					lastRunSequence: 1,
 					activeRun: {
 						id: runId,
 						sequence: 1,
+						acceptanceOrder,
 						kind: "initial",
 						state: "queued",
 						input: params.prompt,
@@ -164,7 +193,7 @@ export function registerAgentTool(
 				await writeTaskMetadata(paths, metadata)
 				accepted = true
 
-				const runtime = new InitialAgentRun(paths, child, metadata, config.expandPromptTemplates)
+				const runtime = new AgentRuntime(paths, child, metadata, config.expandPromptTemplates)
 				child = undefined
 				runtime.start()
 				const waitMs = params.waitMs ?? config.waitMs
@@ -183,26 +212,100 @@ export function registerAgentTool(
 	})
 }
 
-class InitialAgentRun implements ResidentAgent {
+export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOptions): void {
+	pi.registerTool({
+		name: "task_input",
+		label: "Task Input",
+		description: "Send a durable Follow-up or live Steer to an owned Lovely Agent task.",
+		promptSnippet: "Send Follow-up work or a live Steer to a durable task",
+		promptGuidelines: ["Use Follow-up for later work; use Steer only to redirect a currently running agent."],
+		parameters: Type.Object(
+			{
+				id: Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" }),
+				content: Type.String({ minLength: 1, description: "Input text" }),
+				delivery: Type.Optional(Type.Union([Type.Literal("followup"), Type.Literal("steer")]))
+			},
+			{ additionalProperties: false }
+		),
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			if (signal?.aborted) throw abortError(signal)
+			validateInput(params.content, "content", MAX_AGENT_INPUT_BYTES)
+			const parentSessionId = ctx.sessionManager.getSessionId()
+			const lease = await acquireParentLease(ctx.cwd, parentSessionId)
+			const paths = taskStoragePaths(lease.paths, params.id)
+			const loaded = await readTaskMetadata(paths)
+			if (loaded.status === "missing") throw new Error(`Unknown Task Reference: ${params.id}`)
+			if (loaded.status === "invalid") throw new Error(loaded.diagnostic.message)
+			if (loaded.metadata.discardedAt !== null) throw new Error(`Task ${params.id} has been discarded`)
+			const requestedDelivery = params.delivery ?? "followup"
+			let accepted: ResidentInputResult | undefined
+			while (!accepted) {
+				if (signal?.aborted) throw abortError(signal)
+				const runtime = await controllableRuntime(ctx, paths, options)
+				try {
+					accepted = await runtime.input(params.content, requestedDelivery)
+				} catch (error) {
+					if (!isRuntimeClosingError(error)) throw error
+					await new Promise(resolve => setTimeout(resolve, 0))
+				}
+			}
+			const current = await readTaskMetadata(paths)
+			if (current.status !== "ok") throw new Error(`Could not read accepted task ${params.id}`)
+			const result: TaskInputResult = {
+				id: params.id,
+				requestedDelivery,
+				effectiveDelivery: accepted.delivery,
+				queuePosition: accepted.queuePosition,
+				state: current.metadata.state,
+				latestOutcome: current.metadata.latestOutcome,
+				queuedFollowUps: current.metadata.queuedFollowUps.length
+			}
+			return {
+				content: [
+					{
+						type: "text",
+						text:
+							result.effectiveDelivery === "steer"
+								? `${result.id}: steer delivered (${result.state}; ${result.queuedFollowUps} Follow-ups queued)`
+								: `${result.id}: followup accepted (position ${result.queuePosition}; ${result.state}; ${result.queuedFollowUps} queued)`
+					}
+				],
+				details: result
+			}
+		}
+	})
+}
+
+class AgentRuntime implements ResidentAgent {
 	readonly #paths: TaskStoragePaths
 	readonly #child: ChildSessionHandle
-	readonly #metadata: TaskMetadata
 	readonly #expandPromptTemplates: boolean
+	readonly #tuple: ModelTuple
 	readonly #scheduleAbort = new AbortController()
-	readonly #completion = deferred<void>()
+	readonly #initialRunId: string | undefined
+	readonly #initialCompletion = deferred<void>()
+	readonly #runtimeCompletion = deferred<void>()
 	readonly #toolArguments = new Map<string, { name: string; arguments: string }>()
+	readonly #pendingSteers: Array<{ content: string }> = []
+	readonly #reservations = new Map<string, AgentReservation>()
 	#unbindResident: (() => void) | undefined
 	#unsubscribe: (() => void) | undefined
 	#eventWrites: Promise<void> = Promise.resolve()
 	#eventWriteFailed = false
 	#started = false
 	#stopRequested = false
+	#accepting = true
+	#disposed = false
+	#awaitingPrimaryInput = false
+	#lastAssistantOutcome: NonNullable<TaskMetadata["latestOutcome"]> | undefined
 
 	constructor(paths: TaskStoragePaths, child: ChildSessionHandle, metadata: TaskMetadata, expandPromptTemplates: boolean) {
 		this.#paths = paths
 		this.#child = child
-		this.#metadata = metadata
+		this.#initialRunId = metadata.activeRun?.kind === "initial" ? metadata.activeRun.id : undefined
 		this.#expandPromptTemplates = expandPromptTemplates
+		this.#tuple = { provider: metadata.model.provider, model: metadata.model.id }
+		if (metadata.activeRun) this.reserveRun(metadata.activeRun)
 		this.#unbindResident = getAgentCoordinator().bindResident(paths.taskDirectory, this)
 		this.#unsubscribe = child.session.subscribe(event => this.recordEvent(event))
 	}
@@ -231,12 +334,15 @@ class InitialAgentRun implements ResidentAgent {
 					signal.addEventListener("abort", onAbort, { once: true })
 				})
 			: undefined
-		const result = await Promise.race([this.#completion.promise.then(() => "completed" as const), timeout, ...(aborted ? [aborted] : [])])
+		const result = await Promise.race([
+			this.#initialCompletion.promise.then(() => "completed" as const),
+			timeout,
+			...(aborted ? [aborted] : [])
+		])
 		if (timer) clearTimeout(timer)
 		if (signal && onAbort) signal.removeEventListener("abort", onAbort)
 		if (result === "aborted") {
 			await this.stop()
-			await this.#completion.promise
 			return false
 		}
 		if (result === "timeout") {
@@ -247,15 +353,32 @@ class InitialAgentRun implements ResidentAgent {
 	}
 
 	async stop(): Promise<void> {
-		if (this.#stopRequested) return this.#completion.promise
+		if (this.#stopRequested) return this.#runtimeCompletion.promise
 		this.#stopRequested = true
+		this.#accepting = false
 		this.#scheduleAbort.abort(new Error("Agent run stopped"))
 		await this.#child.session.abort()
-		await this.settle("stopped")
-		await this.#completion.promise
+		const loaded = await readTaskMetadata(this.#paths)
+		if (loaded.status === "ok" && loaded.metadata.activeRun) {
+			await this.settle(loaded.metadata.activeRun, "stopped", true)
+		} else if (loaded.status === "ok" && loaded.metadata.queuedFollowUps.length > 0) {
+			await mutateTaskMetadata(this.#paths, metadata => ({
+				...metadata,
+				queuedFollowUps: [],
+				updatedAt: Date.now()
+			}))
+		}
+		if (!this.#started) {
+			this.dispose()
+			this.#runtimeCompletion.resolve(undefined)
+			this.#initialCompletion.resolve(undefined)
+		}
+		await this.#runtimeCompletion.promise
 	}
 
 	dispose(): void {
+		if (this.#disposed) return
+		this.#disposed = true
 		this.#unsubscribe?.()
 		this.#unsubscribe = undefined
 		this.#unbindResident?.()
@@ -263,33 +386,178 @@ class InitialAgentRun implements ResidentAgent {
 		this.#child.dispose()
 	}
 
-	private async run(): Promise<void> {
-		const tuple: ModelTuple = { provider: this.#metadata.model.provider, model: this.#metadata.model.id }
+	async input(content: string, delivery: "followup" | "steer"): Promise<ResidentInputResult> {
+		if (!this.#accepting || this.#disposed) throw new RuntimeClosingError()
+		let result: ResidentInputResult | undefined
+		let acceptedRun: NonNullable<TaskMetadata["activeRun"]> | undefined
 		try {
-			await getAgentCoordinator().run({ tuple, signal: this.#scheduleAbort.signal }, async () => {
-				if (this.#stopRequested) return
-				const startedAt = Date.now()
-				await mutateTaskMetadata(this.#paths, metadata => {
-					const activeRun = metadata.activeRun
-					if (!activeRun || activeRun.id !== this.#metadata.activeRun?.id) return metadata
+			await mutateTaskMetadata(this.#paths, async metadata => {
+				if (!this.#accepting || this.#disposed) throw new RuntimeClosingError()
+				if (metadata.discardedAt !== null) throw new Error(`Task ${metadata.taskRef} has been discarded`)
+				if (delivery === "steer" && metadata.state === "running" && metadata.activeRun && this.#child.session.isStreaming) {
+					const pending = { content }
+					this.#pendingSteers.push(pending)
+					try {
+						await this.#child.session.prompt(content, {
+							...childPromptOptions(this.#expandPromptTemplates),
+							streamingBehavior: "steer"
+						})
+					} catch (error) {
+						const index = this.#pendingSteers.indexOf(pending)
+						if (index >= 0) this.#pendingSteers.splice(index, 1)
+						throw error
+					}
+					result = { delivery: "steer", queuePosition: null, queuedFollowUps: metadata.queuedFollowUps.length }
+					return metadata
+				}
+				if (metadata.queuedFollowUps.length >= MAX_QUEUED_FOLLOWUPS) {
+					throw new Error(`Task ${metadata.taskRef} already has ${MAX_QUEUED_FOLLOWUPS} queued Follow-ups`)
+				}
+				const acceptedAt = Date.now()
+				const sequence = metadata.lastRunSequence + 1
+				const runId = createRunId()
+				const acceptanceOrder = getAgentCoordinator().nextAcceptanceOrder()
+				const queuePosition = metadata.activeRun ? metadata.queuedFollowUps.length + 1 : 1
+				result = { delivery: "followup", queuePosition, queuedFollowUps: metadata.queuedFollowUps.length + 1 }
+				acceptedRun = {
+					id: runId,
+					sequence,
+					acceptanceOrder,
+					kind: "followup",
+					state: "queued",
+					input: content,
+					acceptedAt
+				}
+				if (!metadata.activeRun) {
+					result.queuedFollowUps = 0
 					return {
 						...metadata,
-						state: "running",
-						activeRun: { ...activeRun, state: "running", startedAt },
-						updatedAt: startedAt
+						state: "queued",
+						activeRun: acceptedRun,
+						lastRunSequence: sequence,
+						updatedAt: acceptedAt
 					}
-				})
-				await this.#child.session.prompt(this.#metadata.activeRun?.input ?? "", childPromptOptions(this.#expandPromptTemplates))
+				}
+				return {
+					...metadata,
+					lastRunSequence: sequence,
+					queuedFollowUps: [...metadata.queuedFollowUps, { id: runId, sequence, acceptanceOrder, content, acceptedAt }],
+					updatedAt: acceptedAt
+				}
 			})
-			await this.#eventWrites
-			if (this.#eventWriteFailed) throw new Error("Could not retain one or more child session events")
-			await this.settle(this.#stopRequested ? "stopped" : latestOutcome(this.#child))
-		} catch {
-			await this.#eventWrites
-			await this.settle(this.#stopRequested ? "stopped" : "failed")
+		} catch (error) {
+			if (!this.#started) {
+				this.#accepting = false
+				this.dispose()
+				this.#runtimeCompletion.resolve(undefined)
+				this.#initialCompletion.resolve(undefined)
+			}
+			throw error
+		}
+		if (!result) throw new Error("Task input was not accepted")
+		if (acceptedRun) this.reserveRun(acceptedRun)
+		this.start()
+		return result
+	}
+
+	private async run(): Promise<void> {
+		try {
+			while (!this.#stopRequested) {
+				const activeRun = await this.nextRun()
+				if (!activeRun) break
+				await this.executeRun(activeRun)
+			}
 		} finally {
 			this.dispose()
-			this.#completion.resolve(undefined)
+			this.#initialCompletion.resolve(undefined)
+			this.#runtimeCompletion.resolve(undefined)
+		}
+	}
+
+	private async nextRun(): Promise<NonNullable<TaskMetadata["activeRun"]> | null> {
+		const selected: { run: NonNullable<TaskMetadata["activeRun"]> | null } = { run: null }
+		await mutateTaskMetadata(this.#paths, metadata => {
+			if (metadata.activeRun) {
+				selected.run = metadata.activeRun
+				return metadata
+			}
+			const [next, ...remaining] = metadata.queuedFollowUps
+			if (!next) {
+				this.#accepting = false
+				return metadata
+			}
+			selected.run = {
+				id: next.id,
+				sequence: next.sequence,
+				...(next.acceptanceOrder ? { acceptanceOrder: next.acceptanceOrder } : {}),
+				kind: "followup",
+				state: "queued",
+				input: next.content,
+				acceptedAt: next.acceptedAt
+			}
+			return { ...metadata, state: "queued", activeRun: selected.run, queuedFollowUps: remaining, updatedAt: Date.now() }
+		})
+		if (selected.run) this.reserveRun(selected.run)
+		return selected.run
+	}
+
+	private async executeRun(run: NonNullable<TaskMetadata["activeRun"]>): Promise<void> {
+		let outcome: NonNullable<TaskMetadata["latestOutcome"]> = "failed"
+		this.#lastAssistantOutcome = undefined
+		let settled = false
+		try {
+			await this.reserveRun(run).run(async () => {
+				if (this.#stopRequested) return
+				try {
+					let won = false
+					const startedAt = Date.now()
+					await mutateTaskMetadata(this.#paths, metadata => {
+						const activeRun = metadata.activeRun
+						if (!activeRun || activeRun.id !== run.id) return metadata
+						won = true
+						return {
+							...metadata,
+							state: "running",
+							activeRun: { ...activeRun, state: "running", startedAt },
+							updatedAt: startedAt
+						}
+					})
+					if (!won) return
+					if (run.kind === "followup") {
+						await appendOutputLog(this.#paths, {
+							type: "run-start",
+							sequence: run.sequence,
+							kind: "followup",
+							timestamp: startedAt
+						})
+						await appendOutputLog(this.#paths, {
+							type: "input",
+							delivery: "followup",
+							timestamp: startedAt,
+							content: run.input
+						})
+					}
+					this.#awaitingPrimaryInput = true
+					await this.#child.session.prompt(run.input, childPromptOptions(this.#expandPromptTemplates))
+					await this.#eventWrites
+					if (this.#eventWriteFailed) throw new Error("Could not retain one or more child session events")
+					outcome = this.#stopRequested ? "stopped" : (this.#lastAssistantOutcome ?? "failed")
+				} catch {
+					await this.#eventWrites
+					outcome = this.#stopRequested ? "stopped" : "failed"
+				}
+				const promoted = await this.settle(run, outcome, this.#stopRequested)
+				settled = true
+				if (promoted) this.reserveRun(promoted).activate()
+			})
+		} catch {
+			await this.#eventWrites
+			outcome = this.#stopRequested ? "stopped" : "failed"
+		}
+		this.#reservations.delete(run.id)
+		if (!settled) {
+			const promoted = await this.settle(run, outcome, this.#stopRequested)
+			if (promoted) this.reserveRun(promoted).activate()
 		}
 	}
 
@@ -297,20 +565,66 @@ class InitialAgentRun implements ResidentAgent {
 		const detachedAt = Date.now()
 		await mutateTaskMetadata(this.#paths, metadata => {
 			const activeRun = metadata.activeRun
-			if (!activeRun || activeRun.id !== this.#metadata.activeRun?.id || activeRun.detachedAt !== undefined) return metadata
+			if (!activeRun || activeRun.id !== this.#initialRunId || activeRun.detachedAt !== undefined) return metadata
 			return { ...metadata, activeRun: { ...activeRun, detachedAt }, updatedAt: detachedAt }
 		})
 	}
 
-	private async settle(outcome: NonNullable<TaskMetadata["latestOutcome"]>): Promise<void> {
+	private async settle(
+		run: NonNullable<TaskMetadata["activeRun"]>,
+		outcome: NonNullable<TaskMetadata["latestOutcome"]>,
+		clearFollowUps = false
+	): Promise<NonNullable<TaskMetadata["activeRun"]> | null> {
 		let won = false
+		const promoted: { run: NonNullable<TaskMetadata["activeRun"]> | null } = { run: null }
 		const timestamp = Date.now()
 		await mutateTaskMetadata(this.#paths, metadata => {
-			if (metadata.activeRun?.id !== this.#metadata.activeRun?.id) return metadata
+			if (metadata.activeRun?.id !== run.id) return clearFollowUps ? { ...metadata, queuedFollowUps: [], updatedAt: timestamp } : metadata
 			won = true
-			return { ...metadata, state: "idle", latestOutcome: outcome, activeRun: null, updatedAt: timestamp }
+			const [next, ...remaining] = clearFollowUps ? [] : metadata.queuedFollowUps
+			if (next) {
+				promoted.run = {
+					id: next.id,
+					sequence: next.sequence,
+					...(next.acceptanceOrder ? { acceptanceOrder: next.acceptanceOrder } : {}),
+					kind: "followup",
+					state: "queued",
+					input: next.content,
+					acceptedAt: next.acceptedAt
+				}
+				return {
+					...metadata,
+					state: "queued",
+					latestOutcome: outcome,
+					activeRun: promoted.run,
+					queuedFollowUps: remaining,
+					updatedAt: timestamp
+				}
+			}
+			return {
+				...metadata,
+				state: "idle",
+				latestOutcome: outcome,
+				activeRun: null,
+				...(clearFollowUps ? { queuedFollowUps: [] } : {}),
+				updatedAt: timestamp
+			}
 		})
-		if (won) await appendOutputLog(this.#paths, { type: "run-end", sequence: 1, outcome, timestamp })
+		if (won) await appendOutputLog(this.#paths, { type: "run-end", sequence: run.sequence, outcome, timestamp })
+		if (run.id === this.#initialRunId) this.#initialCompletion.resolve(undefined)
+		return promoted.run
+	}
+
+	private reserveRun(run: NonNullable<TaskMetadata["activeRun"]>): AgentReservation {
+		const existing = this.#reservations.get(run.id)
+		if (existing) return existing
+		const reservation = getAgentCoordinator().reserve({
+			tuple: this.#tuple,
+			signal: this.#scheduleAbort.signal,
+			...(run.acceptanceOrder ? { acceptanceOrder: run.acceptanceOrder } : {})
+		})
+		this.#reservations.set(run.id, reservation)
+		return reservation
 	}
 
 	private recordEvent(event: AgentSessionEvent): void {
@@ -319,11 +633,37 @@ class InitialAgentRun implements ResidentAgent {
 			return
 		}
 		if (event.type === "message_end" && event.message.role === "assistant") {
+			this.#lastAssistantOutcome = event.message.stopReason === "error" || event.message.stopReason === "aborted" ? "failed" : "succeeded"
 			const content = event.message.content
 				.filter(part => part.type === "text")
 				.map(part => part.text)
 				.join("")
 			if (content) this.queueEventWrite(() => appendOutputLog(this.#paths, { type: "assistant", content }))
+			return
+		}
+		if (event.type === "message_start" && event.message.role === "user" && this.#awaitingPrimaryInput) {
+			this.#awaitingPrimaryInput = false
+			return
+		}
+		if (event.type === "message_start" && event.message.role === "user" && this.#pendingSteers.length > 0) {
+			const delivered = this.#pendingSteers.shift()
+			if (delivered) {
+				const content =
+					typeof event.message.content === "string"
+						? event.message.content
+						: event.message.content
+								.filter(part => part.type === "text")
+								.map(part => part.text)
+								.join("")
+				this.queueEventWrite(() =>
+					appendOutputLog(this.#paths, {
+						type: "input",
+						delivery: "steer",
+						timestamp: Date.now(),
+						content: content || delivered.content
+					})
+				)
+			}
 			return
 		}
 		if (event.type === "tool_execution_end") {
@@ -348,6 +688,95 @@ class InitialAgentRun implements ResidentAgent {
 	}
 }
 
+class RuntimeClosingError extends Error {
+	constructor() {
+		super("Agent runtime is closing")
+		this.name = "LovelyAgentRuntimeClosingError"
+	}
+}
+
+function isRuntimeClosingError(error: unknown): boolean {
+	return error instanceof RuntimeClosingError || (error instanceof Error && error.name === "LovelyAgentRuntimeClosingError")
+}
+
+type ControllableResident = ResidentAgent & {
+	input(content: string, delivery: "followup" | "steer"): Promise<ResidentInputResult>
+}
+
+const COLD_RUNTIME_LOADS = Symbol.for("@xl0/pi-lovely-agents/cold-runtime-loads/v1")
+
+async function controllableRuntime(
+	ctx: ExtensionContext,
+	paths: TaskStoragePaths,
+	options: AgentToolOptions
+): Promise<ControllableResident> {
+	const resident = getAgentCoordinator().getResident(paths.taskDirectory)
+	if (resident) {
+		if (!resident.input) throw new Error(`Task ${paths.taskRef} does not accept input`)
+		return resident as ControllableResident
+	}
+	const loads = coldRuntimeLoads()
+	let pending = loads.get(paths.taskDirectory)
+	if (pending) return pending
+	pending = openColdRuntime(ctx, paths, options)
+	loads.set(paths.taskDirectory, pending)
+	try {
+		return await pending
+	} finally {
+		if (loads.get(paths.taskDirectory) === pending) loads.delete(paths.taskDirectory)
+	}
+}
+
+async function openColdRuntime(ctx: ExtensionContext, paths: TaskStoragePaths, options: AgentToolOptions): Promise<AgentRuntime> {
+	const loaded = await readTaskMetadata(paths)
+	if (loaded.status !== "ok") throw new Error(`Could not load task ${paths.taskRef}`)
+	const metadata = loaded.metadata
+	if (metadata.discardedAt !== null) throw new Error(`Task ${paths.taskRef} has been discarded`)
+	if (metadata.state !== "idle" && metadata.state !== "interrupted") {
+		throw new Error(`Task ${paths.taskRef} has active state ${metadata.state} but no resident runtime`)
+	}
+	const definition: AgentDefinition = {
+		name: metadata.definitionName,
+		description: `Retained configuration for ${metadata.definitionName}`,
+		systemPrompt: metadata.sessionConfig.systemPrompt,
+		source: "project",
+		filePath: paths.metadata,
+		displayPath: paths.metadata,
+		...(metadata.sessionConfig.tools ? { tools: [...metadata.sessionConfig.tools] } : {}),
+		excludeAgentsMd: metadata.sessionConfig.excludeAgentsMd
+	}
+	const model = ctx.modelRegistry
+		.getAvailable()
+		.find(candidate => candidate.provider === metadata.model.provider && candidate.id === metadata.model.id)
+	if (!model) throw new Error(`Task model "${metadata.model.provider}/${metadata.model.id}" is not authenticated`)
+	const config = options.getConfig()
+	const scopedModels: ScopedModel[] = metadata.sessionConfig.scopedModels.map(saved => {
+		const savedModel = ctx.modelRegistry.getAll().find(candidate => candidate.provider === saved.provider && candidate.id === saved.id)
+		if (!savedModel) throw new Error(`Retained scoped model "${saved.provider}/${saved.id}" is no longer available`)
+		return { model: savedModel, ...(saved.thinkingLevel ? { thinkingLevel: saved.thinkingLevel } : {}) }
+	})
+	const child = await (options.createChild ?? createChildSession)({
+		cwd: ctx.cwd,
+		paths,
+		definition,
+		selection: { model, thinking: metadata.thinking },
+		scopedModels,
+		parentDepth: metadata.depth - 1,
+		maximumDepth: metadata.depth + (metadata.allowAgents ? 1 : 0),
+		allowAgents: metadata.allowAgents,
+		projectTrusted: ctx.isProjectTrusted(),
+		expectedSessionId: metadata.childSessionId,
+		...(options.getAgentDir ? { agentDir: options.getAgentDir() } : {})
+	})
+	return new AgentRuntime(paths, child, metadata, config.expandPromptTemplates)
+}
+
+function coldRuntimeLoads(): Map<string, Promise<AgentRuntime>> {
+	const global = globalThis as typeof globalThis & { [COLD_RUNTIME_LOADS]?: Map<string, Promise<AgentRuntime>> }
+	global[COLD_RUNTIME_LOADS] ??= new Map()
+	return global[COLD_RUNTIME_LOADS]
+}
+
 function buildAgentCreationToolResult(
 	metadata: TaskMetadata,
 	detached: boolean,
@@ -365,55 +794,28 @@ function buildAgentCreationToolResult(
 		depth: metadata.depth,
 		allowAgents: metadata.allowAgents,
 		detached,
+		queuedFollowUps: metadata.queuedFollowUps.length,
 		output,
 		tasks
 	}
-	const inventory = result.tasks.tasks.slice(0, 10)
-	const inventoryLines =
-		inventory.length === 0
-			? ["tasks: []"]
-			: [
-					"tasks:",
-					...inventory.flatMap(task => [
-						`  - id: ${task.id}`,
-						`    label: ${JSON.stringify(task.label)}`,
-						`    state: ${task.state}`,
-						`    outcome: ${task.latestOutcome ?? "none"}`
-					]),
-					...(result.tasks.total > inventory.length ? [`  # ${result.tasks.total - inventory.length} more; use task_list`] : [])
-				]
+	const pending = detached && (result.state === "queued" || result.state === "running" || result.state === "suspended")
 	return {
 		content: [
 			{
 				type: "text",
 				text: [
 					`task: ${result.id}`,
-					`label: ${JSON.stringify(result.label)}`,
-					`definition: ${result.definition}`,
 					`state: ${result.state}`,
 					`outcome: ${result.latestOutcome ?? "none"}`,
-					`model: ${result.model}`,
-					`thinking: ${result.thinking}`,
-					`depth: ${result.depth}`,
 					`detached: ${result.detached}`,
+					`queued_followups: ${result.queuedFollowUps}`,
 					"output:",
-					result.output.text || "(no output)",
-					"",
-					...inventoryLines
+					pending ? "(pending; use task_output)" : result.output.text || "(no output)"
 				].join("\n")
 			}
 		],
 		details: result
 	}
-}
-
-function latestOutcome(child: ChildSessionHandle): NonNullable<TaskMetadata["latestOutcome"]> {
-	for (let index = child.session.messages.length - 1; index >= 0; index--) {
-		const message = child.session.messages[index]
-		if (message?.role !== "assistant") continue
-		return message.stopReason === "error" || message.stopReason === "aborted" ? "failed" : "succeeded"
-	}
-	return "failed"
 }
 
 function validateInput(value: string, name: string, maximumBytes: number): void {

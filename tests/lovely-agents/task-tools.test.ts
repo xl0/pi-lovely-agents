@@ -129,6 +129,9 @@ describe("read-only task tools", () => {
 				activeLabels: ["Nested running", "Nested suspended"]
 			})
 			expect(JSON.stringify(parent?.descendants)).not.toContain("a_10000001")
+			expect(full.content[0]?.text).toContain("task_dir: .pi/lovely-agents/parent-session/a_00000001")
+			expect(full.content[0]?.text).not.toContain("activity.md")
+			expect(full.content[0]?.text).not.toContain("session.jsonl")
 
 			const leasePath = (await ensureParentStorage(workspace.cwd, "parent-session")).lease
 			await captured.shutdown?.({ type: "session_shutdown", reason: "reload" }, ctx)
@@ -180,6 +183,8 @@ describe("read-only task tools", () => {
 				nextOffset: 3
 			})
 			expect(result.content[0]?.text).toContain("second\n\n[Showing lines 2-2 of 3. Use offset=3 to continue.]")
+			expect(result.content[0]?.text).toContain("source: .pi/lovely-agents/parent-session/a_00000001/output.md")
+			expect(result.content[0]?.text).not.toContain("activity.md")
 
 			await expect(captured.tools.get("task_output")?.execute("nested", { id: "a_10000001" }, undefined, ctx)).rejects.toThrow(
 				"Unknown Task Reference"
@@ -255,6 +260,12 @@ function taskMetadata(paths: TaskStoragePaths, fixture: TaskFixture): TaskMetada
 		thinking: "high",
 		depth: 1,
 		allowAgents: false,
+		sessionConfig: {
+			systemPrompt: "Review work.",
+			tools: null,
+			excludeAgentsMd: false,
+			scopedModels: [{ provider: "anthropic", id: "sonnet" }]
+		},
 		state: fixture.state,
 		latestOutcome: fixture.outcome ?? null,
 		lastRunSequence: activeState ? 1 + queuedFollowUps.length : fixture.outcome ? 1 : 0,

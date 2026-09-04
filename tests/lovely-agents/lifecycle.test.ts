@@ -8,6 +8,7 @@ import {
 	readTaskMetadata,
 	releaseParentLeaseFor,
 	reserveTaskStorage,
+	TASK_METADATA_VERSION,
 	type TaskMetadata,
 	type TaskStoragePaths,
 	writeTaskMetadata
@@ -121,7 +122,7 @@ async function createTask(
 	const paths = await reserveTaskStorage(await ensureParentStorage(cwd, parentSessionId), () => id)
 	await initializeRetainedLogs(paths)
 	await writeTaskMetadata(paths, {
-		version: 1,
+		version: TASK_METADATA_VERSION,
 		kind: "agent",
 		taskRef: id,
 		parentSessionId,
@@ -148,6 +149,12 @@ async function createTask(
 		model: { provider: "provider", id: "model" },
 		thinking: "medium",
 		allowAgents: false,
+		sessionConfig: {
+			systemPrompt: "Review work.",
+			tools: null,
+			excludeAgentsMd: false,
+			scopedModels: [{ provider: "provider", id: "model" }]
+		},
 		depth: 1,
 		queuedFollowUps: [{ id: "r_2222222222222222", sequence: 2, content: "later", acceptedAt: 2 }],
 		notifications: [],

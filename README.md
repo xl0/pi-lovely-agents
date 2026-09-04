@@ -2,8 +2,9 @@
 
 Agent orchestration for [Pi](https://github.com/earendil-works/pi).
 
-The durable execution runtime is under construction. Definition discovery,
-configuration, retained task inspection, and the management UI are available.
+Durable agent creation/execution, Follow-up and Steer control, retained task
+inspection, configuration, and the management UI are available. Stop/discard,
+quota recovery, and notifications remain under construction.
 
 ## Commands
 
@@ -18,6 +19,7 @@ configuration, retained task inspection, and the management UI are available.
 - `agent` — create a durable Agent Session and start its initial run
 - `task_list` — list every durable direct task owned by this Pi session
 - `task_output` — read or wait for retained task output
+- `task_input` — queue a Follow-up or Steer a running agent
 
 Definitions are Markdown files in `~/.pi/agent/agents/` or the nearest trusted
 `.pi/agents/` ancestor. Project definitions override user definitions by name.

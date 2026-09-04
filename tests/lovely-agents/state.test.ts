@@ -171,6 +171,7 @@ describe("task metadata", () => {
 		await withTaskStorage(async paths => {
 			for (const fixture of [
 				{ source: "{broken", code: "invalid-json" },
+				{ source: JSON.stringify({ version: 1 }), code: "unsupported-version" },
 				{ source: JSON.stringify({ version: TASK_METADATA_VERSION + 1 }), code: "unsupported-version" },
 				{ source: JSON.stringify({ ...metadata(paths), unexpected: true }), code: "invalid-metadata" }
 			] as const) {
@@ -250,6 +251,12 @@ function metadata(paths: TaskStoragePaths): TaskMetadata {
 		thinking: "high",
 		depth: 1,
 		allowAgents: false,
+		sessionConfig: {
+			systemPrompt: "Review work.",
+			tools: null,
+			excludeAgentsMd: false,
+			scopedModels: [{ provider: "anthropic", id: "sonnet" }]
+		},
 		state: "idle",
 		latestOutcome: null,
 		lastRunSequence: 0,

@@ -19,3 +19,6 @@
   event logs, bounded waiting, detachment, and cancellation.
 - Add recursive parent-session shutdown and restart reconciliation for stale
   accepted work.
+- Add durable Follow-up queues, live Steer delivery, scheduler reservations,
+  and immutable cold-session reopening through `task_input`.
+- Compact model-visible task output while retaining full structured details.

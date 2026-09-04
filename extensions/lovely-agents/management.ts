@@ -395,6 +395,12 @@ async function createFixtureTask(
 		thinking: "off",
 		depth: 1,
 		allowAgents: false,
+		sessionConfig: {
+			systemPrompt: "Development fixture agent.",
+			tools: null,
+			excludeAgentsMd: false,
+			scopedModels: [{ provider: "fixture", id: "dummy" }]
+		},
 		state,
 		latestOutcome,
 		lastRunSequence: 1,

@@ -5,12 +5,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { type Static, Type } from "typebox"
 import { Value } from "typebox/value"
 
-export const TASK_METADATA_VERSION = 1
+export const TASK_METADATA_VERSION = 2
 export const TASK_REFERENCE_PATTERN = /^a_[0-9a-f]{8}$/
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
 export const STORAGE_GITIGNORE = "*\n!.gitignore\n"
 export const MAX_AGENT_INPUT_BYTES = 64 * 1024
 export const MAX_AGENT_LABEL_BYTES = 80
+export const MAX_QUEUED_FOLLOWUPS = 32
 export const PARENT_LEASE_VERSION = 1
 export const RETAINED_OUTPUT_MAX_LINES = 2_000
 export const RETAINED_OUTPUT_MAX_BYTES = 50 * 1024
@@ -23,6 +24,7 @@ const MAX_TASK_REFERENCE_ATTEMPTS = 100
 const MAX_LEASE_ACQUIRE_ATTEMPTS = 10
 const DEFINITION_NAME_PATTERN = "^[a-z0-9][a-z0-9_-]{0,63}$"
 const LEASE_STATE_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/parent-leases/v1")
+const TASK_QUEUE_STATE_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/task-queues/v1")
 
 const RunId = Type.String({ pattern: "^r_[0-9a-f]{16}$" })
 const Timestamp = Type.Integer({ minimum: 0 })
@@ -47,6 +49,7 @@ const ActiveRun = Type.Object(
 	{
 		id: RunId,
 		sequence: Type.Integer({ minimum: 1 }),
+		acceptanceOrder: Type.Optional(Type.Integer({ minimum: 1 })),
 		kind: Type.Union([Type.Literal("initial"), Type.Literal("followup")]),
 		state: Type.Union([Type.Literal("queued"), Type.Literal("running"), Type.Literal("suspended")]),
 		input: Type.String(),
@@ -60,6 +63,7 @@ const QueuedFollowUp = Type.Object(
 	{
 		id: RunId,
 		sequence: Type.Integer({ minimum: 1 }),
+		acceptanceOrder: Type.Optional(Type.Integer({ minimum: 1 })),
 		content: Type.String(),
 		acceptedAt: Timestamp
 	},
@@ -106,11 +110,29 @@ export const TaskMetadataSchema = Type.Object(
 		thinking: ThinkingLevel,
 		depth: Type.Integer({ minimum: 1 }),
 		allowAgents: Type.Boolean(),
+		sessionConfig: Type.Object(
+			{
+				systemPrompt: Type.String({ minLength: 1 }),
+				tools: Type.Union([Type.Array(Type.String({ minLength: 1 })), Type.Null()]),
+				excludeAgentsMd: Type.Boolean(),
+				scopedModels: Type.Array(
+					Type.Object(
+						{
+							provider: Type.String({ minLength: 1 }),
+							id: Type.String({ minLength: 1 }),
+							thinkingLevel: Type.Optional(ThinkingLevel)
+						},
+						{ additionalProperties: false }
+					)
+				)
+			},
+			{ additionalProperties: false }
+		),
 		state: TaskState,
 		latestOutcome: Type.Union([RunOutcome, Type.Null()]),
 		lastRunSequence: Type.Integer({ minimum: 0 }),
 		activeRun: Type.Union([ActiveRun, Type.Null()]),
-		queuedFollowUps: Type.Array(QueuedFollowUp, { maxItems: 32 }),
+		queuedFollowUps: Type.Array(QueuedFollowUp, { maxItems: MAX_QUEUED_FOLLOWUPS }),
 		notifications: Type.Array(Notification),
 		discardedAt: Type.Union([Timestamp, Type.Null()]),
 		createdAt: Timestamp,
@@ -206,6 +228,12 @@ type ParentLeaseState = {
 	version: typeof PARENT_LEASE_VERSION
 	leases: Map<string, ParentLease>
 	queues: Map<string, Promise<void>>
+}
+
+type TaskQueueState = {
+	version: 1
+	metadata: Map<string, Promise<void>>
+	logs: Map<string, Promise<void>>
 }
 
 export class InvalidTaskMetadataError extends Error {
@@ -835,10 +863,8 @@ async function readRetainedLog(path: string): Promise<string> {
 	}
 }
 
-const retainedLogQueues = new Map<string, Promise<void>>()
-
 function appendRetainedLog(path: string, content: string): Promise<void> {
-	return serializeOperation(retainedLogQueues, path, async () => {
+	return serializeOperation(taskQueueState().logs, path, async () => {
 		await ensurePrivateLogFile(path)
 		const handle = await open(path, "a", FILE_MODE)
 		try {
@@ -919,10 +945,8 @@ async function syncDirectory(path: string): Promise<void> {
 	}
 }
 
-const metadataMutationQueues = new Map<string, Promise<void>>()
-
 function serializeMetadataMutation<T>(path: string, operation: () => Promise<T>): Promise<T> {
-	return serializeOperation(metadataMutationQueues, path, operation)
+	return serializeOperation(taskQueueState().metadata, path, operation)
 }
 
 function serializeOperation<T>(queues: Map<string, Promise<void>>, path: string, operation: () => Promise<T>): Promise<T> {
@@ -952,6 +976,21 @@ function parentLeaseState(): ParentLeaseState {
 	}
 	globals[LEASE_STATE_SYMBOL] = state
 	return state
+}
+
+function taskQueueState(): TaskQueueState {
+	const globals = globalThis as unknown as { [key: symbol]: unknown }
+	const existing = globals[TASK_QUEUE_STATE_SYMBOL]
+	if (existing !== undefined) {
+		const candidate = existing as Partial<TaskQueueState>
+		if (candidate.version !== 1 || !(candidate.metadata instanceof Map) || !(candidate.logs instanceof Map)) {
+			throw new Error("Incompatible process-global Lovely Agents task queue state")
+		}
+		return candidate as TaskQueueState
+	}
+	const created: TaskQueueState = { version: 1, metadata: new Map(), logs: new Map() }
+	globals[TASK_QUEUE_STATE_SYMBOL] = created
+	return created
 }
 
 function isParentLeaseState(value: unknown): value is ParentLeaseState {

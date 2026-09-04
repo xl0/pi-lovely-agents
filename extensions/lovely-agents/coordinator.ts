@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 
-export const AGENT_COORDINATOR_VERSION = 1
+export const AGENT_COORDINATOR_VERSION = 2
 const AGENT_COORDINATOR_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/coordinator")
 
 export type ModelTuple = Readonly<{ provider: string; model: string }>
@@ -17,9 +17,23 @@ export type AgentPermit = {
 	release(): void
 }
 
+export type AgentReservation = {
+	readonly acceptanceOrder: number
+	activate(): void
+	run<T>(work: () => Promise<T>): Promise<T>
+	cancel(reason?: unknown): void
+}
+
 export type ResidentAgent = {
 	stop(): void | Promise<void>
 	dispose(): void | Promise<void>
+	input?(content: string, delivery: "followup" | "steer"): Promise<ResidentInputResult>
+}
+
+export type ResidentInputResult = {
+	delivery: "followup" | "steer"
+	queuePosition: number | null
+	queuedFollowUps: number
 }
 
 export type ParentNotification = Readonly<{ id: string; content: string }>
@@ -39,6 +53,7 @@ export type AgentCoordinator = {
 	isTupleOpen(tuple: ModelTuple): boolean
 	acquire(request: AgentScheduleRequest): Promise<AgentPermit>
 	run<T>(request: AgentScheduleRequest, work: () => Promise<T>): Promise<T>
+	reserve(request: AgentScheduleRequest): AgentReservation
 	withLentPermit<T>(wait: () => Promise<T>, signal?: AbortSignal): Promise<T>
 	bindResident(taskKey: string, resident: ResidentAgent): () => void
 	getResident(taskKey: string): ResidentAgent | undefined
@@ -53,6 +68,7 @@ type Waiter = {
 	acceptanceOrder: number
 	queueOrder: number
 	bypassTupleGate: boolean
+	eligible: boolean
 	resolve: () => void
 	reject: (error: unknown) => void
 	signal?: AbortSignal
@@ -135,6 +151,18 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 		})
 	}
 
+	reserve(request: AgentScheduleRequest): AgentReservation {
+		assertTuple(request.tuple)
+		if (request.signal?.aborted) throw abortError(request.signal)
+		const acceptanceOrder = request.acceptanceOrder ?? this.nextAcceptanceOrder()
+		if (!Number.isSafeInteger(acceptanceOrder) || acceptanceOrder < 1) {
+			throw new Error("acceptanceOrder must be a positive safe integer")
+		}
+		this.#acceptanceOrder = Math.max(this.#acceptanceOrder, acceptanceOrder)
+		const queued = this.#enqueue(request, acceptanceOrder, false, false)
+		return new Reservation(this, request.tuple, acceptanceOrder, queued.waiter, queued.promise)
+	}
+
 	async withLentPermit<T>(wait: () => Promise<T>, signal?: AbortSignal): Promise<T> {
 		const permit = this.#permits.getStore()
 		return permit?.held ? permit.lend(wait, signal) : wait()
@@ -201,12 +229,23 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 		}
 		this.#acceptanceOrder = Math.max(this.#acceptanceOrder, acceptanceOrder)
 
-		await new Promise<void>((resolve, reject) => {
-			const waiter: Waiter = {
+		await this.#enqueue(request, acceptanceOrder, bypassTupleGate, true).promise
+	}
+
+	#enqueue(
+		request: AgentScheduleRequest,
+		acceptanceOrder: number,
+		bypassTupleGate: boolean,
+		eligible: boolean
+	): { waiter: Waiter; promise: Promise<void> } {
+		let waiter!: Waiter
+		const promise = new Promise<void>((resolve, reject) => {
+			waiter = {
 				tuple: tupleKey(request.tuple),
 				acceptanceOrder,
 				queueOrder: ++this.#queueOrder,
 				bypassTupleGate,
+				eligible,
 				resolve,
 				reject,
 				...(request.signal ? { signal: request.signal } : {})
@@ -229,11 +268,39 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 			else this.#waiters.splice(insertion, 0, waiter)
 			this.#drain()
 		})
+		return { waiter, promise }
+	}
+
+	activate(waiter: Waiter): void {
+		if (!this.#waiters.includes(waiter)) return
+		waiter.eligible = true
+		this.#drain()
+	}
+
+	cancel(waiter: Waiter, reason?: unknown): void {
+		const index = this.#waiters.indexOf(waiter)
+		if (index < 0) return
+		this.#waiters.splice(index, 1)
+		if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort)
+		waiter.reject(reason instanceof Error ? reason : new Error("Agent reservation cancelled"))
+	}
+
+	async runReservation<T>(tuple: ModelTuple, waiter: Waiter, ready: Promise<void>, work: () => Promise<T>): Promise<T> {
+		this.activate(waiter)
+		await ready
+		const permit = new Permit(this, tuple)
+		return this.#permits.run(permit, async () => {
+			try {
+				return await work()
+			} finally {
+				permit.release()
+			}
+		})
 	}
 
 	#drain(): void {
 		while (this.#active < this.#limit) {
-			const index = this.#waiters.findIndex(waiter => waiter.bypassTupleGate || !this.#closedTuples.has(waiter.tuple))
+			const index = this.#waiters.findIndex(waiter => waiter.eligible && (waiter.bypassTupleGate || !this.#closedTuples.has(waiter.tuple)))
 			if (index < 0) return
 			const [waiter] = this.#waiters.splice(index, 1)
 			if (!waiter) return
@@ -241,6 +308,38 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 			this.#active++
 			waiter.resolve()
 		}
+	}
+}
+
+class Reservation implements AgentReservation {
+	readonly acceptanceOrder: number
+	readonly #coordinator: ProcessAgentCoordinator
+	readonly #tuple: ModelTuple
+	readonly #waiter: Waiter
+	readonly #ready: Promise<void>
+	#used = false
+
+	constructor(coordinator: ProcessAgentCoordinator, tuple: ModelTuple, acceptanceOrder: number, waiter: Waiter, ready: Promise<void>) {
+		this.#coordinator = coordinator
+		this.#tuple = { ...tuple }
+		this.acceptanceOrder = acceptanceOrder
+		this.#waiter = waiter
+		this.#ready = ready
+		void this.#ready.catch(() => {})
+	}
+
+	activate(): void {
+		this.#coordinator.activate(this.#waiter)
+	}
+
+	async run<T>(work: () => Promise<T>): Promise<T> {
+		if (this.#used) throw new Error("Agent reservation has already been used")
+		this.#used = true
+		return this.#coordinator.runReservation(this.#tuple, this.#waiter, this.#ready, work)
+	}
+
+	cancel(reason?: unknown): void {
+		this.#coordinator.cancel(this.#waiter, reason)
 	}
 }
 
@@ -333,6 +432,7 @@ function isAgentCoordinator(value: unknown): value is AgentCoordinator {
 	return (
 		candidate.version === AGENT_COORDINATOR_VERSION &&
 		typeof candidate.acquire === "function" &&
+		typeof candidate.reserve === "function" &&
 		typeof candidate.withLentPermit === "function" &&
 		typeof candidate.setMaxConcurrency === "function" &&
 		typeof candidate.bindResident === "function" &&
