@@ -4,6 +4,7 @@ import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, unlink } f
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { type Static, Type } from "typebox"
 import { Value } from "typebox/value"
+import { publishTaskUpdate } from "./updates.js"
 
 export const TASK_METADATA_VERSION = 2
 export const TASK_REFERENCE_PATTERN = /^a_[0-9a-f]{8}$/
@@ -433,8 +434,9 @@ export async function initializeRetainedLogs(paths: TaskStoragePaths): Promise<v
 	await syncDirectory(paths.taskDirectory)
 }
 
-export function appendOutputLog(paths: TaskStoragePaths, entry: OutputLogEntry): Promise<void> {
-	return appendRetainedLog(paths.output, renderOutputLogEntry(entry))
+export async function appendOutputLog(paths: TaskStoragePaths, entry: OutputLogEntry): Promise<void> {
+	await appendRetainedLog(paths.output, renderOutputLogEntry(entry))
+	publishTaskUpdate(paths.workspace, paths.parentSessionId)
 }
 
 export function appendActivityLog(paths: TaskStoragePaths, entry: ActivityLogEntry): Promise<void> {
@@ -542,6 +544,7 @@ export function writeTaskMetadata(paths: TaskStoragePaths, metadata: TaskMetadat
 	return serializeMetadataMutation(paths.metadata, async () => {
 		assertMetadataForPath(paths, metadata)
 		await atomicWriteMetadata(paths.metadata, metadata)
+		publishTaskUpdate(paths.workspace, paths.parentSessionId)
 	})
 }
 
@@ -556,6 +559,7 @@ export function mutateTaskMetadata(
 		const updated = await mutate(structuredClone(loaded.metadata))
 		assertMetadataForPath(paths, updated)
 		await atomicWriteMetadata(paths.metadata, updated)
+		publishTaskUpdate(paths.workspace, paths.parentSessionId)
 		return updated
 	})
 }

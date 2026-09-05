@@ -12,17 +12,17 @@ type TextToolResult = {
 }
 
 /** Renders short results whole and long results as a head/tail preview toggled by Ctrl+O. */
-export function renderExpandableResult(result: TextToolResult, expanded: boolean, theme: Theme): Text {
+export function renderExpandableResult(result: TextToolResult, expanded: boolean, theme: Theme, outputPad = 0): Text {
 	const output = result.content
 		.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
 		.map(part => part.text)
 		.join("\n")
-	if (!output) return new Text("", 0, 0)
+	if (!output) return new Text("", outputPad, 0)
 
 	const lines = output.split("\n")
 	const characterCount = Array.from(output).length
 	if (expanded || (lines.length <= COLLAPSED_LINES && characterCount <= COLLAPSED_CHARACTERS)) {
-		return new Text(lines.map(line => theme.fg("toolOutput", line)).join("\n"), 0, 0)
+		return new Text(lines.map(line => theme.fg("toolOutput", line)).join("\n"), outputPad, 0)
 	}
 
 	const preview =
@@ -33,7 +33,7 @@ export function renderExpandableResult(result: TextToolResult, expanded: boolean
 					...lines.slice(-COLLAPSED_TAIL_LINES).map(line => theme.fg("toolOutput", previewLine(line)))
 				]
 			: characterPreview(output, theme)
-	return new Text(preview.join("\n"), 0, 0)
+	return new Text(preview.join("\n"), outputPad, 0)
 }
 
 function characterPreview(output: string, theme: Theme): string[] {

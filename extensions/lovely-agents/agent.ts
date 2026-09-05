@@ -272,38 +272,8 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 			)
 		},
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (signal?.aborted) throw abortError(signal)
-			validateInput(params.content, "content", MAX_AGENT_INPUT_BYTES)
-			const parentSessionId = ctx.sessionManager.getSessionId()
-			const lease = await acquireParentLease(ctx.cwd, parentSessionId)
-			const paths = taskStoragePaths(lease.paths, params.id)
-			const loaded = await readTaskMetadata(paths)
-			if (loaded.status === "missing") throw new Error(`Unknown Task Reference: ${params.id}`)
-			if (loaded.status === "invalid") throw new Error(loaded.diagnostic.message)
-			if (loaded.metadata.discardedAt !== null) throw new Error(`Task ${params.id} has been discarded`)
 			const requestedDelivery = params.delivery ?? "followup"
-			let accepted: ResidentInputResult | undefined
-			while (!accepted) {
-				if (signal?.aborted) throw abortError(signal)
-				const runtime = await controllableRuntime(ctx, paths, options)
-				try {
-					accepted = await runtime.input(params.content, requestedDelivery)
-				} catch (error) {
-					if (!isRuntimeClosingError(error)) throw error
-					await new Promise(resolve => setTimeout(resolve, 0))
-				}
-			}
-			const current = await readTaskMetadata(paths)
-			if (current.status !== "ok") throw new Error(`Could not read accepted task ${params.id}`)
-			const result: TaskInputResult = {
-				id: params.id,
-				requestedDelivery,
-				effectiveDelivery: accepted.delivery,
-				queuePosition: accepted.queuePosition,
-				state: current.metadata.state,
-				latestOutcome: current.metadata.latestOutcome,
-				queuedFollowUps: current.metadata.queuedFollowUps.length
-			}
+			const result = await sendTaskInput(ctx, options, params.id, params.content, requestedDelivery, signal)
 			return {
 				content: [
 					{
@@ -336,41 +306,7 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 				return new Text(`${theme.fg("toolTitle", theme.bold(`task_${action}`))}${args.id ? ` ${theme.fg("muted", args.id)}` : ""}`, 0, 0)
 			},
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-				const lease = await acquireParentLease(ctx.cwd, ctx.sessionManager.getSessionId())
-				const paths = taskStoragePaths(lease.paths, params.id)
-				let loaded = await readTaskMetadata(paths)
-				if (loaded.status === "missing") throw new Error(`Unknown Task Reference: ${params.id}`)
-				if (loaded.status === "invalid") throw new Error(loaded.diagnostic.message)
-				if (action === "stop" && loaded.metadata.discardedAt !== null) {
-					throw new Error(`Task ${params.id} has been discarded`)
-				}
-				if (loaded.metadata.discardedAt === null) {
-					await stopTask(paths)
-					if (action === "discard") {
-						const discardedAt = Date.now()
-						await mutateTaskMetadata(paths, metadata => ({
-							...metadata,
-							discardedAt,
-							queuedFollowUps: [],
-							updatedAt: discardedAt
-						}))
-						// Fence input accepted between the initial stop and tombstone.
-						await stopTask(paths)
-					}
-					await stopOwnedTaskTree(ctx.cwd, loaded.metadata.childSessionId)
-					loaded = await readTaskMetadata(paths)
-					if (loaded.status !== "ok") throw new Error(`Could not read task ${params.id}`)
-				}
-				const metadata = loaded.metadata
-				const details = {
-					id: metadata.taskRef,
-					action,
-					state: metadata.state,
-					latestOutcome: metadata.latestOutcome,
-					discarded: metadata.discardedAt !== null,
-					queuedFollowUps: metadata.queuedFollowUps.length,
-					paths: retainedPaths(paths)
-				}
+				const details = await controlTaskLifecycle(ctx, params.id, action)
 				return {
 					content: [
 						{
@@ -385,6 +321,82 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 				}
 			}
 		})
+	}
+}
+
+export async function sendTaskInput(
+	ctx: ExtensionContext,
+	options: AgentToolOptions,
+	id: string,
+	content: string,
+	requestedDelivery: "followup" | "steer",
+	signal?: AbortSignal
+): Promise<TaskInputResult> {
+	if (signal?.aborted) throw abortError(signal)
+	validateInput(content, "content", MAX_AGENT_INPUT_BYTES)
+	const lease = await acquireParentLease(ctx.cwd, ctx.sessionManager.getSessionId())
+	const paths = taskStoragePaths(lease.paths, id)
+	const loaded = await readTaskMetadata(paths)
+	if (loaded.status === "missing") throw new Error(`Unknown Task Reference: ${id}`)
+	if (loaded.status === "invalid") throw new Error(loaded.diagnostic.message)
+	if (loaded.metadata.discardedAt !== null) throw new Error(`Task ${id} has been discarded`)
+	let accepted: ResidentInputResult | undefined
+	while (!accepted) {
+		if (signal?.aborted) throw abortError(signal)
+		const runtime = await controllableRuntime(ctx, paths, options)
+		try {
+			accepted = await runtime.input(content, requestedDelivery)
+		} catch (error) {
+			if (!isRuntimeClosingError(error)) throw error
+			await new Promise(resolve => setTimeout(resolve, 0))
+		}
+	}
+	const current = await readTaskMetadata(paths)
+	if (current.status !== "ok") throw new Error(`Could not read accepted task ${id}`)
+	return {
+		id,
+		requestedDelivery,
+		effectiveDelivery: accepted.delivery,
+		queuePosition: accepted.queuePosition,
+		state: current.metadata.state,
+		latestOutcome: current.metadata.latestOutcome,
+		queuedFollowUps: current.metadata.queuedFollowUps.length
+	}
+}
+
+export async function controlTaskLifecycle(ctx: ExtensionContext, id: string, action: "stop" | "discard") {
+	const lease = await acquireParentLease(ctx.cwd, ctx.sessionManager.getSessionId())
+	const paths = taskStoragePaths(lease.paths, id)
+	let loaded = await readTaskMetadata(paths)
+	if (loaded.status === "missing") throw new Error(`Unknown Task Reference: ${id}`)
+	if (loaded.status === "invalid") throw new Error(loaded.diagnostic.message)
+	if (action === "stop" && loaded.metadata.discardedAt !== null) throw new Error(`Task ${id} has been discarded`)
+	if (loaded.metadata.discardedAt === null) {
+		await stopTask(paths)
+		if (action === "discard") {
+			const discardedAt = Date.now()
+			await mutateTaskMetadata(paths, metadata => ({
+				...metadata,
+				discardedAt,
+				queuedFollowUps: [],
+				updatedAt: discardedAt
+			}))
+			// Fence input accepted between the initial stop and tombstone.
+			await stopTask(paths)
+		}
+		await stopOwnedTaskTree(ctx.cwd, loaded.metadata.childSessionId)
+		loaded = await readTaskMetadata(paths)
+		if (loaded.status !== "ok") throw new Error(`Could not read task ${id}`)
+	}
+	const metadata = loaded.metadata
+	return {
+		id: metadata.taskRef,
+		action,
+		state: metadata.state,
+		latestOutcome: metadata.latestOutcome,
+		discarded: metadata.discardedAt !== null,
+		queuedFollowUps: metadata.queuedFollowUps.length,
+		paths: retainedPaths(paths)
 	}
 }
 

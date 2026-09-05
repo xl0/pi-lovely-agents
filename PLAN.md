@@ -765,19 +765,14 @@ excluding synchronous initial results and explicit stops.
 
 ### [ ] 6. Live controls and release readiness
 
-#### [ ] 6.1 Live task controls and status
+#### [x] 6.1 Live task controls and status
 
-Extend the unified `/lovely-agents` UI after task controls exist. Show compact
-active counts with `setStatus` and active rows in a below-editor widget. Support
-live output, Follow-up/Steer entry, stop, discard, and queue state without
-rebinding the main Pi session. Down on an empty editor opens the task view.
-
-Keep print/JSON behavior noninteractive and plain. Share rendering state through
-the coordinator so child events request parent TUI updates without polling.
-
-Done when manual TUI checks cover narrow/wide terminals, no-task/running/idle
-views, live updates, keyboard help, empty-editor Down behavior, cancellation,
-and reload cleanup.
+Compact active counts, below-editor rows, event-driven live output,
+Follow-up/Steer entry, stop/discard, and empty-editor Down task access without
+rebinding the main Pi session. Durable metadata/output writes publish through a
+process-global update bus; no polling is used. Print/JSON behavior remains
+noninteractive and plain. Notifications share Ctrl+O expansion with tool
+results; Pi custom-message rendering does not provide tool-style click toggles.
 
 #### [ ] 6.2 Documentation and package verification
 

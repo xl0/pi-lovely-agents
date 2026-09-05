@@ -11,15 +11,19 @@ import {
 	ensureParentStorage,
 	initializeRetainedLogs,
 	mutateTaskMetadata,
+	parentStoragePaths,
+	readRetainedOutput,
 	readTaskMetadata,
 	reserveTaskStorage,
 	TASK_METADATA_VERSION,
 	TASK_REFERENCE_PATTERN,
 	type TaskMetadata,
 	type TaskStoragePaths,
+	taskStoragePaths,
 	writeTaskMetadata
 } from "./state.js"
 import type { TaskListResult, TaskListRow } from "./tools.js"
+import { bindTaskUpdateRoute } from "./updates.js"
 
 const FIXTURE_MARKER = ".fixture"
 const FIXTURE_DEFINITION = "lovely-fixture"
@@ -33,6 +37,8 @@ export type ManagementUiOptions = {
 	discoverDefinitions: () => DefinitionDiscoveryResult
 	loadTasks: () => Promise<TaskListResult>
 	openConfig: () => Promise<void>
+	inputTask: (id: string, content: string, delivery: "followup" | "steer") => Promise<void>
+	controlTask: (id: string, action: "stop" | "discard") => Promise<void>
 }
 
 export async function openManagementUi(ctx: ExtensionContext, options: ManagementUiOptions): Promise<void> {
@@ -56,7 +62,7 @@ export async function openManagementUi(ctx: ExtensionContext, options: Managemen
 				await showDefinitions(ctx, definitions)
 				break
 			case "tasks":
-				await showTasks(ctx, options.loadTasks)
+				await showTasks(ctx, options)
 				break
 			case "fixtures":
 				await showFixtureMenu(ctx)
@@ -66,6 +72,10 @@ export async function openManagementUi(ctx: ExtensionContext, options: Managemen
 				break
 		}
 	}
+}
+
+export async function openTaskManagementUi(ctx: ExtensionContext, options: ManagementUiOptions): Promise<void> {
+	await showTasks(ctx, options)
 }
 
 export async function seedFixtureTasks(cwd: string, parentSessionId: string): Promise<string[]> {
@@ -228,9 +238,9 @@ async function showDefinitions(ctx: ExtensionContext, discovered: DefinitionDisc
 	}
 }
 
-async function showTasks(ctx: ExtensionContext, loadTasks: () => Promise<TaskListResult>): Promise<void> {
+async function showTasks(ctx: ExtensionContext, options: ManagementUiOptions): Promise<void> {
 	while (true) {
-		const tasks = await loadTasks()
+		const tasks = await options.loadTasks()
 		const items: SelectItem[] = [
 			...tasks.tasks.map(task => ({
 				value: `task:${task.id}`,
@@ -251,12 +261,80 @@ async function showTasks(ctx: ExtensionContext, loadTasks: () => Promise<TaskLis
 		if (!choice) return
 		if (choice.startsWith("task:")) {
 			const task = tasks.tasks.find(item => item.id === choice.slice("task:".length))
-			if (task) await showText(ctx, task.label, renderTask(task))
+			if (task) await manageTask(ctx, task.id, options)
 		} else {
 			const diagnostic = tasks.diagnostics[Number(choice.slice("diagnostic:".length))]
 			if (diagnostic) await showText(ctx, diagnostic.code, `${diagnostic.message}\n\n${diagnostic.path}`)
 		}
 	}
+}
+
+async function manageTask(ctx: ExtensionContext, id: string, options: ManagementUiOptions): Promise<void> {
+	while (true) {
+		const task = (await options.loadTasks()).tasks.find(candidate => candidate.id === id)
+		if (!task) return
+		const choice = await select(ctx, task.label, [
+			{ value: "details", label: "Details", description: `${task.state}${task.latestOutcome ? `/${task.latestOutcome}` : ""}` },
+			{ value: "output", label: "Live output", description: `${task.outputLines ?? 0} retained lines` },
+			{ value: "followup", label: "Follow-up", description: "Queue durable work after the current run" },
+			{ value: "steer", label: "Steer", description: "Redirect running work; otherwise becomes a Follow-up" },
+			{ value: "stop", label: "Stop", description: "Stop work and preserve the session" },
+			{ value: "discard", label: "Discard", description: "Stop, hide, and retain files" }
+		])
+		if (!choice) return
+		if (choice === "details") await showText(ctx, task.label, renderTask(task))
+		else if (choice === "output") await showLiveTaskOutput(ctx, task)
+		else if (choice === "followup" || choice === "steer") {
+			const content = await ctx.ui.editor(`${title(choice)} ${task.id}`)
+			if (content?.trim()) {
+				await options.inputTask(task.id, content, choice)
+				ctx.ui.notify(`${title(choice)} accepted for ${task.id}`, "info")
+			}
+		} else if (choice === "stop") {
+			if (await ctx.ui.confirm(`Stop ${task.id}?`, "The retained session remains reusable.")) {
+				await options.controlTask(task.id, "stop")
+			}
+		} else if (await ctx.ui.confirm(`Discard ${task.id}?`, "Files remain retained, but later model I/O is rejected.")) {
+			await options.controlTask(task.id, "discard")
+			return
+		}
+	}
+}
+
+async function showLiveTaskOutput(ctx: ExtensionContext, task: TaskListRow): Promise<void> {
+	const paths = taskStoragePaths(parentStoragePaths(ctx.cwd, ctx.sessionManager.getSessionId()), task.id)
+	let output = await readRetainedOutput(paths)
+	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+		let closed = false
+		let loading = false
+		const refresh = async () => {
+			if (closed || loading) return
+			loading = true
+			try {
+				output = await readRetainedOutput(paths)
+				tui.requestRender()
+			} finally {
+				loading = false
+			}
+		}
+		const unbind = bindTaskUpdateRoute(ctx.cwd, ctx.sessionManager.getSessionId(), refresh)
+		return {
+			render(width: number) {
+				const heading = theme.fg("accent", theme.bold(`${task.id} · ${output.state} · ${output.totalLines} lines`))
+				return new Text(`${heading}\n\n${output.text || "(no output)"}\n\n${theme.fg("dim", "Esc or Enter to go back")}`, 1, 0).render(
+					width
+				)
+			},
+			invalidate() {},
+			handleInput(data: string) {
+				if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) done(undefined)
+			},
+			dispose() {
+				closed = true
+				unbind()
+			}
+		}
+	})
 }
 
 async function showFixtureMenu(ctx: ExtensionContext): Promise<void> {

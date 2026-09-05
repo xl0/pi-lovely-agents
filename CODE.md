@@ -98,7 +98,8 @@ use one line, and agent creation omits redundant task inventory. Full artifact
 paths and exact metadata remain in tool `details`. Potentially long Lovely
 Agent, roster, list, and output tool results show a ten-line head/tail preview;
 the configured `app.tools.expand` binding (Ctrl+O by default) reveals the full
-fetched result.
+fetched result. Durable notifications use the same collapsed rendering and
+expansion binding.
 
 One versioned coordinator is shared through a package-owned `globalThis`
 symbol. Its acceptance-ordered semaphore skips closed provider/model tuples,
@@ -179,9 +180,14 @@ visible for now. They seed states/outcomes plus queued, nested, discarded,
 corrupt, large UTF-8, and live-transition cases. Cleanup removes only
 owner-marked `.fixture` task directories across direct and nested partitions.
 Definition previews include their complete system-prompt body. Definition/task
-detail views never rebind Pi's active session. Live fixture timers use a
-process-global registry so reload preserves them and semantic shutdown stops
-them before releasing the parent lease.
+detail views never rebind Pi's active session. Task views provide event-driven
+live output, Follow-up/Steer entry, stop, and discard. Active counts appear in
+the footer and up to five active rows appear below the editor. Down on an empty
+editor opens task management through a replacement-safe editor wrapper.
+Process-global update routes refresh these surfaces on durable metadata/output
+writes without polling. Live fixture timers use a process-global registry so
+reload preserves them and semantic shutdown stops them before releasing the
+parent lease.
 
 `/continue` first requeues owned suspended descendants, then sends a hidden
 empty custom message with Follow-up delivery and `triggerTurn: true` when the
