@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Key, matchesKey, type SelectItem, SelectList, truncateToWidth } from "@earendil-works/pi-tui"
-import type { TaskListResult } from "./tools.js"
+import { relativeTime, type TaskListResult, type TaskListRow } from "./tools.js"
 import { bindTaskUpdateRoute } from "./updates.js"
 
 const PANEL_ID = "lovely-agents"
@@ -12,6 +12,7 @@ export function createTaskPanel(
 ) {
 	let tasks: TaskListResult["tasks"] = []
 	let items: SelectItem[] = []
+	let capacity = { active: 0, limit: 0 }
 	let selected: string | undefined
 	let focused = false
 	let opening = false
@@ -22,7 +23,7 @@ export function createTaskPanel(
 	function draw() {
 		if (disposed) return
 		const active = tasks.filter(task => task.state === "queued" || task.state === "running" || task.state === "suspended")
-		ctx.ui.setStatus(PANEL_ID, active.length > 0 ? `agents:${active.length}` : undefined)
+		ctx.ui.setStatus(PANEL_ID, active.length > 0 ? `agents:${active.length} slots:${capacity.active}/${capacity.limit}` : undefined)
 		if (opening || (!focused && active.length === 0)) {
 			ctx.ui.setWidget(PANEL_ID, undefined)
 			return
@@ -40,9 +41,11 @@ export function createTaskPanel(
 						noMatch: text => theme.fg("warning", text)
 					})
 					list.setSelectedIndex(items.findIndex(item => item.value === selected))
+					const activity = tasks.find(task => `task:${task.id}` === selected)?.lastActivity
 					return [
-						theme.fg("accent", "Tasks"),
+						theme.fg("accent", `Tasks · capacity ${capacity.active}/${capacity.limit}`),
 						...(items.length > 0 ? list.render(width) : ["No durable tasks for this session."]),
+						...(activity ? [theme.fg("muted", `${activity.action} · ${relativeTime(activity.at, Date.now())}`)] : []),
 						theme.fg("dim", "↑↓ navigate · Enter actions · Esc/↑ at top editor · type to edit")
 					].map(line => truncateToWidth(line, width))
 				},
@@ -62,11 +65,12 @@ export function createTaskPanel(
 				if (disposed) return
 				const oldIndex = items.findIndex(item => item.value === selected)
 				tasks = result.tasks
+				capacity = result.capacity
 				items = [
 					...tasks.map(task => ({
 						value: `task:${task.id}`,
 						label: `${task.id} ${task.state}${task.latestOutcome ? `/${task.latestOutcome}` : ""} ${task.label}`.replace(/[\r\n]+/g, " "),
-						description: `${task.model}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}`
+						description: `${task.queueReason ? `waiting: ${task.queueReason} · ` : ""}${task.model}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}`
 					})),
 					...result.diagnostics.map(diagnostic => ({
 						value: `diagnostic:${diagnostic.path}`,
@@ -149,12 +153,24 @@ export function createTaskPanel(
 	}
 }
 
-export function renderActiveTaskRows(tasks: readonly { id: string; label: string; state: string; queuedFollowUps: number }[]): string[] {
+export function renderActiveTaskRows(
+	tasks: readonly ({
+		id: string
+		label: string
+		state: string
+		queuedFollowUps: number
+	} & Partial<Pick<TaskListRow, "queueReason" | "lastActivity">>)[]
+): string[] {
 	const rows = tasks
 		.slice(0, 5)
 		.map(
 			task =>
-				`↳ ${task.id} ${task.state} ${task.label.replace(/[\r\n]+/g, " ")}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}`
+				`↳ ${task.id} ${task.state} ${task.label.replace(/[\r\n]+/g, " ")}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}` +
+				(task.queueReason
+					? ` · waiting: ${task.queueReason}`
+					: task.lastActivity
+						? ` · ${task.lastActivity.action} (${relativeTime(task.lastActivity.at, Date.now())})`
+						: "")
 		)
 	if (tasks.length > rows.length) rows.push(`  … ${tasks.length - rows.length} more active`)
 	return rows

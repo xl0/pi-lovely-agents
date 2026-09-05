@@ -23,6 +23,18 @@ management UI are available.
 - `task_input` — queue a Follow-up or Steer a running agent
 - `task_stop` / `task_discard` — stop work or permanently archive the owned subtree
 
+Task inspection reports last observed activity and shared held/max execution
+permits. Queued work shows `capacity`, `provider-limit`, or transitional
+`starting`; no ETA is inferred. Thinking and tool activity remain visible
+without copying reasoning or tool payloads into snapshots. `waitMs` wakes on
+reply, activity, status, or scheduling changes; it never stops the run.
+
+In the task UI, **Inputs / history** shows current and queued inputs plus prior
+runs and delivered Steers. **System prompt** shows only Pi's captured prompt.
+Use arrows, PgUp/PgDn, or Home/End to scroll. Missing captures produce a separate
+notification, not substitute content. Provider-level payload rewrites are not
+captured.
+
 Definitions are Markdown files in `~/.pi/agent/agents/` or the nearest trusted
 `.pi/agents/` ancestor. Project definitions override user definitions by name.
 The management UI's always-visible developer section creates dummy durable

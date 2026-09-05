@@ -3,7 +3,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { type Component, visibleWidth } from "@earendil-works/pi-tui"
 import { createTaskPanel } from "../../extensions/lovely-agents/task-panel.js"
 import type { TaskListResult, TaskListRow } from "../../extensions/lovely-agents/tools.js"
-import { publishTaskUpdate } from "../../extensions/lovely-agents/updates.js"
+import { publishSchedulerUpdate, publishTaskUpdate } from "../../extensions/lovely-agents/updates.js"
 
 const down = "\x1b[B"
 const up = "\x1b[A"
@@ -56,6 +56,33 @@ test("navigation scrolls five rows, bounds width, and preserves selection across
 	h.result.tasks.shift()
 	await h.panel.refresh()
 	expect(h.lines().join("\n")).toContain("→ a_00000007")
+})
+
+test("shows queue reasons, capacity, and activity through event-driven updates", async () => {
+	const h = harness()
+	const task = h.result.tasks[0]
+	if (!task) throw new Error("Missing fixture task")
+	task.state = "queued"
+	task.queueReason = "capacity"
+	h.result.capacity = { active: 4, limit: 4 }
+	await h.panel.refresh()
+	expect(h.lines().join("\n")).toContain("waiting: capacity")
+	h.panel.focus()
+	expect(h.lines().join("\n")).toContain("capacity 4/4")
+	task.queueReason = "provider-limit"
+	h.result.capacity = { active: 0, limit: 4 }
+	publishSchedulerUpdate()
+	await Bun.sleep(0)
+	expect(h.lines().join("\n")).toContain("waiting: provider-limit")
+	expect(h.lines().join("\n")).toContain("capacity 0/4")
+	task.state = "running"
+	task.queueReason = null
+	task.lastActivity = { at: Date.now() - 20_000, action: "thinking" }
+	publishTaskUpdate(h.ctx.cwd, "parent")
+	await Bun.sleep(0)
+	expect(h.lines().join("\n")).toContain("thinking")
+	h.panel.handleInput(esc, true)
+	expect(h.lines().join("\n")).toMatch(/thinking \(\d+s ago\)/)
 })
 
 test("Enter opens the selected task once, hides duplicate rows, then returns to its selection", async () => {
@@ -157,7 +184,7 @@ function row(index: number): TaskListRow {
 function harness(open: () => Promise<void> = async () => {}) {
 	let component: Component | undefined
 	const h = {
-		result: { tasks: [row(0), row(1)], diagnostics: [], total: 2 } as TaskListResult,
+		result: { tasks: [row(0), row(1)], diagnostics: [], total: 2, capacity: { active: 1, limit: 4 } } as TaskListResult,
 		load: (): Promise<TaskListResult> => Promise.resolve(h.result),
 		opened: [] as string[],
 		errors: [] as string[],

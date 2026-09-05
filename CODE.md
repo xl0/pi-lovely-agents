@@ -65,8 +65,15 @@ explicit-vs-omitted tool policy, context exclusion, and scoped model identities.
 It also retains scheduler acceptance order and the latest assistant reply.
 Reply snapshots share the metadata mutation lane, so status and text are read
 atomically. Promoting a new run clears the old reply; run-ID checks fence late
-stream events. Streaming writes coalesce token bursts. Earlier
+stream events. Reply and last-activity writes coalesce together so burst events
+cannot reorder their final action. Optional `lastActivity` records observed work,
+not bookkeeping timestamps: start, thinking, reply, or tool activity, without
+reasoning/tool payloads. Thinking and tool-update heartbeats are event-driven,
+capped at one per second. New runs reset activity as well as the reply. Earlier
 metadata versions are rejected rather than cold-loaded with wider capabilities.
+Optional `effectiveSystemPrompt` captures Pi's composed string at `agent_start`,
+after `before_agent_start` hooks, and clears on a new run. It excludes
+provider-payload rewrites and stays out of model-visible inspection results.
 Metadata and retained-log queues are process-global so surviving runtimes and
 new extension instances remain serialized across reload.
 
@@ -91,7 +98,11 @@ summaries without descendant Task References. All direct rows and diagnostics
 are returned at once. `task_output` rejects foreign/discarded tasks and returns
 only the latest assistant reply from the current run, bounded to 2,000
 lines/50 KiB with a full-history reference on truncation. Optional long-polling
-waits for reply or status changes, including equal-length text replacements.
+waits for reply, activity, status, or scheduling changes, including equal-length
+text replacements. Lists and snapshots expose process-wide held/max execution
+permits and queued reasons: `provider-limit`, `capacity`, or transitional
+`starting`. Counts reflect cooperative permits, not running-state counts;
+no queue position or ETA is inferred.
 It returns snapshots, not offsets or continuation pages. Streaming is separate
 from run status; message completion is not run completion. Semantic shutdown
 releases the parent lease; reload keeps it.
@@ -118,6 +129,8 @@ reacquisition bypasses tuple gates because the caller was already running.
 Inactive reservations hold Follow-up acceptance order without consuming
 capacity; atomic promotion activates the next reservation before the current
 permit is released.
+Coordinator implementation changes require a process restart; reload retains
+the existing coordinator object.
 
 Terminal quota, billing, budget, usage-limit, rate-limit/429, and
 `ResourceExhausted` assistant errors suspend the active run and close its exact
@@ -197,8 +210,14 @@ visible for now. They seed states/outcomes plus queued, nested, discarded,
 corrupt, large UTF-8, and live-transition cases. Cleanup removes only
 owner-marked `.fixture` task directories across direct and nested partitions.
 Definition previews include their complete system-prompt body. Definition/task
-detail views never rebind Pi's active session. Task views provide event-driven
-live output, Follow-up/Steer entry, stop, and discard. Active counts appear in
+detail views never rebind Pi's active session. Task actions include on-demand
+Inputs / history (current/queued inputs plus the unparsed retained history) and
+System prompt (only the captured Pi prompt, without explanatory text or a
+duplicated Definition body). Missing captures produce a separate notification,
+never substituted content or reconstruction from today's context files.
+Static text views wrap and scroll with arrows, PgUp/PgDn, and Home/End.
+Task views also provide event-driven live output, Follow-up/Steer entry, stop,
+and discard. Active counts appear in
 the footer and up to five active rows appear below the editor. Down on an empty
 editor focuses that same panel, exposing all direct tasks and diagnostics in a
 five-row scrolling list. `/lovely-agents` → Tasks hands off to the panel rather
@@ -207,7 +226,9 @@ Enter opens actions; Esc or Up past the first row returns to the editor, and
 other input passes through unchanged. Action/output views hide the panel until
 they close. The editor wrapper preserves and restores the prior factory.
 Process-global update routes refresh these surfaces on durable metadata/output
-writes without polling; panel disposal fences in-flight refreshes.
+writes and shared capacity/gate changes without polling. Last-action ages are
+computed when rendered; panel disposal fences in-flight refreshes. Snapshot
+waits subscribe to scheduler updates as well as filesystem changes.
 Live fixture timers use a process-global registry so
 reload preserves them and semantic shutdown stops them before releasing the
 parent lease.

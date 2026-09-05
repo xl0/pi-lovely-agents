@@ -4,7 +4,8 @@ import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, unlink } f
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { type Static, Type } from "typebox"
 import { Value } from "typebox/value"
-import { publishTaskUpdate } from "./updates.js"
+import { getAgentCoordinator } from "./coordinator.js"
+import { bindTaskUpdateRoute, publishTaskUpdate } from "./updates.js"
 
 export const TASK_METADATA_VERSION = 3
 export const TASK_REFERENCE_PATTERN = /^a_[0-9a-f]{8}$/
@@ -136,6 +137,17 @@ export const TaskMetadataSchema = Type.Object(
 			Type.Object({ text: Type.String(), streaming: Type.Boolean() }, { additionalProperties: false }),
 			Type.Null()
 		]),
+		lastActivity: Type.Optional(
+			Type.Object(
+				{
+					at: Timestamp,
+					action: Type.String({ minLength: 1, maxLength: 200 })
+				},
+				{ additionalProperties: false }
+			)
+		),
+		// Pi's composed prompt at agent start, distinct from the immutable Definition recipe.
+		effectiveSystemPrompt: Type.Optional(Type.String()),
 		lastRunSequence: Type.Integer({ minimum: 0 }),
 		activeRun: Type.Union([ActiveRun, Type.Null()]),
 		queuedFollowUps: Type.Array(QueuedFollowUp, { maxItems: MAX_QUEUED_FOLLOWUPS }),
@@ -200,6 +212,10 @@ export type RetainedOutputRead = {
 	latestOutcome: Static<typeof RunOutcome> | null
 	streaming: boolean
 	queuedFollowUps: number
+	lastActivity: NonNullable<TaskMetadata["lastActivity"]> | null
+	queueReason: "capacity" | "provider-limit" | "starting" | null
+	/** Held process-wide execution permits, not the number of tasks in running state. */
+	capacity: { active: number; limit: number }
 	paths: RetainedPaths
 }
 
@@ -476,12 +492,37 @@ export async function appendHistoryLog(paths: TaskStoragePaths, entry: HistoryEn
 	publishTaskUpdate(paths.workspace, paths.parentSessionId)
 }
 
-/** Late events cannot overwrite a newer run or a discarded task. */
-export async function writeLatestReply(paths: TaskStoragePaths, runId: string, text: string, streaming: boolean): Promise<void> {
+/** Coalesced observed work; late events cannot overwrite a newer or settled run. */
+export async function writeTaskProgress(
+	paths: TaskStoragePaths,
+	runId: string,
+	progress: Partial<Pick<TaskMetadata, "latestReply" | "lastActivity" | "effectiveSystemPrompt">>
+): Promise<void> {
 	await mutateTaskMetadata(paths, metadata => {
 		if (metadata.discardedAt !== null || metadata.activeRun?.id !== runId || metadata.state !== "running") return metadata
-		return { ...metadata, latestReply: { text, streaming }, updatedAt: Date.now() }
+		return {
+			...metadata,
+			...progress,
+			updatedAt: Date.now()
+		}
 	})
+}
+
+/** Explain queued work without pretending to know its ETA or FIFO position. */
+export function taskSchedulingStatus(
+	metadata: Pick<TaskMetadata, "state" | "model">
+): Pick<RetainedOutputRead, "queueReason" | "capacity"> {
+	const coordinator = getAgentCoordinator()
+	const capacity = { active: coordinator.activeCount, limit: coordinator.maxConcurrency }
+	const queueReason =
+		metadata.state !== "queued"
+			? null
+			: !coordinator.isTupleOpen({ provider: metadata.model.provider, model: metadata.model.id })
+				? "provider-limit"
+				: capacity.active >= capacity.limit
+					? "capacity"
+					: "starting"
+	return { queueReason, capacity }
 }
 
 export function retainedPaths(paths: TaskStoragePaths): RetainedPaths {
@@ -527,6 +568,8 @@ export async function readRetainedOutput(paths: TaskStoragePaths, options: Retai
 		latestOutcome: metadata.activeRun ? null : metadata.latestOutcome,
 		streaming: metadata.state === "running" && (metadata.latestReply?.streaming ?? false),
 		queuedFollowUps: metadata.queuedFollowUps.length,
+		lastActivity: metadata.lastActivity ?? null,
+		...taskSchedulingStatus(metadata),
 		paths: retainedPaths(paths)
 	}
 }
@@ -615,7 +658,11 @@ export function mutateTaskMetadata(
 		const loaded = await readTaskMetadata(paths)
 		if (loaded.status !== "ok") throw new InvalidTaskMetadataError(metadataLoadError(loaded, paths.metadata))
 		const updated = await mutate(structuredClone(loaded.metadata))
-		if (updated.activeRun && updated.activeRun.id !== loaded.metadata.activeRun?.id) updated.latestReply = null
+		if (updated.activeRun && updated.activeRun.id !== loaded.metadata.activeRun?.id) {
+			updated.latestReply = null
+			updated.lastActivity = { at: updated.updatedAt, action: updated.state }
+			delete updated.effectiveSystemPrompt
+		}
 		if (updated.state !== "running" && updated.latestReply) updated.latestReply.streaming = false
 		assertMetadataForPath(paths, updated)
 		await atomicWriteMetadata(paths.metadata, updated)
@@ -734,6 +781,7 @@ async function waitForRetainedChange(paths: TaskStoragePaths, baseline: string, 
 		let settled = false
 		let checking = false
 		let checkPending = false
+		let unbindUpdates: (() => void) | undefined
 		const watcher = watch(paths.taskDirectory, { persistent: false }, () => {
 			requestCheck()
 		})
@@ -742,6 +790,7 @@ async function waitForRetainedChange(paths: TaskStoragePaths, baseline: string, 
 		const cleanup = () => {
 			clearTimeout(timer)
 			watcher.close()
+			unbindUpdates?.()
 			signal?.removeEventListener("abort", onAbort)
 		}
 		const finish = (changed: boolean) => {
@@ -781,6 +830,7 @@ async function waitForRetainedChange(paths: TaskStoragePaths, baseline: string, 
 		}
 
 		watcher.once("error", fail)
+		unbindUpdates = bindTaskUpdateRoute(paths.workspace, paths.parentSessionId, requestCheck)
 		signal?.addEventListener("abort", onAbort, { once: true })
 		requestCheck()
 	})
@@ -792,7 +842,9 @@ function retainedObservation(metadata: TaskMetadata): string {
 		metadata.state,
 		metadata.latestOutcome,
 		metadata.latestReply,
-		metadata.queuedFollowUps.length
+		metadata.queuedFollowUps.length,
+		metadata.lastActivity,
+		taskSchedulingStatus(metadata)
 	])
 }
 

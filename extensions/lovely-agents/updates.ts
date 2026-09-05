@@ -19,7 +19,19 @@ export function bindTaskUpdateRoute(cwd: string, parentSessionId: string, route:
 /** Requests an event-driven refresh without waiting for UI work. */
 export function publishTaskUpdate(cwd: string, parentSessionId: string): void {
 	for (const route of [...(taskUpdateRoutes().get(taskUpdateKey(cwd, parentSessionId)) ?? [])])
-		void Promise.resolve(route()).catch(() => {})
+		void Promise.resolve()
+			.then(route)
+			.catch(() => {})
+}
+
+/** Capacity and tuple gates are process-wide, so every open task panel may change. */
+export function publishSchedulerUpdate(): void {
+	for (const routes of taskUpdateRoutes().values()) {
+		for (const route of [...routes])
+			void Promise.resolve()
+				.then(route)
+				.catch(() => {})
+	}
 }
 
 function taskUpdateRoutes(): Map<string, Set<TaskUpdateRoute>> {

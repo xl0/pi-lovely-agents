@@ -36,7 +36,8 @@ describe("read-only task tools", () => {
 				childSessionId: "child-six",
 				label: "Newer running",
 				state: "running",
-				updatedAt: 20
+				updatedAt: 20,
+				lastActivity: { at: 20, action: "thinking" }
 			})
 			await createTask(workspace.cwd, "parent-session", {
 				id: "a_00000000",
@@ -116,6 +117,7 @@ describe("read-only task tools", () => {
 				"a_00000005"
 			])
 			expect(details.total).toBe(7)
+			expect(details.tasks[0]?.lastActivity).toEqual({ at: 20, action: "thinking" })
 			expect(details.diagnostics).toHaveLength(1)
 			expect(details.diagnostics[0]?.id).toBe("a_00000008")
 			expect(details.tasks.some(task => task.id === "a_10000001")).toBe(false)
@@ -134,6 +136,9 @@ describe("read-only task tools", () => {
 			expect(full.content[0]?.text).toContain("model: anthropic/sonnet:high")
 			expect(full.content[0]?.text).toContain("created:")
 			expect(full.content[0]?.text).toContain("updated:")
+			expect(full.content[0]?.text).toContain("capacity:")
+			expect(full.content[0]?.text).toContain("waiting:")
+			expect(full.content[0]?.text).toContain("last_activity: thinking")
 			expect(full.content[0]?.text).toContain("dir: .pi/lovely-agents/parent-session/a_00000001")
 			expect(full.content[0]?.text).not.toContain("created_at:")
 			expect(full.content[0]?.text).not.toContain("accepted_at:")
@@ -157,6 +162,7 @@ describe("read-only task tools", () => {
 				state: "running",
 				updatedAt: 1,
 				output: "first\nsecond\nthird\n",
+				lastActivity: { at: 1, action: "reply complete" },
 				queuedFollowUps: 1
 			})
 			await createTask(workspace.cwd, "child-one", {
@@ -180,6 +186,8 @@ describe("read-only task tools", () => {
 			const result = await captured.tools.get("task_output")?.execute("output", { id: "a_00000001" }, undefined, ctx)
 			if (!result) throw new Error("task_output was not registered")
 			const details = result.details as TaskOutputResult
+			expect(result.content[0]?.text).toContain("last_activity: reply complete")
+			expect(result.content[0]?.text).toContain("execution permits")
 			expect(details).toMatchObject({
 				id: "a_00000001",
 				state: "running",
@@ -236,6 +244,7 @@ type TaskFixture = {
 	output?: string
 	queuedFollowUps?: number
 	discarded?: boolean
+	lastActivity?: TaskMetadata["lastActivity"]
 }
 
 async function createTask(cwd: string, parentSessionId: string, fixture: TaskFixture): Promise<TaskStoragePaths> {
@@ -275,6 +284,7 @@ function taskMetadata(paths: TaskStoragePaths, fixture: TaskFixture): TaskMetada
 		state: fixture.state,
 		latestOutcome: fixture.outcome ?? null,
 		latestReply: fixture.output ? { text: fixture.output, streaming: false } : null,
+		...(fixture.lastActivity ? { lastActivity: fixture.lastActivity } : {}),
 		lastRunSequence: activeState ? 1 + queuedFollowUps.length : fixture.outcome ? 1 : 0,
 		activeRun: activeState
 			? {
@@ -355,6 +365,8 @@ function largeRow(index: number): TaskListRow {
 		detachedAt: null,
 		queuedFollowUps: 0,
 		outputLines: 1,
+		lastActivity: null,
+		queueReason: null,
 		paths: { history: `${longPath}/history.md`, session: `${longPath}/session.jsonl` },
 		descendants: {
 			total: 0,

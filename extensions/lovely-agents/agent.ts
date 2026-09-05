@@ -38,8 +38,8 @@ import {
 	type TaskMetadata,
 	type TaskStoragePaths,
 	taskStoragePaths,
-	writeLatestReply,
-	writeTaskMetadata
+	writeTaskMetadata,
+	writeTaskProgress
 } from "./state.js"
 import { loadTaskList } from "./tools.js"
 
@@ -209,6 +209,7 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 					state: "queued",
 					latestOutcome: null,
 					latestReply: null,
+					lastActivity: { at: acceptedAt, action: "queued" },
 					lastRunSequence: 1,
 					activeRun: {
 						id: runId,
@@ -428,8 +429,9 @@ class AgentRuntime implements ResidentAgent {
 	#eventWrites: Promise<void> = Promise.resolve()
 	#eventWriteFailed = false
 	#recordingRunId: string | undefined
-	#pendingReply: { runId: string; text: string; streaming: boolean } | undefined
-	#replyWriteQueued = false
+	#pendingProgress: ({ runId: string } & Partial<Pick<TaskMetadata, "latestReply" | "lastActivity">>) | undefined
+	#lastHeartbeatAt = 0
+	#progressWriteQueued = false
 	#started = false
 	#stopRequested = false
 	#accepting = true
@@ -668,6 +670,7 @@ class AgentRuntime implements ResidentAgent {
 
 	private async executeRun(run: NonNullable<TaskMetadata["activeRun"]>): Promise<boolean> {
 		this.#recordingRunId = run.id
+		this.#lastHeartbeatAt = 0
 		let outcome: NonNullable<TaskMetadata["latestOutcome"]> = "failed"
 		const recovering = run.state === "suspended"
 		this.#lastAssistantOutcome = undefined
@@ -689,6 +692,7 @@ class AgentRuntime implements ResidentAgent {
 							...metadata,
 							state: "running",
 							activeRun: { ...activeRun, state: "running", startedAt },
+							lastActivity: { at: startedAt, action: "started" },
 							updatedAt: startedAt
 						}
 					})
@@ -857,6 +861,28 @@ class AgentRuntime implements ResidentAgent {
 	}
 
 	private recordEvent(event: AgentSessionEvent): void {
+		const at = Date.now()
+		const runId = this.#recordingRunId
+		if (runId && event.type === "agent_start") {
+			// before_agent_start hooks have finished; capture now, not when the queued write runs.
+			const effectiveSystemPrompt = this.#child.session.systemPrompt
+			this.queueEventWrite(() => writeTaskProgress(this.#paths, runId, { effectiveSystemPrompt }))
+		}
+		let action: string | undefined
+		let latestReply: TaskMetadata["latestReply"] | undefined
+		if (
+			runId &&
+			((event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") ||
+				event.type === "tool_execution_update") &&
+			at - this.#lastHeartbeatAt >= 1_000
+		) {
+			// Non-reply heartbeats are event-driven and capped at one durable write per second.
+			this.#lastHeartbeatAt = at
+			action = event.type === "tool_execution_update" ? `tool ${event.toolName.slice(0, 160)}` : "thinking"
+		}
+		if (runId && (event.type === "tool_execution_start" || event.type === "tool_execution_end")) {
+			action = `tool ${event.toolName.slice(0, 160)}${event.type === "tool_execution_end" ? (event.isError ? " failed" : " complete") : ""}`
+		}
 		if (
 			(event.type === "message_start" || event.type === "message_update" || event.type === "message_end") &&
 			event.message.role === "assistant" &&
@@ -866,23 +892,30 @@ class AgentRuntime implements ResidentAgent {
 				.filter(part => part.type === "text")
 				.map(part => part.text)
 				.join("")
-			if (this.#recordingRunId) {
-				this.#pendingReply = { runId: this.#recordingRunId, text, streaming: event.type !== "message_end" }
-				if (!this.#replyWriteQueued) {
-					this.#replyWriteQueued = true
-					this.queueEventWrite(async () => {
-						try {
-							// Coalesce token bursts instead of fsyncing every intermediate partial reply.
-							while (this.#pendingReply) {
-								const reply = this.#pendingReply
-								this.#pendingReply = undefined
-								await writeLatestReply(this.#paths, reply.runId, reply.text, reply.streaming)
-							}
-						} finally {
-							this.#replyWriteQueued = false
+			latestReply = { text, streaming: event.type !== "message_end" }
+			action = latestReply.streaming ? "responding" : "reply complete"
+		}
+		if (runId && action) {
+			this.#pendingProgress = {
+				...this.#pendingProgress,
+				runId,
+				...(latestReply ? { latestReply } : {}),
+				lastActivity: { at, action }
+			}
+			if (!this.#progressWriteQueued) {
+				this.#progressWriteQueued = true
+				this.queueEventWrite(async () => {
+					try {
+						// Coalesce replies and activity together so bursts cannot reorder their last action.
+						while (this.#pendingProgress) {
+							const { runId, ...progress } = this.#pendingProgress
+							this.#pendingProgress = undefined
+							await writeTaskProgress(this.#paths, runId, progress)
 						}
-					})
-				}
+					} finally {
+						this.#progressWriteQueued = false
+					}
+				})
 			}
 		}
 		if (event.type === "tool_execution_start") {
@@ -1064,6 +1097,9 @@ function buildAgentCreationToolResult(
 				text: [
 					`task: ${result.id}`,
 					`state: ${result.state}`,
+					...(output.queueReason
+						? [`waiting: ${output.queueReason} (${output.capacity.active}/${output.capacity.limit} execution permits)`]
+						: []),
 					`outcome: ${result.latestOutcome ?? "none"}`,
 					`detached: ${result.detached}`,
 					`queued_followups: ${result.queuedFollowUps}`,

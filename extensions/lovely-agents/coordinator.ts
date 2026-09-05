@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks"
+import { publishSchedulerUpdate } from "./updates.js"
 
 export const AGENT_COORDINATOR_VERSION = 2
 const AGENT_COORDINATOR_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/coordinator")
@@ -123,6 +124,7 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 	closeTuple(tuple: ModelTuple): void {
 		assertTuple(tuple)
 		this.#closedTuples.add(tupleKey(tuple))
+		publishSchedulerUpdate()
 	}
 
 	openTuple(tuple: ModelTuple): void {
@@ -302,13 +304,14 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 	#drain(): void {
 		while (this.#active < this.#limit) {
 			const index = this.#waiters.findIndex(waiter => waiter.eligible && (waiter.bypassTupleGate || !this.#closedTuples.has(waiter.tuple)))
-			if (index < 0) return
+			if (index < 0) break
 			const [waiter] = this.#waiters.splice(index, 1)
-			if (!waiter) return
+			if (!waiter) break
 			if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort)
 			this.#active++
 			waiter.resolve()
 		}
+		publishSchedulerUpdate()
 	}
 }
 

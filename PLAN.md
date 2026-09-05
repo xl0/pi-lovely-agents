@@ -154,7 +154,12 @@ than failed tool calls.
 `task_list` exposes direct children only. Each row includes identity, kind,
 label/definition, state and latest outcome, effective model/thinking,
 timestamps, detachment, queued Follow-up count, output line count, retained
-paths, and descendant summary.
+paths, last observed activity, queue reason, and descendant summary.
+Lists and output snapshots also report held/max process-wide execution permits.
+Queued reasons distinguish an exact provider/model gate (`provider-limit`),
+local saturation (`capacity`), and the transition into execution (`starting`).
+Permit counts are not running-state counts because child waits can lend permits.
+No queue position or ETA is inferred.
 
 Descendant summaries contain counts by state/outcome and at most three active
 labels. They never expose descendant Task References.
@@ -190,9 +195,14 @@ reference to `history.md` for full replies. There are no offsets or pages.
 Structured details include status, outcome, streaming, queued Follow-ups,
 truncation, and retained history/session paths.
 
-`waitMs` waits for a reply/status change and caps at ten minutes, even when
+`waitMs` waits for a reply/activity/status/scheduling change and caps at ten minutes, even when
 text already exists. Idle or terminal work returns immediately. Normal file
 tools can inspect `history.md` directly.
+
+Last activity records observed start, thinking, reply, or tool events, not
+bookkeeping writes. Thinking/tool-update heartbeats are capped at one per
+second and contain no reasoning or tool payloads. Reply and activity updates
+coalesce together; a new run clears the previous run's activity.
 
 ## Runs and input
 
@@ -268,8 +278,8 @@ The current session state is one of:
 | State | Meaning |
 | --- | --- |
 | `idle` | No run is accepted or executing. |
-| `queued` | A run is waiting for local agent capacity. |
-| `running` | A run owns capacity and is executing. |
+| `queued` | Accepted work is starting, capacity-blocked, or tuple-gated. |
+| `running` | A run is executing, with cooperative permit lending during child waits. |
 | `suspended` | A run is waiting for provider/model quota recovery. |
 | `interrupted` | Accepted work was lost across an unclean process boundary. |
 
@@ -476,8 +486,13 @@ Descendant summaries follow child Pi session UUIDs into their own parent
 partitions.
 
 `metadata.json` is a versioned current snapshot containing identity, ownership,
-state/outcome, latest reply/streaming, fixed model settings, run state, queued Follow-ups, tombstone,
-and notifications. Per-task mutations are serialized. A durable mutation is
+state/outcome, latest reply/streaming, optional last activity, fixed model
+settings, run state, queued Follow-ups, tombstone, and notifications.
+An optional effective system-prompt snapshot captures Pi's composed string
+after `before_agent_start` hooks. It resets on a new run, excludes later provider
+payload rewrites, and is available only in the human task inspector, not tool
+results. Missing snapshots are reported rather than reconstructed.
+Per-task mutations are serialized. A durable mutation is
 acknowledged only after temp write, fsync, and atomic rename.
 
 Version 3 retains the immutable Definition prompt/tool/context recipe, fixed
@@ -559,6 +574,7 @@ There is no parallel slash-command syntax for every model tool.
 - built-in sandboxing and hard capability enforcement
 - worktree isolation
 - automatic retention or garbage collection
+- per-run deadlines, fanout/reducer tools, and notification coalescing
 - native TUI switching into an idle child session
 - switching the main TUI into a running child, which needs a new Pi host API
 
@@ -773,7 +789,14 @@ navigator: Down focuses all tasks, arrows scroll, Enter opens actions, and
 Esc/Up at the top returns to editing. Typing passes through unchanged.
 The management menu focuses the same panel; selection survives live reordering.
 Durable metadata/output writes publish through a
-process-global update bus; no polling is used. Print/JSON behavior remains
+process-global update bus; shared capacity/gate changes refresh all parents.
+Queue reasons, permit counts, and last-action ages appear in inspection tools
+and the task UI. Snapshot waits also wake on activity and scheduler changes.
+Task actions expose current/queued inputs and full history, plus the captured
+Pi system prompt alone. Missing captures notify separately; no fallback body or
+explanatory text is mixed into the prompt. Static text views support wrapped
+scrolling, page navigation, and Home/End; context views refresh when reopened.
+No polling is used. Print/JSON behavior remains
 noninteractive and plain. Notifications share Ctrl+O expansion with tool
 results; Pi custom-message rendering does not provide tool-style click toggles.
 

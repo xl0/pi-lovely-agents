@@ -25,6 +25,11 @@
 - Return latest-reply/status snapshots from `task_output`, including streaming
   updates. Replace transcript pagination and separate activity logs with
   `history.md`; notifications preview only the latest reply.
+- Show queue reasons, shared execution capacity, and last observed activity in
+  task inspection and the UI. Wake snapshot waits on activity and scheduler
+  changes without polling or exposing reasoning/tool payloads.
+- Add scrollable task input/history and system-prompt views. Capture Pi's
+  composed system prompt for new runs while labeling missing captures explicitly.
 - Archive discarded task subtrees, including unsupported metadata versions
   after ownership validation. Add a cleanup guideline for unneeded agents.
 - Ignore the entire runtime storage tree, including its generated `.gitignore`.

@@ -39,6 +39,7 @@ describe("agent tool", () => {
 		await withTempWorkspace(async workspace => {
 			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
 			const fake = fakeChild(async child => {
+				child.systemPrompt = "Changed after agent_start"
 				child.tool("read", { path: "README.md" }, { content: "file" })
 				child.assistant("Completed review")
 			})
@@ -68,6 +69,8 @@ describe("agent tool", () => {
 			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
 			const metadata = await readTaskMetadata(paths)
 			expect(metadata.status === "ok" ? metadata.metadata.notifications : null).toEqual([])
+			expect(metadata.status === "ok" ? metadata.metadata.effectiveSystemPrompt : null).toBe("Effective fixture prompt")
+			expect(JSON.stringify(result)).not.toContain("Effective fixture prompt")
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
 		})
 	})
@@ -105,13 +108,25 @@ describe("agent tool", () => {
 				for (let attempt = 0; attempt < 20 && partial.text !== "Draft"; attempt++) {
 					partial = await readRetainedOutput(paths, { waitMs: 50 })
 				}
-				expect(partial).toMatchObject({ text: "Draft", streaming: true, state: "running", latestOutcome: null })
+				expect(partial).toMatchObject({
+					text: "Draft",
+					streaming: true,
+					state: "running",
+					latestOutcome: null,
+					lastActivity: { action: "responding" }
+				})
 				finishReply.resolve(undefined)
 				let final = await readRetainedOutput(paths)
 				for (let attempt = 0; attempt < 20 && final.streaming; attempt++) {
 					final = await readRetainedOutput(paths, { waitMs: 50 })
 				}
-				expect(final).toMatchObject({ text: "Final answer", streaming: false, state: "running", latestOutcome: null })
+				expect(final).toMatchObject({
+					text: "Final answer",
+					streaming: false,
+					state: "running",
+					latestOutcome: null,
+					lastActivity: { action: "reply complete" }
+				})
 			} finally {
 				finishReply.resolve(undefined)
 				finishRun.resolve(undefined)
@@ -124,6 +139,50 @@ describe("agent tool", () => {
 			expect(history).toContain("<tool read ok>")
 			expect(history).toContain("<agent>\nFinal answer")
 			expect(history).not.toContain("Draft")
+		})
+	})
+
+	test("reports thinking and tool activity without leaking reasoning or tool payloads", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const allowTool = deferred<void>()
+			const finish = deferred<void>()
+			const fake = fakeChild(async child => {
+				child.assistant("", "message_start")
+				for (let i = 0; i < 20; i++) child.thinking("private reasoning")
+				await allowTool.promise
+				child.assistant("")
+				child.tool("read", { path: "private-path" }, { content: "private-result" })
+				await finish.promise
+				child.assistant("Done")
+			})
+			const tool = captureAgentTool(workspace.agentDir, fake.handle)
+			const result = await tool.execute(
+				"create",
+				{ definition: "reviewer", label: "Activity", prompt: "Inspect", waitMs: 0 },
+				undefined,
+				taskContext(workspace.cwd)
+			)
+			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), (result.details as AgentCreationResult).id)
+			try {
+				let output = await readRetainedOutput(paths)
+				for (let attempt = 0; attempt < 20 && output.lastActivity?.action !== "thinking"; attempt++) {
+					output = await readRetainedOutput(paths, { waitMs: 50 })
+				}
+				expect(output).toMatchObject({ text: "", lastActivity: { action: "thinking" }, state: "running" })
+				allowTool.resolve(undefined)
+				for (let attempt = 0; attempt < 20 && output.lastActivity?.action !== "tool read complete"; attempt++) {
+					output = await readRetainedOutput(paths, { waitMs: 50 })
+				}
+				expect(output).toMatchObject({ text: "", lastActivity: { action: "tool read complete" }, state: "running" })
+				expect(await readFile(paths.metadata, "utf8")).not.toContain("private")
+			} finally {
+				allowTool.resolve(undefined)
+				finish.resolve(undefined)
+				await waitForOutcome(paths)
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
+			}
+			expect(await readFile(paths.history, "utf8")).not.toContain("private reasoning")
 		})
 	})
 
@@ -219,6 +278,7 @@ describe("agent tool", () => {
 					taskContext(workspace.cwd)
 				)
 				expect(queued.details).toMatchObject({ state: "queued", detached: true })
+				expect(queued.content[0]?.text).toContain("waiting: provider-limit")
 				expect(blocked.prompts).toHaveLength(0)
 				await tools.stop.execute("stop-queued", { id: (queued.details as AgentCreationResult).id }, undefined, taskContext(workspace.cwd))
 
@@ -319,6 +379,8 @@ describe("agent tool", () => {
 				)
 				const details = result.details as AgentCreationResult
 				expect(details).toMatchObject({ state: "queued", detached: true })
+				expect(details.output).toMatchObject({ queueReason: "capacity", capacity: { active: 1, limit: 1 } })
+				expect(result.content[0]?.text).toContain("waiting: capacity (1/1 execution permits)")
 				blocker.release()
 				const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
 				expect(await waitForOutcome(paths)).toBe("succeeded")
@@ -920,6 +982,7 @@ function taskContext(cwd: string): ExtensionContext {
 
 type FakeChild = {
 	handle: ChildSessionHandle
+	systemPrompt: string
 	prompts: Array<{ text: string; expandPromptTemplates: boolean | undefined }>
 	readonly disposed: boolean
 	readonly aborted: Promise<void>
@@ -927,6 +990,7 @@ type FakeChild = {
 	steers: string[]
 	steerExpansions: Array<boolean | undefined>
 	assistant(text: string, phase?: "message_start" | "message_update" | "message_end"): void
+	thinking(text: string): void
 	assistantError(errorMessage: string): void
 	tool(name: string, args: unknown, resultValue: unknown): void
 }
@@ -943,6 +1007,7 @@ function fakeChild(runPrompt: (child: FakeChild) => Promise<void>, deliverSteers
 	let disposed = false
 	let streaming = false
 	const result: FakeChild = {
+		systemPrompt: "Effective fixture prompt",
 		prompts: [],
 		steers: [],
 		steerExpansions: [],
@@ -965,6 +1030,12 @@ function fakeChild(runPrompt: (child: FakeChild) => Promise<void>, deliverSteers
 			messages.push(message)
 			for (const listener of listeners) listener({ type: "message_end", message } as unknown as AgentSessionEvent)
 		},
+		thinking(text: string) {
+			const message = { role: "assistant", content: [{ type: "thinking", thinking: text }] }
+			for (const listener of listeners) {
+				listener({ type: "message_update", message, assistantMessageEvent: { type: "thinking_delta" } } as unknown as AgentSessionEvent)
+			}
+		},
 		tool(name: string, args: unknown, resultValue: unknown) {
 			for (const listener of listeners) {
 				listener({ type: "tool_execution_start", toolCallId: "tool-1", toolName: name, args } as AgentSessionEvent)
@@ -979,6 +1050,9 @@ function fakeChild(runPrompt: (child: FakeChild) => Promise<void>, deliverSteers
 		},
 		handle: {
 			session: {
+				get systemPrompt() {
+					return result.systemPrompt
+				},
 				sessionId: "child-session",
 				model: selectedModel,
 				thinkingLevel: "medium",
@@ -1003,6 +1077,7 @@ function fakeChild(runPrompt: (child: FakeChild) => Promise<void>, deliverSteers
 					result.prompts.push({ text, expandPromptTemplates: options?.expandPromptTemplates })
 					streaming = true
 					try {
+						for (const listener of listeners) listener({ type: "agent_start" })
 						for (const listener of listeners) {
 							listener({
 								type: "message_start",

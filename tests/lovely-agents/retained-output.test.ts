@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { readdir, readFile, stat } from "node:fs/promises"
+import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
 import {
 	appendHistoryLog,
 	countRetainedOutputLines,
@@ -13,12 +14,80 @@ import {
 	TASK_METADATA_VERSION,
 	type TaskMetadata,
 	type TaskStoragePaths,
-	writeLatestReply,
-	writeTaskMetadata
+	taskSchedulingStatus,
+	writeTaskMetadata,
+	writeTaskProgress
 } from "../../extensions/lovely-agents/state.js"
 import { withTempWorkspace } from "./test-helpers.js"
 
 const runId = "r_0123456789abcdef"
+
+function writeLatestReply(paths: TaskStoragePaths, id: string, text: string, streaming: boolean) {
+	return writeTaskProgress(paths, id, { latestReply: { text, streaming } })
+}
+
+describe("task progress", () => {
+	test("reports capacity and exact-tuple gates without claiming an ETA", async () => {
+		const coordinator = getAgentCoordinator()
+		const limit = coordinator.maxConcurrency
+		const tuple = { provider: "queue-test", model: "one" }
+		const queued = { state: "queued" as const, model: { provider: tuple.provider, id: tuple.model } }
+		coordinator.setMaxConcurrency(1)
+		const permit = await coordinator.acquire({ tuple })
+		try {
+			expect(taskSchedulingStatus(queued)).toEqual({ queueReason: "capacity", capacity: { active: 1, limit: 1 } })
+			coordinator.closeTuple(tuple)
+			expect(taskSchedulingStatus(queued).queueReason).toBe("provider-limit")
+			expect(taskSchedulingStatus({ ...queued, model: { provider: tuple.provider, id: "other" } }).queueReason).toBe("capacity")
+			permit.release()
+			expect(taskSchedulingStatus(queued)).toEqual({ queueReason: "provider-limit", capacity: { active: 0, limit: 1 } })
+			coordinator.openTuple(tuple)
+			expect(taskSchedulingStatus(queued).queueReason).toBe("starting")
+			expect(taskSchedulingStatus({ ...queued, state: "running" }).queueReason).toBeNull()
+		} finally {
+			permit.release()
+			coordinator.openTuple(tuple)
+			coordinator.setMaxConcurrency(limit)
+		}
+	})
+
+	test("waits for scheduler-only changes without a metadata write", async () => {
+		await withTaskStorage("running", async paths => {
+			await mutateTaskMetadata(paths, metadata => {
+				if (!metadata.activeRun) throw new Error("Missing fixture run")
+				return { ...metadata, state: "queued", activeRun: { ...metadata.activeRun, state: "queued" } }
+			})
+			const coordinator = getAgentCoordinator()
+			const tuple = { provider: "anthropic", model: "sonnet" }
+			try {
+				const before = await readFile(paths.metadata, "utf8")
+				const pending = readRetainedOutput(paths, { waitMs: 1_000 })
+				await Bun.sleep(20)
+				coordinator.closeTuple(tuple)
+				expect(await pending).toMatchObject({ timedOut: false, queueReason: "provider-limit", text: "" })
+				expect(await readFile(paths.metadata, "utf8")).toBe(before)
+			} finally {
+				coordinator.openTuple(tuple)
+			}
+		})
+	})
+
+	test("activity wakes empty snapshots, survives bookkeeping, and fences late runs", async () => {
+		await withTaskStorage("running", async paths => {
+			const pending = readRetainedOutput(paths, { waitMs: 1_000 })
+			await Bun.sleep(20)
+			const lastActivity = { at: Date.now(), action: "thinking" }
+			await writeTaskProgress(paths, runId, { lastActivity })
+			expect(await pending).toMatchObject({ timedOut: false, text: "", lastActivity })
+			await mutateTaskMetadata(paths, metadata => ({ ...metadata, updatedAt: Date.now() }))
+			await writeTaskProgress(paths, "r_1111111111111111", { lastActivity: { at: Date.now(), action: "late" } })
+			expect((await readRetainedOutput(paths)).lastActivity).toEqual(lastActivity)
+			await mutateTaskMetadata(paths, metadata => ({ ...metadata, state: "idle", activeRun: null }))
+			await writeTaskProgress(paths, runId, { lastActivity: { at: Date.now(), action: "late" } })
+			expect((await readRetainedOutput(paths)).lastActivity).toEqual(lastActivity)
+		})
+	})
+})
 
 describe("retained history", () => {
 	test("keeps inputs, replies, outcomes and compact UTF-8 tool summaries in one private file", async () => {
@@ -79,6 +148,7 @@ describe("latest reply snapshots", () => {
 	test("promotion clears stale answers and outcomes before execution; old run writes cannot leak through", async () => {
 		await withTaskStorage("running", async paths => {
 			await writeLatestReply(paths, runId, "Old answer", false)
+			await writeTaskProgress(paths, runId, { effectiveSystemPrompt: "Old composed prompt" })
 			await mutateTaskMetadata(paths, metadata => ({
 				...metadata,
 				state: "queued",
@@ -87,6 +157,8 @@ describe("latest reply snapshots", () => {
 				activeRun: { id: "r_1111111111111111", sequence: 2, kind: "followup", state: "queued", input: "New request", acceptedAt: 2 }
 			}))
 			await writeLatestReply(paths, runId, "Late old answer", false)
+			await writeTaskProgress(paths, runId, { effectiveSystemPrompt: "Late old prompt" })
+			expect(JSON.parse(await readFile(paths.metadata, "utf8"))).not.toHaveProperty("effectiveSystemPrompt")
 			expect(await readRetainedOutput(paths)).toMatchObject({ text: "", state: "queued", latestOutcome: null })
 			await mutateTaskMetadata(paths, metadata => ({ ...metadata, state: "idle", activeRun: null, latestOutcome: "stopped" }))
 			expect(await readRetainedOutput(paths)).toMatchObject({ text: "", latestOutcome: "stopped" })

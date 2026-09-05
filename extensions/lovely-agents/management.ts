@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto"
 import { lstat, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
-import { Container, Key, matchesKey, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui"
+import { Container, Key, matchesKey, type SelectItem, SelectList, Text, truncateToWidth } from "@earendil-works/pi-tui"
 import type { AgentDefinition, DefinitionDiagnostic, DefinitionDiscoveryResult } from "./definitions.js"
 import {
 	acquireParentLease,
@@ -21,7 +21,7 @@ import {
 	taskStoragePaths,
 	writeTaskMetadata
 } from "./state.js"
-import type { TaskListResult, TaskListRow } from "./tools.js"
+import { relativeTime, type TaskListResult, type TaskListRow } from "./tools.js"
 import { bindTaskUpdateRoute } from "./updates.js"
 
 const FIXTURE_MARKER = ".fixture"
@@ -257,6 +257,8 @@ async function manageTask(ctx: ExtensionContext, id: string, options: Management
 		const choice = await select(ctx, task.label, [
 			{ value: "details", label: "Details", description: `${task.state}${task.latestOutcome ? `/${task.latestOutcome}` : ""}` },
 			{ value: "output", label: "Live output", description: "Latest assistant reply and run status" },
+			{ value: "history", label: "Inputs / history", description: "Current and queued inputs, past runs, and delivered Steers" },
+			{ value: "prompt", label: "System prompt", description: "Captured Pi system prompt" },
 			{ value: "followup", label: "Follow-up", description: "Queue durable work after the current run" },
 			{ value: "steer", label: "Steer", description: "Redirect running work; otherwise becomes a Follow-up" },
 			{ value: "stop", label: "Stop", description: "Stop work and preserve the session" },
@@ -265,6 +267,7 @@ async function manageTask(ctx: ExtensionContext, id: string, options: Management
 		if (!choice) return
 		if (choice === "details") await showText(ctx, task.label, renderTask(task))
 		else if (choice === "output") await showLiveTaskOutput(ctx, task)
+		else if (choice === "history" || choice === "prompt") await showTaskContext(ctx, task, choice)
 		else if (choice === "followup" || choice === "steer") {
 			const content = await ctx.ui.editor(`${title(choice)} ${task.id}`)
 			if (content?.trim()) {
@@ -279,6 +282,35 @@ async function manageTask(ctx: ExtensionContext, id: string, options: Management
 			await options.controlTask(task.id, "discard")
 			return
 		}
+	}
+}
+
+async function showTaskContext(ctx: ExtensionContext, task: TaskListRow, view: "history" | "prompt"): Promise<void> {
+	const paths = taskStoragePaths(parentStoragePaths(ctx.cwd, ctx.sessionManager.getSessionId()), task.id)
+	const loaded = await readTaskMetadata(paths)
+	if (loaded.status !== "ok") throw new Error(`Cannot inspect ${task.id}: invalid or missing metadata`)
+	const metadata = loaded.metadata
+	if (metadata.discardedAt !== null) throw new Error(`Task ${task.id} has been discarded`)
+	if (view === "prompt") {
+		const captured = metadata.effectiveSystemPrompt
+		if (captured === undefined) {
+			ctx.ui.notify("No system prompt captured for this run.", "info")
+			return
+		}
+		await showText(ctx, `${task.id} · System prompt`, captured)
+	} else {
+		if (!(await isRegularFile(paths.history))) throw new Error(`Cannot inspect ${task.id}: history.md is missing or not a regular file`)
+		await showText(
+			ctx,
+			`${task.id} · Inputs / history`,
+			[
+				...(metadata.activeRun ? [`Current run ${metadata.activeRun.sequence} (${metadata.state}):`, metadata.activeRun.input, ""] : []),
+				...metadata.queuedFollowUps.flatMap(input => [`Queued Follow-up ${input.sequence} (not started):`, input.content, ""]),
+				"History: initial/Follow-up inputs, delivered Steers, replies, and tool summaries.",
+				"",
+				await readFile(paths.history, "utf8")
+			].join("\n")
+		)
 	}
 }
 
@@ -315,9 +347,16 @@ async function showLiveTaskOutput(ctx: ExtensionContext, task: TaskListRow): Pro
 						`${task.id} · ${output.state}${output.latestOutcome ? `/${output.latestOutcome}` : ""}${output.streaming ? " · streaming" : ""}`
 					)
 				)
-				return new Text(`${heading}\n\n${output.text || "(no output)"}\n\n${theme.fg("dim", "Esc or Enter to go back")}`, 1, 0).render(
-					width
-				)
+				const progress = [
+					`Capacity: ${output.capacity.active}/${output.capacity.limit} execution permits`,
+					...(output.queueReason ? [`Waiting: ${output.queueReason}`] : []),
+					...(output.lastActivity ? [`${output.lastActivity.action} · ${relativeTime(output.lastActivity.at, Date.now())}`] : [])
+				].join("\n")
+				return new Text(
+					`${heading}\n${progress}\n\n${output.text || "(no output)"}\n\n${theme.fg("dim", "Esc or Enter to go back")}`,
+					1,
+					0
+				).render(width)
 			},
 			invalidate() {},
 			handleInput(data: string) {
@@ -388,18 +427,41 @@ async function select(ctx: ExtensionContext, title: string, items: SelectItem[])
 }
 
 async function showText(ctx: ExtensionContext, title: string, content: string): Promise<void> {
-	await ctx.ui.custom<void>((_tui, theme, _keybindings, done) => {
-		const container = new Container()
-		container.addChild(border(text => theme.fg("accent", text)))
-		container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0))
-		container.addChild(new Text(content, 1, 1))
-		container.addChild(new Text(theme.fg("dim", "Enter or Esc to go back"), 1, 0))
-		container.addChild(border(text => theme.fg("accent", text)))
+	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+		const body = new Text(content, 0, 0)
+		let offset = 0
+		let pageSize = 1
+		let total = 0
 		return {
-			render: (width: number) => container.render(width),
-			invalidate: () => container.invalidate(),
+			render(width: number) {
+				const lines = body.render(width)
+				total = lines.length
+				pageSize = Math.max(1, Math.floor(tui.terminal.rows * 0.6) - 2)
+				offset = Math.max(0, Math.min(offset, total - pageSize))
+				return [
+					truncateToWidth(theme.fg("accent", theme.bold(title.replace(/[\r\n]+/g, " "))), width),
+					...lines.slice(offset, offset + pageSize).map(line => truncateToWidth(line, width)),
+					truncateToWidth(
+						theme.fg(
+							"dim",
+							`Enter/Esc back · ↑↓ PgUp/PgDn Home/End · ${Math.min(offset + 1, total)}-${Math.min(offset + pageSize, total)}/${total}`
+						),
+						width
+					)
+				]
+			},
+			invalidate: () => body.invalidate(),
 			handleInput(data: string) {
-				if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) done(undefined)
+				if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) return done(undefined)
+				if (matchesKey(data, Key.up)) offset--
+				else if (matchesKey(data, Key.down)) offset++
+				else if (matchesKey(data, Key.pageUp)) offset -= pageSize
+				else if (matchesKey(data, Key.pageDown)) offset += pageSize
+				else if (matchesKey(data, Key.home)) offset = 0
+				else if (matchesKey(data, Key.end)) offset = total - pageSize
+				else return
+				offset = Math.max(0, Math.min(offset, total - pageSize))
+				tui.requestRender()
 			}
 		}
 	})
@@ -558,6 +620,8 @@ function renderTask(task: TaskListRow): string {
 		`Thinking: ${task.thinking}`,
 		`Queued Follow-ups: ${task.queuedFollowUps}`,
 		`Output lines: ${task.outputLines ?? "unknown"}`,
+		...(task.queueReason ? [`Waiting: ${task.queueReason}`] : []),
+		...(task.lastActivity ? [`Last activity: ${task.lastActivity.action} (${relativeTime(task.lastActivity.at, Date.now())})`] : []),
 		`Descendants: ${task.descendants.total}`,
 		"",
 		`History: ${task.paths.history}`,

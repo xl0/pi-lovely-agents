@@ -23,6 +23,7 @@ import {
 	TASK_REFERENCE_PATTERN,
 	type TaskMetadata,
 	type TaskStoragePaths,
+	taskSchedulingStatus,
 	taskStoragePaths
 } from "./state.js"
 
@@ -89,6 +90,8 @@ export type TaskListRow = {
 	detachedAt: number | null
 	queuedFollowUps: number
 	outputLines: number | null
+	lastActivity: NonNullable<TaskMetadata["lastActivity"]> | null
+	queueReason: ReturnType<typeof taskSchedulingStatus>["queueReason"]
 	paths: RetainedPaths
 	descendants: DescendantSummary
 }
@@ -104,6 +107,7 @@ export type TaskListResult = {
 	tasks: TaskListRow[]
 	diagnostics: TaskDiagnostic[]
 	total: number
+	capacity: ReturnType<typeof taskSchedulingStatus>["capacity"]
 }
 
 export type TaskOutputResult = Awaited<ReturnType<typeof readRetainedOutput>> & {
@@ -239,7 +243,7 @@ export function registerTaskTools(
 	pi.registerTool({
 		name: "task_list",
 		label: "Task List",
-		description: "List durable Lovely Agent tasks owned by this exact Pi session.",
+		description: "List durable Lovely Agent tasks owned by this exact Pi session, with queue reasons, shared capacity, and last activity.",
 		promptSnippet: "List durable tasks owned by this session",
 		promptGuidelines: ["Use task_list to inspect existing work before starting duplicate agents."],
 		parameters: Type.Object({}, { additionalProperties: false }),
@@ -258,15 +262,17 @@ export function registerTaskTools(
 		name: "task_output",
 		label: "Task Output",
 		description:
-			"Read the latest assistant reply and run status from a Lovely Agent task. Snapshots are capped at 2,000 lines/50 KiB; full replies and inputs are in history.md.",
-		promptSnippet: "Read a task's latest reply and current run status",
+			"Read a Lovely Agent task's latest reply, run status, last activity, queue reason, and shared capacity. Snapshots are capped at 2,000 lines/50 KiB; full replies and inputs are in history.md.",
+		promptSnippet: "Read a task's latest reply, progress, and current run status",
 		promptGuidelines: [
-			"task_output returns a snapshot, not history. Use waitMs to wait for reply or status changes; inspect history.md for earlier replies and inputs."
+			"task_output returns a snapshot, not history. Use waitMs to wait for reply, activity, or scheduling changes; inspect history.md for earlier replies and inputs."
 		],
 		parameters: Type.Object(
 			{
 				id: Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" }),
-				waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 600_000, description: "Maximum wait for output or state changes" }))
+				waitMs: Type.Optional(
+					Type.Integer({ minimum: 0, maximum: 600_000, description: "Maximum wait for output, activity, or scheduling changes" })
+				)
 			},
 			{ additionalProperties: false }
 		),
@@ -322,7 +328,13 @@ export function buildTaskListToolResult(options: { rows: readonly TaskListRow[];
 	details: TaskListResult
 } {
 	const tasks = [...options.rows].sort(compareTaskRows)
-	const result: TaskListResult = { tasks, diagnostics: [...options.diagnostics], total: tasks.length }
+	const coordinator = getAgentCoordinator()
+	const result: TaskListResult = {
+		tasks,
+		diagnostics: [...options.diagnostics],
+		total: tasks.length,
+		capacity: { active: coordinator.activeCount, limit: coordinator.maxConcurrency }
+	}
 	return { content: [{ type: "text", text: renderTaskListResult(result) }], details: result }
 }
 
@@ -336,6 +348,8 @@ export function buildTaskOutputToolResult(
 	const result: TaskOutputResult = { id, ...output }
 	const lines = [
 		`task_output state=${result.state} outcome=${result.latestOutcome ?? "none"} streaming=${result.streaming} queued=${result.queuedFollowUps}`,
+		`capacity=${result.capacity.active}/${result.capacity.limit} execution permits${result.queueReason ? ` waiting=${result.queueReason}` : ""}`,
+		...(result.lastActivity ? [`last_activity: ${result.lastActivity.action} (${relativeTime(result.lastActivity.at, Date.now())})`] : []),
 		...(result.timedOut ? ["timed_out=true"] : []),
 		"",
 		result.text || "(no reply yet)"
@@ -412,6 +426,8 @@ async function taskListRow(cwd: string, paths: TaskStoragePaths, metadata: TaskM
 		detachedAt: activeRun?.detachedAt ?? null,
 		queuedFollowUps: metadata.queuedFollowUps.length,
 		outputLines,
+		lastActivity: metadata.lastActivity ?? null,
+		queueReason: taskSchedulingStatus(metadata).queueReason,
 		paths: retainedPaths(paths),
 		descendants: {
 			total: descendants.total,
@@ -484,7 +500,10 @@ function compareTaskRows(left: TaskListRow, right: TaskListRow): number {
 }
 
 function renderTaskListResult(result: TaskListResult): string {
-	const lines = result.tasks.length === 0 ? ["tasks: []"] : ["tasks:"]
+	const lines = [
+		`capacity: ${result.capacity.active}/${result.capacity.limit} execution permits`,
+		result.tasks.length === 0 ? "tasks: []" : "tasks:"
+	]
 	const now = Date.now()
 	for (const state of Object.keys(TASK_STATE_ORDER) as TaskMetadata["state"][]) {
 		const tasks = result.tasks.filter(task => task.state === state)
@@ -496,6 +515,8 @@ function renderTaskListResult(result: TaskListResult): string {
 			lines.push(`      model: ${yamlScalar(`${task.model}:${task.thinking}`)}`)
 			lines.push(`      queued_followups: ${task.queuedFollowUps}`)
 			lines.push(`      output_lines: ${task.outputLines ?? "unknown"}`)
+			if (task.queueReason) lines.push(`      waiting: ${task.queueReason}`)
+			if (task.lastActivity) lines.push(`      last_activity: ${task.lastActivity.action} (${relativeTime(task.lastActivity.at, now)})`)
 			if (task.descendants.total > 0) lines.push(`      descendants: ${renderDescendantSummary(task.descendants)}`)
 			lines.push(`      created: ${relativeTime(task.createdAt, now)}`)
 			lines.push(`      updated: ${relativeTime(task.updatedAt, now)}`)
@@ -512,7 +533,7 @@ function renderTaskListResult(result: TaskListResult): string {
 	return lines.join("\n")
 }
 
-function relativeTime(timestamp: number, now: number): string {
+export function relativeTime(timestamp: number, now: number): string {
 	let seconds = Math.floor(Math.max(0, now - timestamp) / 1_000)
 	if (seconds === 0) return "now"
 	if (seconds < 60) return `${seconds}s ago`

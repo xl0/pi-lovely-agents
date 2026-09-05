@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { createAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
 import { bindTaskUpdateRoute, publishTaskUpdate } from "../../extensions/lovely-agents/updates.js"
 
 test("task update routes are exact, shared, and identity-safe", async () => {
@@ -22,4 +23,34 @@ test("task update routes are exact, shared, and identity-safe", async () => {
 
 	unbindCurrent()
 	unbindOther()
+})
+
+test("scheduler changes refresh all parents, and a broken UI cannot break scheduling", async () => {
+	const updates: string[] = []
+	const unbind = [
+		bindTaskUpdateRoute("/one", "parent", () => {
+			updates.push("one")
+		}),
+		bindTaskUpdateRoute("/two", "parent", () => {
+			updates.push("two")
+		}),
+		bindTaskUpdateRoute("/broken", "parent", () => {
+			throw new Error("UI failed")
+		})
+	]
+	const coordinator = createAgentCoordinator(1)
+	const tuple = { provider: "updates", model: "one" }
+	try {
+		const permit = await coordinator.acquire({ tuple })
+		expect(updates).toEqual(["one", "two"])
+		updates.length = 0
+		permit.release()
+		coordinator.closeTuple(tuple)
+		coordinator.openTuple(tuple)
+		coordinator.setMaxConcurrency(2)
+		await Bun.sleep(0)
+		expect(updates).toEqual(["one", "two", "one", "two", "one", "two", "one", "two"])
+	} finally {
+		for (const dispose of unbind) dispose()
+	}
 })
