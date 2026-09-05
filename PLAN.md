@@ -744,17 +744,14 @@ tuples retain queued acceptance order while running siblings drain and other
 tuples continue. Provider matrices, runtime suspension/new-work blocking,
 sibling draining, independent tuples, and restart reconciliation are tested.
 
-#### [ ] 5.2 Recovery triggers
+#### [x] 5.2 Recovery triggers
 
-Observe successful parent turns and reopen the matching tuple globally. Extend
-an eligible `/continue` to requeue all suspended owned descendants before
-injecting its hidden parent marker. Keep it a silent no-op after a successful
-parent reply. Resume each child within the same logical run through an internal
-literal `Continue.` prompt.
-
-Done when tests cover tuple-specific automatic recovery, cross-tuple manual
-recovery after a parent error/abort, successful-parent no-op, acceptance
-ordering, ownership/depth boundaries, and repeated quota failure.
+Successful turns reopen their exact tuple globally. Eligible `/continue` calls
+first admit suspended tasks in the exact owned descendant tree without opening
+unrelated tuple work, then inject the hidden parent marker. Recovery preserves
+the logical run and acceptance order, sends internal literal `Continue.`, and
+can suspend repeatedly. Successful-parent no-op, tuple/bypass scheduling,
+ownership recursion, and repeated recovery are tested.
 
 #### [ ] 5.3 Durable notification delivery
 

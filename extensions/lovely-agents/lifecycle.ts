@@ -17,6 +17,11 @@ export type ReconciliationResult = {
 	diagnostics: string[]
 }
 
+export type RecoveryResult = {
+	resumed: number
+	diagnostics: string[]
+}
+
 /** Marks stale direct work interrupted after a non-reload parent session start. */
 export async function reconcileParentTasks(cwd: string, parentSessionId: string): Promise<ReconciliationResult> {
 	const parent = parentStoragePaths(cwd, parentSessionId)
@@ -80,6 +85,13 @@ export async function stopOwnedTaskTree(cwd: string, parentSessionId: string): P
 	await stopPartition(cwd, parentSessionId, new Set())
 }
 
+/** Requeues resident suspended work in the exact owned descendant tree. */
+export async function recoverOwnedTaskTree(cwd: string, parentSessionId: string): Promise<RecoveryResult> {
+	const result: RecoveryResult = { resumed: 0, diagnostics: [] }
+	await recoverPartition(cwd, parentSessionId, new Set(), result)
+	return result
+}
+
 /** Stops one retained task through its resident runtime when available. */
 export async function stopTask(paths: TaskStoragePaths): Promise<void> {
 	const resident = getAgentCoordinator().getResident(paths.taskDirectory)
@@ -114,6 +126,27 @@ async function stopPartition(cwd: string, parentSessionId: string, visited: Set<
 		await releaseParentLease(lease)
 	}
 	if (errors.length > 0) throw new AggregateError(errors, `Failed to stop ${errors.length} owned task operation(s)`)
+}
+
+async function recoverPartition(cwd: string, parentSessionId: string, visited: Set<string>, result: RecoveryResult): Promise<void> {
+	if (visited.has(parentSessionId)) return
+	visited.add(parentSessionId)
+	const parent = parentStoragePaths(cwd, parentSessionId)
+	if (!(await isDirectory(parent.parentDirectory))) return
+
+	for (const paths of await directTaskPaths(cwd, parentSessionId)) {
+		const loaded = await readTaskMetadata(paths)
+		if (loaded.status !== "ok") {
+			if (loaded.status === "invalid") result.diagnostics.push(`${paths.taskDirectory}: ${loaded.diagnostic.message}`)
+			continue
+		}
+		if (loaded.metadata.discardedAt === null && loaded.metadata.state === "suspended") {
+			const resident = getAgentCoordinator().getResident(paths.taskDirectory)
+			if (!resident?.recover) result.diagnostics.push(`${paths.taskDirectory}: suspended task has no recoverable resident`)
+			else if (await resident.recover()) result.resumed++
+		}
+		await recoverPartition(cwd, loaded.metadata.childSessionId, visited, result)
+	}
 }
 
 async function settleStopped(paths: TaskStoragePaths): Promise<void> {

@@ -50,6 +50,24 @@ const ThinkingLevel = Type.Union([
 	Type.Literal("max")
 ])
 
+type RecoveryMode = "automatic" | "manual" | "stop"
+type SuspendedRuntime = {
+	wakeProviderRecovery(mode: RecoveryMode): boolean
+}
+const SUSPENDED_RUNTIMES_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/suspended-runtimes/v1")
+
+/** Opens one tuple and wakes every process-resident run suspended on it. */
+export function recoverProviderTuple(tuple: ModelTuple): number {
+	getAgentCoordinator().openTuple(tuple)
+	const runtimes = suspendedRuntimes().get(modelTupleKey(tuple))
+	if (!runtimes) return 0
+	let recovered = 0
+	for (const runtime of [...runtimes]) {
+		if (runtime.wakeProviderRecovery("automatic")) recovered++
+	}
+	return recovered
+}
+
 export type AgentCreationResult = {
 	id: string
 	label: string
@@ -382,6 +400,7 @@ class AgentRuntime implements ResidentAgent {
 	readonly #pendingSteers: Array<{ content: string }> = []
 	readonly #reservations = new Map<string, AgentReservation>()
 	#unbindResident: (() => void) | undefined
+	#unbindSuspended: (() => void) | undefined
 	#unsubscribe: (() => void) | undefined
 	#eventWrites: Promise<void> = Promise.resolve()
 	#eventWriteFailed = false
@@ -392,6 +411,8 @@ class AgentRuntime implements ResidentAgent {
 	#awaitingPrimaryInput = false
 	#lastAssistantOutcome: NonNullable<TaskMetadata["latestOutcome"]> | undefined
 	#providerLimitReached = false
+	#recoveryWait: (ReturnType<typeof deferred<RecoveryMode>> & { mode: RecoveryMode | undefined }) | undefined
+	#recoveryMode: Exclude<RecoveryMode, "stop"> | undefined
 
 	constructor(paths: TaskStoragePaths, child: ChildSessionHandle, metadata: TaskMetadata, expandPromptTemplates: boolean) {
 		this.#paths = paths
@@ -450,6 +471,7 @@ class AgentRuntime implements ResidentAgent {
 		if (this.#stopRequested) return this.#runtimeCompletion.promise
 		this.#stopRequested = true
 		this.#accepting = false
+		this.wakeProviderRecovery("stop")
 		this.#scheduleAbort.abort(new Error("Agent run stopped"))
 		await this.#child.session.abort()
 		const loaded = await readTaskMetadata(this.#paths)
@@ -477,6 +499,8 @@ class AgentRuntime implements ResidentAgent {
 		this.#unsubscribe = undefined
 		this.#unbindResident?.()
 		this.#unbindResident = undefined
+		this.#unbindSuspended?.()
+		this.#unbindSuspended = undefined
 		this.#child.dispose()
 	}
 
@@ -554,14 +578,32 @@ class AgentRuntime implements ResidentAgent {
 		return result
 	}
 
+	recover(): boolean {
+		return this.wakeProviderRecovery("manual")
+	}
+
+	wakeProviderRecovery(mode: RecoveryMode): boolean {
+		const wait = this.#recoveryWait
+		if (!wait || wait.mode || this.#disposed || (this.#stopRequested && mode !== "stop")) return false
+		wait.mode = mode
+		this.#unbindSuspended?.()
+		this.#unbindSuspended = undefined
+		wait.resolve(mode)
+		return true
+	}
+
 	private async run(): Promise<void> {
 		try {
 			while (!this.#stopRequested) {
 				const activeRun = await this.nextRun()
 				if (!activeRun) break
 				if (await this.executeRun(activeRun)) {
-					await waitForAbort(this.#scheduleAbort.signal)
-					break
+					const wait = this.#recoveryWait
+					if (!wait) throw new Error("Suspended run has no recovery wait")
+					const mode = await wait.promise
+					if (this.#recoveryWait === wait) this.#recoveryWait = undefined
+					if (mode === "stop") break
+					this.#recoveryMode = mode
 				}
 			}
 		} finally {
@@ -600,6 +642,7 @@ class AgentRuntime implements ResidentAgent {
 
 	private async executeRun(run: NonNullable<TaskMetadata["activeRun"]>): Promise<boolean> {
 		let outcome: NonNullable<TaskMetadata["latestOutcome"]> = "failed"
+		const recovering = run.state === "suspended"
 		this.#lastAssistantOutcome = undefined
 		this.#providerLimitReached = false
 		let settled = false
@@ -607,6 +650,7 @@ class AgentRuntime implements ResidentAgent {
 		try {
 			await this.reserveRun(run).run(async () => {
 				if (this.#stopRequested) return
+				let promptCompleted = false
 				try {
 					let won = false
 					const startedAt = Date.now()
@@ -622,7 +666,8 @@ class AgentRuntime implements ResidentAgent {
 						}
 					})
 					if (!won) return
-					if (run.kind === "followup") {
+					this.#recoveryMode = undefined
+					if (run.kind === "followup" && !recovering) {
 						await appendOutputLog(this.#paths, {
 							type: "run-start",
 							sequence: run.sequence,
@@ -637,11 +682,16 @@ class AgentRuntime implements ResidentAgent {
 						})
 					}
 					this.#awaitingPrimaryInput = true
-					await this.#child.session.prompt(run.input, childPromptOptions(this.#expandPromptTemplates))
+					await this.#child.session.prompt(
+						recovering ? "Continue." : run.input,
+						childPromptOptions(recovering ? false : this.#expandPromptTemplates)
+					)
+					promptCompleted = true
 					await this.#eventWrites
 					if (this.#eventWriteFailed) throw new Error("Could not retain one or more child session events")
 					outcome = this.#stopRequested ? "stopped" : (this.#lastAssistantOutcome ?? "failed")
 				} catch {
+					if (!promptCompleted) this.#providerLimitReached = false
 					await this.#eventWrites
 					outcome = this.#stopRequested ? "stopped" : "failed"
 				}
@@ -666,7 +716,12 @@ class AgentRuntime implements ResidentAgent {
 	}
 
 	private async suspend(run: NonNullable<TaskMetadata["activeRun"]>): Promise<boolean> {
+		// Provider evidence is tuple-global even if another task mutation wins.
 		getAgentCoordinator().closeTuple(this.#tuple)
+		const wait = Object.assign(deferred<RecoveryMode>(), { mode: undefined as RecoveryMode | undefined })
+		const unbind = bindSuspendedRuntime(this.#tuple, this)
+		this.#recoveryWait = wait
+		this.#unbindSuspended = unbind
 		let won = false
 		const timestamp = Date.now()
 		await mutateTaskMetadata(this.#paths, metadata => {
@@ -680,7 +735,13 @@ class AgentRuntime implements ResidentAgent {
 				updatedAt: timestamp
 			}
 		})
-		if (won && run.id === this.#initialRunId) this.#initialCompletion.resolve(undefined)
+		if (won) {
+			if (run.id === this.#initialRunId) this.#initialCompletion.resolve(undefined)
+		} else {
+			unbind()
+			if (this.#recoveryWait === wait) this.#recoveryWait = undefined
+			if (this.#unbindSuspended === unbind) this.#unbindSuspended = undefined
+		}
 		return won
 	}
 
@@ -741,8 +802,12 @@ class AgentRuntime implements ResidentAgent {
 	private reserveRun(run: NonNullable<TaskMetadata["activeRun"]>): AgentReservation {
 		const existing = this.#reservations.get(run.id)
 		if (existing) return existing
+		const tuple =
+			run.state === "suspended" && this.#recoveryMode === "manual"
+				? { provider: `${this.#tuple.provider}#manual#${this.#paths.taskRef}`, model: this.#tuple.model }
+				: this.#tuple
 		const reservation = getAgentCoordinator().reserve({
-			tuple: this.#tuple,
+			tuple,
 			signal: this.#scheduleAbort.signal,
 			...(run.acceptanceOrder ? { acceptanceOrder: run.acceptanceOrder } : {})
 		})
@@ -960,13 +1025,30 @@ function renderUnknown(value: unknown): string {
 	}
 }
 
-function abortError(signal: AbortSignal): Error {
-	return signal.reason instanceof Error ? signal.reason : new Error("Agent creation aborted")
+function suspendedRuntimes(): Map<string, Set<SuspendedRuntime>> {
+	const global = globalThis as typeof globalThis & { [SUSPENDED_RUNTIMES_SYMBOL]?: Map<string, Set<SuspendedRuntime>> }
+	global[SUSPENDED_RUNTIMES_SYMBOL] ??= new Map()
+	return global[SUSPENDED_RUNTIMES_SYMBOL]
 }
 
-function waitForAbort(signal: AbortSignal): Promise<void> {
-	if (signal.aborted) return Promise.resolve()
-	return new Promise(resolve => signal.addEventListener("abort", () => resolve(), { once: true }))
+function bindSuspendedRuntime(tuple: ModelTuple, runtime: SuspendedRuntime): () => void {
+	const registry = suspendedRuntimes()
+	const key = modelTupleKey(tuple)
+	const runtimes = registry.get(key) ?? new Set()
+	runtimes.add(runtime)
+	registry.set(key, runtimes)
+	return () => {
+		runtimes.delete(runtime)
+		if (runtimes.size === 0 && registry.get(key) === runtimes) registry.delete(key)
+	}
+}
+
+function modelTupleKey(tuple: ModelTuple): string {
+	return `${tuple.provider}\0${tuple.model}`
+}
+
+function abortError(signal: AbortSignal): Error {
+	return signal.reason instanceof Error ? signal.reason : new Error("Agent creation aborted")
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve(value: T | PromiseLike<T>): void } {

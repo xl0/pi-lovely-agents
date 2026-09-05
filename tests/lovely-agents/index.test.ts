@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { SessionEntry } from "@earendil-works/pi-coding-agent"
-import { latestReplyWasInterrupted } from "../../extensions/lovely-agents/index.js"
+import { latestReplyWasInterrupted, successfulTurnTuple } from "../../extensions/lovely-agents/index.js"
 
 describe("/continue eligibility", () => {
 	test("accepts only the latest errored or aborted assistant reply", () => {
@@ -9,6 +9,20 @@ describe("/continue eligibility", () => {
 		expect(latestReplyWasInterrupted(branch("length"))).toBe(false)
 		expect(latestReplyWasInterrupted(branch("error"))).toBe(true)
 		expect(latestReplyWasInterrupted(branch("aborted"))).toBe(true)
+	})
+})
+
+describe("automatic tuple recovery", () => {
+	test("uses only successful assistant turns with an exact model identity", () => {
+		expect(successfulTurnTuple({ role: "assistant", stopReason: "stop", provider: "provider", model: "model" })).toEqual({
+			provider: "provider",
+			model: "model"
+		})
+		expect(successfulTurnTuple({ role: "assistant", stopReason: "error", provider: "provider", model: "model" })).toBeUndefined()
+		expect(successfulTurnTuple({ role: "assistant", stopReason: "aborted", provider: "provider", model: "model" })).toBeUndefined()
+		expect(successfulTurnTuple({ role: "assistant", stopReason: "length", provider: "provider", model: "model" })).toBeUndefined()
+		expect(successfulTurnTuple({ role: "user", provider: "provider", model: "model" })).toBeUndefined()
+		expect(successfulTurnTuple({ role: "assistant", stopReason: "stop" })).toBeUndefined()
 	})
 })
 

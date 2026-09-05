@@ -114,6 +114,10 @@ Terminal quota, billing, budget, usage-limit, rate-limit/429, and
 provider/model tuple gate. Overload, 5xx, network, and timeout failures remain
 ordinary failed runs. Closing a gate blocks queued and newly accepted work on
 that tuple without aborting running siblings or delaying other tuples.
+Successful turns reopen their exact tuple globally. Eligible `/continue` calls
+also admit only suspended tasks in the caller's owned descendant tree, even
+while their tuple gate remains closed. Recovery sends literal `Continue.` in
+the existing logical run; another provider limit suspends it again.
 
 Child sessions use Pi's SDK in-process and own the task's retained
 `session.jsonl`. Selection follows call, Definition, then parent precedence.
@@ -168,11 +172,12 @@ detail views never rebind Pi's active session. Live fixture timers use a
 process-global registry so reload preserves them and semantic shutdown stops
 them before releasing the parent lease.
 
-`/continue` sends a hidden empty custom message with Follow-up delivery and
-`triggerTurn: true` when the parent is idle. This resumes Pi's normal prompt
-path without adding visible prompt text. It refuses to queue duplicate work
-while the parent is already running and does nothing unless the latest
-assistant reply ended with `error` or `aborted`.
+`/continue` first requeues owned suspended descendants, then sends a hidden
+empty custom message with Follow-up delivery and `triggerTurn: true` when the
+parent is idle. This resumes Pi's normal prompt path without adding visible
+prompt text. It refuses to queue duplicate work while the parent is already
+running and does nothing unless the latest assistant reply ended with `error`
+or `aborted`.
 
 ## Tooling and release
 

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { readFile, stat, writeFile } from "node:fs/promises"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
-import { reconcileParentTasks, stopOwnedTaskTree } from "../../extensions/lovely-agents/lifecycle.js"
+import { reconcileParentTasks, recoverOwnedTaskTree, stopOwnedTaskTree } from "../../extensions/lovely-agents/lifecycle.js"
 import {
 	ensureParentStorage,
 	initializeRetainedLogs,
@@ -95,6 +95,41 @@ describe("task lifecycle recovery", () => {
 				unbind()
 				await releaseParentLeaseFor(workspace.cwd, "parent")
 			}
+		})
+	})
+
+	test("recovers only resident suspended work in the owned tree", async () => {
+		await withTempWorkspace(async workspace => {
+			const direct = await createTask(workspace.cwd, "parent", "a_70000001", "child", "suspended")
+			const nested = await createTask(workspace.cwd, "child", "a_70000002", "grandchild", "suspended")
+			const unrelated = await createTask(workspace.cwd, "other", "a_70000003", "other-child", "suspended")
+			const recovered: string[] = []
+			const unbind = [direct, nested, unrelated].map(paths =>
+				getAgentCoordinator().bindResident(paths.taskDirectory, {
+					stop() {},
+					dispose() {},
+					recover() {
+						recovered.push(paths.taskRef)
+						return true
+					}
+				})
+			)
+			try {
+				expect(await recoverOwnedTaskTree(workspace.cwd, "parent")).toEqual({ resumed: 2, diagnostics: [] })
+				expect(recovered).toEqual(["a_70000001", "a_70000002"])
+			} finally {
+				for (const remove of unbind) remove()
+			}
+		})
+	})
+
+	test("reports suspended work without a resident runtime", async () => {
+		await withTempWorkspace(async workspace => {
+			await createTask(workspace.cwd, "parent", "a_70000004", "child", "suspended")
+			const result = await recoverOwnedTaskTree(workspace.cwd, "parent")
+			expect(result.resumed).toBe(0)
+			expect(result.diagnostics).toHaveLength(1)
+			expect(result.diagnostics[0]).toContain("suspended task has no recoverable resident")
 		})
 	})
 

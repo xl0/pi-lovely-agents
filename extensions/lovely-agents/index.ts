@@ -1,10 +1,10 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent"
 import { ScopedConfigEditor } from "@xl0/pi-lovely-config"
-import { registerAgentTool, registerTaskInputTool } from "./agent.js"
+import { recoverProviderTuple, registerAgentTool, registerTaskInputTool } from "./agent.js"
 import { type AgentsConfig, type AgentsConfigWarning, createAgentsConfigSpec, defaultAgentsConfig, resolveAgentsConfig } from "./config.js"
 import { getAgentCoordinator } from "./coordinator.js"
 import { discoverAgentDefinitions } from "./definitions.js"
-import { reconcileParentTasks, stopOwnedTaskTree } from "./lifecycle.js"
+import { reconcileParentTasks, recoverOwnedTaskTree, stopOwnedTaskTree } from "./lifecycle.js"
 import { openManagementUi, stopFixtureTimersFor } from "./management.js"
 import { loadTaskList, registerRosterTool, registerTaskTools } from "./tools.js"
 
@@ -49,6 +49,11 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(`Lovely Agents recovery failed: ${errorMessage(error)}`, "warning")
 			}
 		}
+	})
+
+	pi.on("turn_end", event => {
+		const tuple = successfulTurnTuple(event.message)
+		if (tuple) recoverProviderTuple(tuple)
 	})
 
 	pi.registerCommand("lovely-agents", {
@@ -96,6 +101,15 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 				return
 			}
 			if (!latestReplyWasInterrupted(ctx.sessionManager.getBranch())) return
+			try {
+				const recovered = await recoverOwnedTaskTree(ctx.cwd, ctx.sessionManager.getSessionId())
+				if (recovered.diagnostics.length > 0) {
+					ctx.ui.notify(`Lovely Agents skipped ${recovered.diagnostics.length} task(s) during recovery.`, "warning")
+				}
+			} catch (error) {
+				ctx.ui.notify(`Lovely Agents recovery failed: ${errorMessage(error)}`, "warning")
+				return
+			}
 			pi.sendMessage(
 				{
 					customType: "lovely-agents:continue",
@@ -123,6 +137,18 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			}
 		}
 	})
+}
+
+export function successfulTurnTuple(message: {
+	role: string
+	stopReason?: string
+	provider?: string
+	model?: string
+}): { provider: string; model: string } | undefined {
+	if (message.role !== "assistant" || message.stopReason !== "stop" || !message.provider || !message.model) {
+		return undefined
+	}
+	return { provider: message.provider, model: message.model }
 }
 
 export function latestReplyWasInterrupted(entries: readonly SessionEntry[]): boolean {

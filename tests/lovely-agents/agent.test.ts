@@ -4,6 +4,7 @@ import { resolve } from "node:path"
 import type { AgentSessionEvent, ExtensionAPI, ExtensionContext, ScopedModel } from "@earendil-works/pi-coding-agent"
 import {
 	type AgentCreationResult,
+	recoverProviderTuple,
 	registerAgentTool,
 	registerTaskInputTool,
 	type TaskInputResult
@@ -11,6 +12,7 @@ import {
 import type { ChildSessionHandle, CreateChildSessionOptions } from "../../extensions/lovely-agents/child-session.js"
 import type { AgentsConfig } from "../../extensions/lovely-agents/config.js"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
+import { recoverOwnedTaskTree } from "../../extensions/lovely-agents/lifecycle.js"
 import {
 	mutateTaskMetadata,
 	parentStoragePaths,
@@ -157,6 +159,52 @@ describe("agent tool", () => {
 
 				const stopped = await tools.stop.execute("stop", { id: details.id }, undefined, taskContext(workspace.cwd))
 				expect(stopped.details).toMatchObject({ state: "idle", latestOutcome: "stopped" })
+				expect(coordinator.isTupleOpen(tuple)).toBe(false)
+			} finally {
+				coordinator.openTuple(tuple)
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
+			}
+		})
+	})
+
+	test("recovers the same logical run with literal Continue input", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const fake = fakeChild(async child => {
+				if (child.prompts.length < 3) child.assistantError("ResourceExhausted")
+				else child.assistant("Recovered")
+			})
+			const tools = captureAgentTools(workspace.agentDir, async () => fake.handle)
+			const coordinator = getAgentCoordinator()
+			const tuple = { provider: selectedModel.provider, model: selectedModel.id }
+			coordinator.openTuple(tuple)
+			try {
+				const created = await tools.agent.execute(
+					"create",
+					{ definition: "reviewer", label: "Recovering review", prompt: "Inspect" },
+					undefined,
+					taskContext(workspace.cwd)
+				)
+				const details = created.details as AgentCreationResult
+				const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
+				expect(details.state).toBe("suspended")
+
+				expect(recoverProviderTuple(tuple)).toBe(1)
+				await waitForSuspension(paths, fake, 2)
+				expect(coordinator.isTupleOpen(tuple)).toBe(false)
+
+				const recovery = await recoverOwnedTaskTree(workspace.cwd, "parent-session")
+				expect(recovery).toEqual({ resumed: 1, diagnostics: [] })
+				expect(await recoverOwnedTaskTree(workspace.cwd, "parent-session")).toEqual({ resumed: 0, diagnostics: [] })
+				expect(await waitForOutcome(paths, details.output.nextOffset)).toBe("succeeded")
+				expect(fake.prompts).toEqual([
+					{ text: "Inspect", expandPromptTemplates: false },
+					{ text: "Continue.", expandPromptTemplates: false },
+					{ text: "Continue.", expandPromptTemplates: false }
+				])
+				const output = await readFile(paths.output, "utf8")
+				expect(output.match(/<run 1 initial>/g)).toHaveLength(1)
+				expect(output).not.toContain("<user>\nContinue.")
 			} finally {
 				coordinator.openTuple(tuple)
 				await releaseParentLeaseFor(workspace.cwd, "parent-session")
@@ -938,6 +986,16 @@ async function waitForOutcome(paths: ReturnType<typeof taskStoragePaths>, offset
 		nextOffset = output.nextOffset
 	}
 	return null
+}
+
+async function waitForSuspension(paths: ReturnType<typeof taskStoragePaths>, child: FakeChild, promptCount: number): Promise<void> {
+	const deadline = Date.now() + 2_000
+	while (Date.now() < deadline) {
+		const loaded = await readTaskMetadata(paths)
+		if (child.prompts.length >= promptCount && loaded.status === "ok" && loaded.metadata.state === "suspended") return
+		await Bun.sleep(2)
+	}
+	throw new Error(`Task did not suspend after ${promptCount} prompts`)
 }
 
 async function waitForRunCount(paths: ReturnType<typeof taskStoragePaths>, count: number): Promise<void> {

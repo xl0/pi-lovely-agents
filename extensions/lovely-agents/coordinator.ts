@@ -28,6 +28,7 @@ export type ResidentAgent = {
 	stop(): void | Promise<void>
 	dispose(): void | Promise<void>
 	input?(content: string, delivery: "followup" | "steer"): Promise<ResidentInputResult>
+	recover?(): boolean | Promise<boolean>
 }
 
 export type ResidentInputResult = {

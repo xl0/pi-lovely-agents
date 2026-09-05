@@ -16,8 +16,10 @@ describe("provider-limit classification", () => {
 		"rate limit exceeded",
 		"rate_limit_exceeded",
 		"HTTP 429",
+		"HTTP 429 after an upstream timeout",
 		"Too many requests",
 		"ResourceExhausted: request limit reached",
+		"ResourceExhausted: upstream timeout",
 		"RESOURCE_EXHAUSTED"
 	])("includes %s", errorMessage => {
 		expect(isProviderLimitError(errorMessage)).toBe(true)
