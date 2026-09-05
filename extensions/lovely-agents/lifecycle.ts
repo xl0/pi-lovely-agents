@@ -1,5 +1,6 @@
 import { lstat, readdir } from "node:fs/promises"
 import { getAgentCoordinator } from "./coordinator.js"
+import { appendTaskNotification, prepareTaskNotification } from "./notifications.js"
 import {
 	acquireParentLease,
 	appendOutputLog,
@@ -42,6 +43,14 @@ export async function reconcileParentTasks(cwd: string, parentSessionId: string)
 			}
 			continue
 		}
+		let notification: TaskMetadata["notifications"][number] | undefined
+		if (loaded.metadata.activeRun) {
+			try {
+				notification = await prepareTaskNotification(paths, loaded.metadata, loaded.metadata.activeRun, "interruption", "interrupted")
+			} catch (error) {
+				result.diagnostics.push(`${paths.taskDirectory}: could not prepare interruption notification: ${errorMessage(error)}`)
+			}
+		}
 		const settled: { run: TaskMetadata["activeRun"] } = { run: null }
 		const updatedAt = Date.now()
 		const changed = await mutateTaskMetadata(paths, metadata => {
@@ -54,18 +63,7 @@ export async function reconcileParentTasks(cwd: string, parentSessionId: string)
 				activeRun: null,
 				queuedFollowUps: [],
 				updatedAt,
-				notifications: metadata.activeRun
-					? [
-							...metadata.notifications,
-							{
-								id: `${metadata.taskRef}:${metadata.activeRun.id}:interruption`,
-								type: "interruption",
-								runId: metadata.activeRun.id,
-								createdAt: Date.now(),
-								content: `Agent ${metadata.taskRef} was interrupted before this process started.`
-							}
-						]
-					: metadata.notifications
+				notifications: notification ? appendTaskNotification(metadata.notifications, notification) : metadata.notifications
 			}
 		})
 		if (!settled.run || changed.latestOutcome !== "interrupted") continue
@@ -190,4 +188,8 @@ async function isDirectory(path: string): Promise<boolean> {
 
 function hasCode(error: unknown, code: string): boolean {
 	return typeof error === "object" && error !== null && "code" in error && error.code === code
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error)
 }

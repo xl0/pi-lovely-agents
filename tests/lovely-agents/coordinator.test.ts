@@ -32,7 +32,7 @@ describe("process-global Agent coordinator", () => {
 		const unbindOldRoute = coordinator.bindNotificationRoute("parent", oldRoute)
 		const unbindRoute = coordinator.bindNotificationRoute("parent", route)
 		unbindOldRoute()
-		await coordinator.getNotificationRoute("parent")?.({ id: "notice", content: "done" })
+		await coordinator.getNotificationRoute("parent")?.({ id: "notice", taskRef: "a_00000001", content: "done" })
 		expect(delivered).toEqual(["done"])
 		const unbindContext = coordinator.bindSessionContext("session", { depth: 2, allowAgents: false })
 		expect(coordinator.getSessionContext("session")).toEqual({ depth: 2, allowAgents: false })

@@ -733,7 +733,7 @@ relative times, retained output is a flat tagged user/agent stream without
 per-line indentation, and tool activity headers expose concise arguments. Long
 tool results use bounded head/tail previews with full Ctrl+O expansion.
 
-### [ ] 5. Quota recovery and notifications
+### [x] 5. Quota recovery and notifications
 
 #### [x] 5.1 Provider-limit classification and tuple gates
 
@@ -753,20 +753,15 @@ the logical run and acceptance order, sends internal literal `Continue.`, and
 can suspend repeatedly. Successful-parent no-op, tuple/bypass scheduling,
 ownership recursion, and repeated recovery are tested.
 
-#### [ ] 5.3 Durable notification delivery
+#### [x] 5.3 Durable notification delivery
 
-Persist bounded completion, suspension, and interruption notifications before
-delivery. Route live delivery as a custom parent Steer; retain it while the
-exact parent is unavailable. Use deterministic task/run/type IDs and mark
-delivered only when parent `message_end` observes the ID.
-
-Reconcile IDs against the parent transcript after restart, resending only
-absent notifications. Never duplicate synchronous initial results or explicit
-stop outcomes.
-
-Done when crash-window tests cover persist-before-send, send-before-observe,
-observe-before-mark, parent offline/reopen, transcript deduplication, payload
-bounds, and descendant summaries.
+Completion, suspension, and interruption notices are bounded and persisted
+before exact-parent delivery as custom Steers. Deterministic task/run/type IDs
+are marked delivered only when the parent observes the custom message.
+Process-local in-flight suppression avoids live duplicates; startup transcript
+reconciliation marks observed IDs and resends only absent notices. Payloads
+include bounded output tails, retained paths, and descendant summaries while
+excluding synchronous initial results and explicit stops.
 
 ### [ ] 6. Live controls and release readiness
 

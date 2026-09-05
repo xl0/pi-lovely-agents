@@ -19,6 +19,8 @@ stop/discard controls, restart recovery, and the management UI are implemented.
   and discard tools
 - `extensions/lovely-agents/lifecycle.ts`: graceful recursive shutdown and
   restart reconciliation
+- `extensions/lovely-agents/notifications.ts`: bounded durable notification
+  creation, routing, observation, and transcript reconciliation
 - `extensions/lovely-agents/config.ts`: scoped config validation and searchable
   model selection
 - `extensions/lovely-agents/definitions.ts`: fresh, trust-aware Definition
@@ -118,6 +120,15 @@ Successful turns reopen their exact tuple globally. Eligible `/continue` calls
 also admit only suspended tasks in the caller's owned descendant tree, even
 while their tuple gate remains closed. Recovery sends literal `Continue.` in
 the existing logical run; another provider limit suspends it again.
+
+Detached initial runs and Follow-ups persist bounded completion notifications;
+detached suspensions persist status notifications, and startup reconciliation
+persists interruption notifications. Exact parent routes inject them as custom
+Steers and wake idle parents. Delivery is marked only after the parent's
+`message_end` observes the deterministic task/run/type ID. Session startup
+reconciles IDs in the transcript and resends only absent notices; semantic
+parent shutdown clears process-local in-flight suppression. Synchronous initial
+results and explicit stops do not notify.
 
 Child sessions use Pi's SDK in-process and own the task's retained
 `session.jsonl`. Selection follows call, Definition, then parent precedence.

@@ -6,12 +6,21 @@ import { getAgentCoordinator } from "./coordinator.js"
 import { discoverAgentDefinitions } from "./definitions.js"
 import { reconcileParentTasks, recoverOwnedTaskTree, stopOwnedTaskTree } from "./lifecycle.js"
 import { openManagementUi, stopFixtureTimersFor } from "./management.js"
+import {
+	clearNotificationInFlight,
+	NOTIFICATION_CUSTOM_TYPE,
+	notificationDetails,
+	notificationRouteKey,
+	observeNotification,
+	reconcileParentNotifications
+} from "./notifications.js"
 import { loadTaskList, registerRosterTool, registerTaskTools } from "./tools.js"
 
 export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	let configValue = defaultAgentsConfig
 	let configWarnings: AgentsConfigWarning[] = []
 	let currentDepth = 0
+	let unbindNotificationRoute: (() => void) | undefined
 
 	const applyConfig = (value: AgentsConfig, warnings: AgentsConfigWarning[], ctx: ExtensionContext) => {
 		configValue = value
@@ -27,8 +36,21 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		const parentSessionId = ctx.sessionManager.getSessionId()
+		unbindNotificationRoute?.()
+		unbindNotificationRoute = getAgentCoordinator().bindNotificationRoute(notificationRouteKey(ctx.cwd, parentSessionId), notification => {
+			pi.sendMessage(
+				{
+					customType: NOTIFICATION_CUSTOM_TYPE,
+					content: notification.content,
+					display: true,
+					details: { notificationId: notification.id, taskRef: notification.taskRef }
+				},
+				{ triggerTurn: true, deliverAs: "steer" }
+			)
+		})
 		try {
-			currentDepth = getAgentCoordinator().getSessionContext(ctx.sessionManager.getSessionId())?.depth ?? 0
+			currentDepth = getAgentCoordinator().getSessionContext(parentSessionId)?.depth ?? 0
 			loadConfig(ctx)
 		} catch (error) {
 			configValue = defaultAgentsConfig
@@ -38,7 +60,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		}
 		if (_event.reason !== "reload") {
 			try {
-				const reconciled = await reconcileParentTasks(ctx.cwd, ctx.sessionManager.getSessionId())
+				const reconciled = await reconcileParentTasks(ctx.cwd, parentSessionId)
 				if (reconciled.interrupted > 0) {
 					ctx.ui.notify(`Lovely Agents marked ${reconciled.interrupted} stale task(s) interrupted.`, "warning")
 				}
@@ -49,6 +71,31 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(`Lovely Agents recovery failed: ${errorMessage(error)}`, "warning")
 			}
 		}
+		try {
+			const notifications = await reconcileParentNotifications(ctx.cwd, parentSessionId, ctx.sessionManager.getBranch())
+			if (notifications.diagnostics.length > 0) {
+				ctx.ui.notify(`Lovely Agents skipped ${notifications.diagnostics.length} notification task(s).`, "warning")
+			}
+		} catch (error) {
+			ctx.ui.notify(`Lovely Agents notification recovery failed: ${errorMessage(error)}`, "warning")
+		}
+	})
+
+	pi.on("message_end", async (event, ctx) => {
+		if (event.message.role !== "custom" || event.message.customType !== NOTIFICATION_CUSTOM_TYPE) return
+		const details = notificationDetails(event.message.details)
+		if (!details) return
+		try {
+			await observeNotification(ctx.cwd, ctx.sessionManager.getSessionId(), details.taskRef, details.notificationId)
+		} catch (error) {
+			ctx.ui.notify(`Lovely Agents could not mark notification delivered: ${errorMessage(error)}`, "warning")
+		}
+	})
+
+	pi.on("session_shutdown", (event, ctx) => {
+		unbindNotificationRoute?.()
+		unbindNotificationRoute = undefined
+		if (event.reason !== "reload") clearNotificationInFlight(ctx.cwd, ctx.sessionManager.getSessionId())
 	})
 
 	pi.on("turn_end", event => {

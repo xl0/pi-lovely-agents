@@ -64,6 +64,9 @@ describe("agent tool", () => {
 			while (!fake.disposed) await Bun.sleep(1)
 			expect(fake.disposed).toBe(true)
 			expect(getAgentCoordinator().residentCount).toBe(0)
+			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
+			const metadata = await readTaskMetadata(paths)
+			expect(metadata.status === "ok" ? metadata.metadata.notifications : null).toEqual([])
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
 		})
 	})
@@ -96,6 +99,11 @@ describe("agent tool", () => {
 			finish.resolve(undefined)
 			expect(await waitForOutcome(paths, details.output.nextOffset)).toBe("succeeded")
 			expect(fake.prompts).toHaveLength(1)
+			const completed = await readTaskMetadata(paths)
+			const notifications = completed.status === "ok" ? completed.metadata.notifications : []
+			expect(notifications).toHaveLength(1)
+			expect(notifications[0]).toMatchObject({ id: `${details.id}:${active.metadata.activeRun?.id}:completion`, type: "completion" })
+			expect(notifications[0]?.deliveredAt).toBeUndefined()
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
 		})
 	})
@@ -145,6 +153,7 @@ describe("agent tool", () => {
 				const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
 				const loaded = await readTaskMetadata(paths)
 				expect(loaded.status === "ok" ? loaded.metadata.activeRun?.state : null).toBe("suspended")
+				expect(loaded.status === "ok" ? loaded.metadata.notifications : null).toEqual([])
 				expect(fake.disposed).toBe(false)
 
 				const queued = await tools.agent.execute(

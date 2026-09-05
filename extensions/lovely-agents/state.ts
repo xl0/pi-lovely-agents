@@ -12,6 +12,8 @@ export const STORAGE_GITIGNORE = "*\n!.gitignore\n"
 export const MAX_AGENT_INPUT_BYTES = 64 * 1024
 export const MAX_AGENT_LABEL_BYTES = 80
 export const MAX_QUEUED_FOLLOWUPS = 32
+export const MAX_TASK_NOTIFICATIONS = 128
+export const MAX_NOTIFICATION_CONTENT_BYTES = 8 * 1024
 export const PARENT_LEASE_VERSION = 1
 export const RETAINED_OUTPUT_MAX_LINES = 2_000
 export const RETAINED_OUTPUT_MAX_BYTES = 50 * 1024
@@ -74,7 +76,7 @@ const Notification = Type.Object(
 		id: Type.String({ minLength: 1 }),
 		type: Type.Union([Type.Literal("completion"), Type.Literal("suspension"), Type.Literal("interruption")]),
 		runId: RunId,
-		content: Type.String(),
+		content: Type.String({ minLength: 1 }),
 		createdAt: Timestamp,
 		deliveredAt: Type.Optional(Timestamp)
 	},
@@ -133,7 +135,7 @@ export const TaskMetadataSchema = Type.Object(
 		lastRunSequence: Type.Integer({ minimum: 0 }),
 		activeRun: Type.Union([ActiveRun, Type.Null()]),
 		queuedFollowUps: Type.Array(QueuedFollowUp, { maxItems: MAX_QUEUED_FOLLOWUPS }),
-		notifications: Type.Array(Notification),
+		notifications: Type.Array(Notification, { maxItems: MAX_TASK_NOTIFICATIONS }),
 		discardedAt: Type.Union([Timestamp, Type.Null()]),
 		createdAt: Timestamp,
 		updatedAt: Timestamp
@@ -600,6 +602,11 @@ function taskMetadataSemanticError(value: TaskMetadata): string | undefined {
 		const contentError = inputValidationError(followUp.content, `/queuedFollowUps/${index}/content`)
 		if (contentError) return contentError
 		priorSequence = followUp.sequence
+	}
+	for (let index = 0; index < value.notifications.length; index++) {
+		if (Buffer.byteLength(value.notifications[index]?.content ?? "", "utf8") > MAX_NOTIFICATION_CONTENT_BYTES) {
+			return `/notifications/${index}/content must be at most ${MAX_NOTIFICATION_CONTENT_BYTES} UTF-8 bytes`
+		}
 	}
 	return undefined
 }

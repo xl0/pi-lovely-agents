@@ -15,6 +15,7 @@ import { resolveConfiguredModels } from "./config.js"
 import { type AgentReservation, getAgentCoordinator, type ModelTuple, type ResidentAgent, type ResidentInputResult } from "./coordinator.js"
 import { type AgentDefinition, discoverAgentDefinitions } from "./definitions.js"
 import { stopOwnedTaskTree, stopTask } from "./lifecycle.js"
+import { appendTaskNotification, deliverTaskNotifications, prepareTaskNotification } from "./notifications.js"
 import { isProviderLimitError } from "./provider-limits.js"
 import { renderExpandableResult } from "./rendering.js"
 import {
@@ -723,20 +724,26 @@ class AgentRuntime implements ResidentAgent {
 		this.#recoveryWait = wait
 		this.#unbindSuspended = unbind
 		let won = false
+		let notification: TaskMetadata["notifications"][number] | undefined
 		const timestamp = Date.now()
-		await mutateTaskMetadata(this.#paths, metadata => {
+		await mutateTaskMetadata(this.#paths, async metadata => {
 			const activeRun = metadata.activeRun
 			if (!activeRun || activeRun.id !== run.id) return metadata
 			won = true
+			if (run.kind === "followup" || activeRun.detachedAt !== undefined) {
+				notification = await prepareTaskNotification(this.#paths, metadata, activeRun, "suspension")
+			}
 			return {
 				...metadata,
 				state: "suspended",
 				activeRun: { ...activeRun, state: "suspended" },
+				...(notification ? { notifications: appendTaskNotification(metadata.notifications, notification) } : {}),
 				updatedAt: timestamp
 			}
 		})
 		if (won) {
 			if (run.id === this.#initialRunId) this.#initialCompletion.resolve(undefined)
+			if (notification) await deliverTaskNotifications(this.#paths).catch(() => {})
 		} else {
 			unbind()
 			if (this.#recoveryWait === wait) this.#recoveryWait = undefined
@@ -761,10 +768,15 @@ class AgentRuntime implements ResidentAgent {
 	): Promise<NonNullable<TaskMetadata["activeRun"]> | null> {
 		let won = false
 		const promoted: { run: NonNullable<TaskMetadata["activeRun"]> | null } = { run: null }
+		let notification: TaskMetadata["notifications"][number] | undefined
 		const timestamp = Date.now()
-		await mutateTaskMetadata(this.#paths, metadata => {
-			if (metadata.activeRun?.id !== run.id) return clearFollowUps ? { ...metadata, queuedFollowUps: [], updatedAt: timestamp } : metadata
+		await mutateTaskMetadata(this.#paths, async metadata => {
+			const activeRun = metadata.activeRun
+			if (activeRun?.id !== run.id) return clearFollowUps ? { ...metadata, queuedFollowUps: [], updatedAt: timestamp } : metadata
 			won = true
+			if ((outcome === "succeeded" || outcome === "failed") && (run.kind === "followup" || activeRun.detachedAt !== undefined)) {
+				notification = await prepareTaskNotification(this.#paths, metadata, activeRun, "completion", outcome)
+			}
 			const [next, ...remaining] = clearFollowUps ? [] : metadata.queuedFollowUps
 			if (next) {
 				promoted.run = {
@@ -782,6 +794,7 @@ class AgentRuntime implements ResidentAgent {
 					latestOutcome: outcome,
 					activeRun: promoted.run,
 					queuedFollowUps: remaining,
+					...(notification ? { notifications: appendTaskNotification(metadata.notifications, notification) } : {}),
 					updatedAt: timestamp
 				}
 			}
@@ -791,10 +804,12 @@ class AgentRuntime implements ResidentAgent {
 				latestOutcome: outcome,
 				activeRun: null,
 				...(clearFollowUps ? { queuedFollowUps: [] } : {}),
+				...(notification ? { notifications: appendTaskNotification(metadata.notifications, notification) } : {}),
 				updatedAt: timestamp
 			}
 		})
 		if (won) await appendOutputLog(this.#paths, { type: "run-end", sequence: run.sequence, outcome, timestamp })
+		if (won && notification) await deliverTaskNotifications(this.#paths).catch(() => {})
 		if (run.id === this.#initialRunId) this.#initialCompletion.resolve(undefined)
 		return promoted.run
 	}

@@ -37,7 +37,7 @@ export type ResidentInputResult = {
 	queuedFollowUps: number
 }
 
-export type ParentNotification = Readonly<{ id: string; content: string }>
+export type ParentNotification = Readonly<{ id: string; taskRef: string; content: string }>
 export type ParentNotificationRoute = (notification: ParentNotification) => void | Promise<void>
 export type ManagedSessionContext = Readonly<{ depth: number; allowAgents: boolean }>
 
