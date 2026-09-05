@@ -2,6 +2,7 @@ import { type Dirent, readdirSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter, type ScopedModel } from "@earendil-works/pi-coding-agent"
+import { MODEL_ALIASES } from "./config.js"
 
 const ALLOWED_KEYS = new Set(["name", "description", "model", "thinking", "tools", "exclude_agents_md"])
 const NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/
@@ -256,6 +257,7 @@ function parseDefinitionModel(value: unknown, models: readonly ScopedModel["mode
 	if (value === undefined) return {}
 	if (typeof value !== "string" || !value.trim()) return { error: "model must be a nonempty string" }
 	const reference = value.trim().toLowerCase()
+	if (Object.hasOwn(MODEL_ALIASES, reference)) return { value: reference }
 	const canonical = models.filter(model => `${model.provider}/${model.id}`.toLowerCase() === reference)
 	if (canonical.length === 1) return { value: `${canonical[0]?.provider}/${canonical[0]?.id}` }
 	const byId = models.filter(model => model.id.toLowerCase() === reference)

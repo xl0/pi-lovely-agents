@@ -58,6 +58,31 @@ test("navigation scrolls five rows, bounds width, and preserves selection across
 	expect(h.lines().join("\n")).toContain("→ a_00000007")
 })
 
+test("task rows use the full width for labels and prompt previews", async () => {
+	const h = harness()
+	h.result.tasks = [
+		{
+			...row(0),
+			label: "System prompt inspection",
+			model: "openai-codex/gpt-6-astra",
+			inputPreview: `Inspect the stored system prompt. ${"界🙂 ".repeat(80)}`
+		}
+	]
+	await h.panel.refresh()
+	expect(h.lines(240).join("\n")).toContain(' · "Inspect the stored system prompt.')
+	expect(h.lines(240).join("\n")).not.toContain("prompt=")
+	h.panel.focus()
+	const wide = h.lines(240).join("\n")
+	expect(wide).toContain("System prompt inspection · openai-codex/gpt-6-astra")
+	expect(wide).toContain(' · "Inspect the stored system prompt.')
+	expect(wide).not.toContain("prompt=")
+	for (const width of [1, 20, 40, 80, 120, 240]) {
+		expect(h.lines(width).every(line => visibleWidth(line) <= width)).toBe(true)
+		expect(h.lines(width).join("\n")).not.toContain("�")
+	}
+	expect(h.lines(80).join("\n")).toContain("System prompt inspection")
+})
+
 test("shows queue reasons, capacity, and activity through event-driven updates", async () => {
 	const h = harness()
 	const task = h.result.tasks[0]

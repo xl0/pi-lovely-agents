@@ -9,6 +9,7 @@ import {
 	resolveChildSessionSelection,
 	resolveChildToolPolicy
 } from "../../extensions/lovely-agents/child-session.js"
+import type { ModelAliasChoice } from "../../extensions/lovely-agents/config.js"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
 import type { AgentDefinition } from "../../extensions/lovely-agents/definitions.js"
 import { ensureParentStorage, initializeRetainedLogs, reserveTaskStorage } from "../../extensions/lovely-agents/state.js"
@@ -38,6 +39,40 @@ const inheritedDefinition: AgentDefinition = {
 }
 
 describe("child session selection", () => {
+	test("alias presets honor explicit overrides without affecting explicit IDs or parent inheritance", () => {
+		const aliases: ModelAliasChoice[] = [{ name: "fast", model: callModel, thinkingLevel: "low" }]
+		const options = {
+			definition,
+			aliases,
+			configuredModels: [{ model: callModel }],
+			availableModels: [definitionModel, callModel],
+			parentModel,
+			parentThinking: "medium" as const
+		}
+		expect(resolveChildSessionSelection({ ...options, callModel: "fast" })).toEqual({ model: callModel, thinking: "low" })
+		expect(resolveChildSessionSelection({ ...options, callModel: "fast", callThinking: "max" })).toEqual({
+			model: callModel,
+			thinking: "max"
+		})
+		expect(resolveChildSessionSelection({ ...options, callModel: "provider/call" })).toEqual({ model: callModel, thinking: "high" })
+		expect(resolveChildSessionSelection({ ...options, definition: { ...inheritedDefinition, model: "fast" } })).toEqual({
+			model: callModel,
+			thinking: "low"
+		})
+		expect(resolveChildSessionSelection({ ...options, definition: { ...definition, model: "fast" } })).toEqual({
+			model: callModel,
+			thinking: "high"
+		})
+		expect(resolveChildSessionSelection({ ...options, definition: inheritedDefinition })).toEqual({
+			model: parentModel,
+			thinking: "medium"
+		})
+		expect(() => resolveChildSessionSelection({ ...options, callModel: "smart" })).toThrow('Model alias "smart" is not configured')
+		expect(() => resolveChildSessionSelection({ ...options, definition: { ...definition, model: "smart" } })).toThrow(
+			'Model alias "smart" is not configured'
+		)
+	})
+
 	test("applies call, Definition, and parent precedence", () => {
 		expect(
 			resolveChildSessionSelection({

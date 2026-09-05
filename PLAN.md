@@ -314,11 +314,19 @@ Tasks are never adopted or garbage-collected automatically.
 
 Configured `models` are the explicit model choices returned by `agent_roster`
 and accepted by `agent`. A searchable multi-select lists authenticated Pi
-models. If none are selected, the only explicit choice is the current parent
-model.
+models. If none are selected, the parent model is included. Enabled alias
+targets are always added, without requiring duplicate selection in `models`.
 
-Omitting `model` inherits the current parent model. The effective thinking level
-uses call override, then definition default, then the parent thinking level.
+`fast`, `smart`, and `workhorse` are optional user-selected model + thinking
+presets. The roster explains their intended uses; selection remains the parent's
+decision, with no automatic routing. Both calls and Definitions may use aliases.
+Unavailable or disabled aliases fail explicitly when requested.
+
+Omitting `model` uses the Definition model, then the parent. Explicit call
+thinking wins over everything. A call-selected alias supplies thinking ahead
+of the Definition default; a Definition's own thinking overrides its alias
+preset. Otherwise thinking inherits from the parent. Explicit model IDs do not
+pick up thinking from aliases pointing at the same model.
 
 Pi clamps unsupported levels. Persist and return the effective model and level.
 Missing authentication is a creation error. Model and thinking are fixed when
@@ -376,7 +384,10 @@ Use `@xl0/pi-lovely-config` with the standard user/workspace precedence:
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| `models` | `[]` | Models the parent may explicitly select for a child. The searchable multi-select lists authenticated Pi models; empty exposes only the current parent model. |
+| `models` | `[]` | Additional model IDs. Empty includes the parent; enabled alias targets are always included. |
+| `fastModel` / `fastThinking` | `disabled` / `low` | Cheap, low-latency preset for straightforward work. |
+| `smartModel` / `smartThinking` | `disabled` / `high` | Most capable preset for difficult reasoning and complex work. |
+| `workhorseModel` / `workhorseThinking` | `disabled` / `medium` | Balanced preset for routine coding and research. |
 | `maxConcurrency` | `4` | Maximum number of agent runs executing in this OS process. |
 | `maxDepth` | `2` | Maximum delegation depth. |
 | `waitMs` | `30000` | Default wait for an initial result. Zero detaches immediately. |
@@ -387,6 +398,9 @@ runs drain. Model choices affect only newly created sessions; depth and wait
 affect future creation calls; input expansion affects future delivered input.
 No config edit mutates an active run. External file edits take effect after
 `/reload`.
+Alias model fields are searchable authenticated-model selectors; thinking
+fields appear when their alias is enabled. Existing tasks retain concrete model
+identities and effective thinking even after an alias changes or is disabled.
 
 ## Scheduling and quota
 
@@ -568,7 +582,9 @@ There is no parallel slash-command syntax for every model tool.
 ## Deferred scope
 
 - Background Bash producer
-- parent-context forks
+- cache-preserving parent-context forks: inherit model/thinking, prompt, tools,
+  and completed conversation prefix; preserve provider cache routing where
+  supported. No alias-driven model changes or unfinished tool-batch replay.
 - passive mailboxes and direct child-to-child communication
 - model-visible hierarchical addressing
 - built-in sandboxing and hard capability enforcement
@@ -797,8 +813,22 @@ Pi system prompt alone. Missing captures notify separately; no fallback body or
 explanatory text is mixed into the prompt. Static text views support wrapped
 scrolling, page navigation, and Home/End; context views refresh when reopened.
 No polling is used. Print/JSON behavior remains
-noninteractive and plain. Notifications share Ctrl+O expansion with tool
+noninteractive and plain. Agent calls fit Definition, label, quoted prompt
+preview, and `-> task ID` on one line, reserving suffix width before truncation.
+Ctrl+O expands full input and the otherwise-hidden
+Result section; tool errors remain visible. Notifications share expansion with tool
 results; Pi custom-message rendering does not provide tool-style click toggles.
+Focused task rows use full terminal width for label, status/model, and prompt.
+Bounded prompt previews are captured for new runs and retained after completion;
+human-only list loading keeps them out of task-tool results.
+
+#### [x] Model aliases
+
+Optional `fast`, `smart`, and `workhorse` model/thinking presets are editable per
+scope, explained in the roster, and resolved for calls and Definitions.
+Targets join model choices automatically; explicit thinking overrides presets.
+Unavailable aliases fail rather than reroute. Existing sessions retain concrete
+identities across alias edits and cold Follow-ups.
 
 #### [ ] 6.2 Documentation and package verification
 

@@ -40,14 +40,20 @@ Lovely Config's unreleased `multiEnum`; publish that dependency before release.
 
 `xl0-pi-lovely-agents.json` merges user then workspace values through Lovely
 Config. `models` is a searchable multi-select built from authenticated Pi
-models; an empty selection exposes only the current parent model. Numeric
+models; an empty selection includes the current parent model. Optional `fast`,
+`smart`, and `workhorse` aliases each select an authenticated model and thinking
+level. Their targets join explicit choices automatically, without duplicate IDs.
+Aliases default to disabled; unavailable targets warn and fail on selection,
+never reroute. The roster describes enabled presets; the parent chooses freely.
+Numeric
 runtime limits are also checked as integers because Lovely Config's ranged
 number fields accept fractions.
 
 Definitions are scanned on each roster call. The nearest trusted project
 `.pi/agents` directory shadows user definitions by declared name, even when the
 project definition is invalid. Same-scope duplicates invalidate that name.
-Definition model names resolve exactly against the full catalog.
+Definition model names resolve against the full catalog or the three reserved
+alias names. Aliases resolve at creation, not during Definition discovery.
 
 `agent_roster` returns effective definitions, diagnostics, and model choices as
 compact YAML-like model output. Full structured details remain available to Pi.
@@ -74,6 +80,9 @@ metadata versions are rejected rather than cold-loaded with wider capabilities.
 Optional `effectiveSystemPrompt` captures Pi's composed string at `agent_start`,
 after `before_agent_start` hooks, and clears on a new run. It excludes
 provider-payload rewrites and stays out of model-visible inspection results.
+Optional `inputPreview` captures up to 512 UTF-8 bytes of normalized run input
+on creation/promotion and survives settlement. Only human task-list loads
+include it; ordinary tool results do not. Older completed runs are not backfilled.
 Metadata and retained-log queues are process-global so surviving runtimes and
 new extension instances remain serialized across reload.
 
@@ -113,8 +122,15 @@ times, omit empty descendant summaries, and expose one task directory. Output
 reads render the latest reply, run status/outcome, and streaming flag.
 Input acknowledgements
 use one line, and agent creation omits redundant task inventory. Full artifact
-paths and exact metadata remain in tool `details`. Potentially long Lovely
-Agent, roster, list, and output tool results show a ten-line head/tail preview;
+paths and exact metadata remain in tool `details`. Collapsed agent calls use one
+row: Definition, `label=`, quoted `prompt=`, then `-> task ID`. Rendering reserves
+the ID suffix before truncating the preview to the available terminal columns;
+Pi's width helpers handle ANSI and Unicode. Shared render state supplies the ID
+at paint time, after the result renderer runs.
+Ctrl+O expands the full prompt and a separate Result section; successful
+tool results are otherwise hidden, while tool errors stay visible.
+This is display-only and does not change model-visible input/output.
+Other long roster, list, and output tool results show a ten-line head/tail preview;
 the configured `app.tools.expand` binding (Ctrl+O by default) reveals the full
 fetched result. Durable notifications use the same collapsed rendering and
 expansion binding.
@@ -157,6 +173,11 @@ to the full records.
 
 Child sessions use Pi's SDK in-process and own the task's retained
 `session.jsonl`. Selection follows call, Definition, then parent precedence.
+An alias selected by the call supplies its thinking preset ahead of Definition
+thinking; explicit call thinking always wins. A Definition's own thinking
+overrides its alias preset. Explicit model IDs do not inherit alias thinking.
+Only concrete model identities and Pi-clamped thinking persist, so alias edits
+never retarget existing sessions or their Follow-ups.
 Explicit Definition tools are hard allowlists; omitted tools preserve normal
 built-ins and extensions. Delegation is removed unless both `allowAgents` and
 remaining depth permit it. A hidden first extension composes the Definition
@@ -221,7 +242,9 @@ and discard. Active counts appear in
 the footer and up to five active rows appear below the editor. Down on an empty
 editor focuses that same panel, exposing all direct tasks and diagnostics in a
 five-row scrolling list. `/lovely-agents` → Tasks hands off to the panel rather
-than opening another selector. Selection follows task identity across updates.
+than opening another selector. Task rows use the full available width for labels,
+model/status, and prompt previews, avoiding SelectList's fixed primary column.
+Selection follows task identity across updates.
 Enter opens actions; Esc or Up past the first row returns to the editor, and
 other input passes through unchanged. Action/output views hide the panel until
 they close. The editor wrapper preserves and restores the prior factory.

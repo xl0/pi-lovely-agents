@@ -9,6 +9,20 @@ const models = [model("anthropic", "sonnet"), model("openai", "gpt"), model("oth
 const tools = ["read", "bash", "agent_roster"]
 
 describe("Agent Definition discovery", () => {
+	test("accepts model aliases without resolving them to mutable model IDs", async () => {
+		await withTempWorkspace(async workspace => {
+			for (const alias of ["fast", "smart", "workhorse"]) {
+				await workspace.write(
+					`agent/agents/${alias}.md`,
+					`---\nname: ${alias}\ndescription: Alias test\nmodel: ${alias}\n---\nInspect work.`
+				)
+			}
+			const result = discover(workspace)
+			expect(result.diagnostics).toEqual([])
+			expect(result.definitions.map(definition => definition.model)).toEqual(["fast", "smart", "workhorse"])
+		})
+	})
+
 	test("parses every supported field and both tool forms", async () => {
 		await withTempWorkspace(async workspace => {
 			await workspace.write(

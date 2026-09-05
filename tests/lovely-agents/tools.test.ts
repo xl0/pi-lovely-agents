@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { ExtensionAPI, ExtensionContext, ScopedModel } from "@earendil-works/pi-coding-agent"
-import type { AgentsConfig } from "../../extensions/lovely-agents/config.js"
+import { type AgentsConfig, defaultAgentsConfig } from "../../extensions/lovely-agents/config.js"
 import { buildRosterToolResult, registerRosterTool } from "../../extensions/lovely-agents/tools.js"
 import { definitionSource, withTempWorkspace } from "./test-helpers.js"
 
@@ -21,6 +21,7 @@ describe("agent_roster tool", () => {
 	test("rescans definitions on every call", async () => {
 		await withTempWorkspace(async workspace => {
 			await workspace.write("agent/agents/alpha.md", definitionSource("alpha"))
+			let currentConfig = config
 			let captured: CapturedTool | undefined
 			const api = {
 				registerTool(tool: unknown) {
@@ -31,7 +32,7 @@ describe("agent_roster tool", () => {
 				}
 			} as unknown as ExtensionAPI
 			registerRosterTool(api, {
-				getConfig: () => config,
+				getConfig: () => currentConfig,
 				getConfigWarnings: () => [],
 				getDepth: () => 1,
 				getAgentDir: () => workspace.agentDir
@@ -64,11 +65,27 @@ describe("agent_roster tool", () => {
 models:
   - anthropic/sonnet
 depth: 1/2`)
+			currentConfig = { ...config, fastModel: "anthropic/sonnet", fastThinking: "low" }
+			const aliased = await captured.execute("alias", {}, undefined, undefined, ctx)
+			expect(aliased.details.aliases).toEqual([
+				{
+					name: "fast",
+					model: "anthropic/sonnet",
+					thinking: "low",
+					description: "Cheap, low-latency model for straightforward tasks."
+				}
+			])
+			expect(aliased.details.models).toEqual([{ id: "anthropic/sonnet" }])
+			expect(aliased.content[0]?.text).toContain("name: fast\n    model: anthropic/sonnet:low")
+			expect(aliased.content[0]?.text).toContain("Cheap, low-latency")
+			currentConfig = { ...currentConfig, fastThinking: "high" }
+			expect((await captured.execute("changed", {}, undefined, undefined, ctx)).details.aliases[0]?.thinking).toBe("high")
 		})
 	})
 })
 
 const config: AgentsConfig = {
+	...defaultAgentsConfig,
 	models: [],
 	maxConcurrency: 4,
 	maxDepth: 2,

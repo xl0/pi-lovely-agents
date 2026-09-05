@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto"
 import { rm } from "node:fs/promises"
 import type { AgentSessionEvent, ExtensionAPI, ExtensionContext, ScopedModel } from "@earendil-works/pi-coding-agent"
-import { Text } from "@earendil-works/pi-tui"
+import { Container, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui"
 import { Type } from "typebox"
 import {
 	type ChildSessionHandle,
@@ -116,21 +116,43 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 				label: Type.String({ minLength: 1, description: "Short task label" }),
 				prompt: Type.String({ minLength: 1, description: "Initial task prompt" }),
 				waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 600_000 })),
-				model: Type.Optional(Type.String({ minLength: 1, description: "Configured provider/model choice" })),
+				model: Type.Optional(Type.String({ minLength: 1, description: "Configured provider/model ID or fast, smart, workhorse alias" })),
 				thinking: Type.Optional(ThinkingLevel),
 				allowAgents: Type.Optional(Type.Boolean({ description: "Allow this child to create descendants" }))
 			},
 			{ additionalProperties: false }
 		),
-		renderCall(args, theme) {
-			return new Text(
-				`${theme.fg("toolTitle", theme.bold("agent"))}${args.definition ? ` ${theme.fg("muted", args.definition)}` : ""}${args.label ? ` ${theme.fg("dim", JSON.stringify(args.label))}` : ""}`,
-				0,
-				0
-			)
+		renderCall(args, theme, context) {
+			return {
+				render(width) {
+					// The result supplies the ID after renderCall; read shared state at paint time.
+					const header = `${theme.fg("toolTitle", theme.bold("agent"))}${args.definition ? ` ${theme.fg("muted", args.definition)}` : ""}${args.label ? ` ${theme.fg("dim", `label=${JSON.stringify(args.label)}`)}` : ""}`
+					const suffix = context.state.taskRef ? `${theme.fg("muted", " -> ")}${theme.fg("accent", context.state.taskRef)}` : ""
+					if (context.expanded) {
+						const lines = new Text(header + suffix, 0, 0).render(width)
+						if (args.prompt) lines.push(...new Text(`${theme.fg("muted", "Input: ")}${args.prompt}`, 0, 0).render(width))
+						return lines
+					}
+					const available = Math.max(0, width - visibleWidth(suffix))
+					const promptWidth = available - visibleWidth(header) - visibleWidth(' prompt=""')
+					const preview =
+						args.prompt && promptWidth > 0
+							? `${header}${theme.fg("muted", ' prompt="')}${truncateToWidth(JSON.stringify(args.prompt.replace(/\s+/g, " ").trim()).slice(1, -1), promptWidth)}${theme.fg("muted", '"')}`
+							: truncateToWidth(header, available)
+					return [truncateToWidth(preview + suffix, width)]
+				},
+				invalidate() {}
+			}
 		},
-		renderResult(result, { expanded }, theme) {
-			return renderExpandableResult(result, expanded, theme)
+		renderResult(result, { expanded }, theme, context) {
+			const details = result.details as Partial<AgentCreationResult> | undefined
+			if (typeof details?.id === "string") context.state.taskRef = details.id
+			const output = new Container()
+			if (expanded || context.isError) {
+				output.addChild(new Text(theme.fg("muted", "── Result ──"), 0, 0))
+				output.addChild(renderExpandableResult(result, true, theme))
+			}
+			return output
 		},
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (signal?.aborted) throw abortError(signal)
@@ -160,6 +182,7 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 				...(params.thinking ? { callThinking: params.thinking } : {}),
 				definition,
 				configuredModels: configuredModels.models,
+				aliases: configuredModels.aliases,
 				availableModels: ctx.modelRegistry.getAvailable(),
 				parentModel: ctx.model,
 				parentThinking: ctx.thinkingLevel ?? "medium"

@@ -60,7 +60,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 				toolNames: pi.getAllTools().map(tool => tool.name),
 				models: ctx.modelRegistry.getAll()
 			}),
-		loadTasks: async () => (await loadTaskList(ctx.cwd, ctx.sessionManager.getSessionId())).details,
+		loadTasks: async () => (await loadTaskList(ctx.cwd, ctx.sessionManager.getSessionId(), { includeInputPreviews: true })).details,
 		focusTasks: async () => {
 			await taskPanel?.refresh()
 			taskPanel?.focus()

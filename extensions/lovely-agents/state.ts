@@ -103,6 +103,8 @@ export const TaskMetadataSchema = Type.Object(
 		childSessionId: Type.String({ pattern: SESSION_ID_PATTERN.source }),
 		definitionName: Type.String({ pattern: DEFINITION_NAME_PATTERN }),
 		label: Type.String({ minLength: 1 }),
+		// Bounded current/last run input for human task panels; survives settlement.
+		inputPreview: Type.Optional(Type.String({ maxLength: 512 })),
 		model: Type.Object(
 			{
 				provider: Type.String({ minLength: 1 }),
@@ -644,7 +646,8 @@ export async function readTaskMetadata(paths: TaskStoragePaths): Promise<Metadat
 export function writeTaskMetadata(paths: TaskStoragePaths, metadata: TaskMetadata): Promise<void> {
 	return serializeMetadataMutation(paths.metadata, async () => {
 		assertMetadataForPath(paths, metadata)
-		await atomicWriteMetadata(paths.metadata, metadata)
+		const snapshot = metadata.activeRun ? { ...metadata, inputPreview: historyPreview(metadata.activeRun.input, 512) } : metadata
+		await atomicWriteMetadata(paths.metadata, snapshot)
 		publishTaskUpdate(paths.workspace, paths.parentSessionId)
 	})
 }
@@ -661,6 +664,7 @@ export function mutateTaskMetadata(
 		if (updated.activeRun && updated.activeRun.id !== loaded.metadata.activeRun?.id) {
 			updated.latestReply = null
 			updated.lastActivity = { at: updated.updatedAt, action: updated.state }
+			updated.inputPreview = historyPreview(updated.activeRun.input, 512)
 			delete updated.effectiveSystemPrompt
 		}
 		if (updated.state !== "running" && updated.latestReply) updated.latestReply.streaming = false

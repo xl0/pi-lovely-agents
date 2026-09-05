@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Add configurable `fast`, `smart`, and `workhorse` model/thinking aliases,
+  roster descriptions, and alias selection in calls and Definitions. Alias
+  targets join available model choices automatically; existing agents stay fixed.
+- Render agent calls on one line with label, width-aware prompt preview, and
+  `-> task ID`, preserving the ID when truncating.
+  Ctrl+O expands full input and the otherwise-hidden result; errors stay visible.
+- Use full-width task picker rows and retain bounded prompt previews for new
+  runs, exposed only in human task views.
 - Add `/continue` to resume the current Pi session after errors or aborts.
 - Add scoped configuration, strict Agent Definition discovery, and the
   `agent_roster` tool.

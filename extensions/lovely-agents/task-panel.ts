@@ -33,13 +33,18 @@ export function createTaskPanel(
 			(_tui, theme) => ({
 				render(width) {
 					if (!focused) return renderActiveTaskRows(active).map(line => truncateToWidth(line, width))
-					const list = new SelectList(items, 5, {
-						selectedPrefix: text => theme.fg("accent", text),
-						selectedText: text => theme.fg("accent", text),
-						description: text => theme.fg("muted", text),
-						scrollInfo: text => theme.fg("dim", text),
-						noMatch: text => theme.fg("warning", text)
-					})
+					const list = new SelectList(
+						items,
+						5,
+						{
+							selectedPrefix: text => theme.fg("accent", text),
+							selectedText: text => theme.fg("accent", text),
+							description: text => theme.fg("muted", text),
+							scrollInfo: text => theme.fg("dim", text),
+							noMatch: text => theme.fg("warning", text)
+						},
+						{ truncatePrimary: ({ text, maxWidth }) => truncateToWidth(text, maxWidth) }
+					)
 					list.setSelectedIndex(items.findIndex(item => item.value === selected))
 					const activity = tasks.find(task => `task:${task.id}` === selected)?.lastActivity
 					return [
@@ -69,8 +74,12 @@ export function createTaskPanel(
 				items = [
 					...tasks.map(task => ({
 						value: `task:${task.id}`,
-						label: `${task.id} ${task.state}${task.latestOutcome ? `/${task.latestOutcome}` : ""} ${task.label}`.replace(/[\r\n]+/g, " "),
-						description: `${task.queueReason ? `waiting: ${task.queueReason} · ` : ""}${task.model}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}`
+						// One full-width row, not SelectList's fixed-width label/description columns.
+						label: (
+							`${task.id} ${task.state}${task.latestOutcome ? `/${task.latestOutcome}` : ""} ${task.label} · ` +
+							`${task.queueReason ? `waiting: ${task.queueReason} · ` : ""}${task.model}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}` +
+							(task.inputPreview ? ` · ${JSON.stringify(task.inputPreview)}` : "")
+						).replace(/[\r\n]+/g, " ")
 					})),
 					...result.diagnostics.map(diagnostic => ({
 						value: `diagnostic:${diagnostic.path}`,
@@ -159,7 +168,7 @@ export function renderActiveTaskRows(
 		label: string
 		state: string
 		queuedFollowUps: number
-	} & Partial<Pick<TaskListRow, "queueReason" | "lastActivity">>)[]
+	} & Partial<Pick<TaskListRow, "queueReason" | "lastActivity" | "inputPreview">>)[]
 ): string[] {
 	const rows = tasks
 		.slice(0, 5)
@@ -170,7 +179,8 @@ export function renderActiveTaskRows(
 					? ` · waiting: ${task.queueReason}`
 					: task.lastActivity
 						? ` · ${task.lastActivity.action} (${relativeTime(task.lastActivity.at, Date.now())})`
-						: "")
+						: "") +
+				(task.inputPreview ? ` · ${JSON.stringify(task.inputPreview)}` : "")
 		)
 	if (tasks.length > rows.length) rows.push(`  … ${tasks.length - rows.length} more active`)
 	return rows

@@ -230,6 +230,52 @@ describe("task metadata", () => {
 		})
 	})
 
+	test("retains a bounded input preview through settlement and replaces it on run promotion", async () => {
+		await withTaskStorage(async paths => {
+			await writeTaskMetadata(paths, {
+				...metadata(paths),
+				state: "queued",
+				lastRunSequence: 1,
+				activeRun: {
+					id: "r_0000000000000001",
+					sequence: 1,
+					kind: "initial",
+					state: "queued",
+					input: `Inspect\n\n  the prompt ${"界🙂 ".repeat(150)}`,
+					acceptedAt: 1
+				}
+			})
+			const loaded = await readTaskMetadata(paths)
+			if (loaded.status !== "ok") throw new Error("Missing task")
+			expect(loaded.metadata.inputPreview).toStartWith("Inspect the prompt ")
+			expect(loaded.metadata.inputPreview).toEndWith("...")
+			expect(loaded.metadata.inputPreview).not.toContain("�")
+			expect(Buffer.byteLength(loaded.metadata.inputPreview ?? "")).toBeLessThanOrEqual(512)
+			const settled = await mutateTaskMetadata(paths, current => ({
+				...current,
+				state: "idle",
+				activeRun: null,
+				latestOutcome: "succeeded"
+			}))
+			expect(settled.inputPreview).toBe(loaded.metadata.inputPreview)
+			const promoted = await mutateTaskMetadata(paths, current => ({
+				...current,
+				state: "queued",
+				lastRunSequence: 2,
+				activeRun: {
+					id: "r_0000000000000002",
+					sequence: 2,
+					kind: "followup",
+					state: "queued",
+					input: "Now\ninspect the tests.",
+					acceptedAt: 2
+				},
+				updatedAt: 2
+			}))
+			expect(promoted.inputPreview).toBe("Now inspect the tests.")
+		})
+	})
+
 	test("rejects invalid writes without replacing valid metadata", async () => {
 		await withTaskStorage(async paths => {
 			await writeTaskMetadata(paths, metadata(paths))

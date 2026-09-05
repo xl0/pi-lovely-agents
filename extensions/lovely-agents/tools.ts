@@ -4,8 +4,8 @@ import { dirname } from "node:path"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Text } from "@earendil-works/pi-tui"
 import { Type } from "typebox"
-import type { AgentsConfig, AgentsConfigWarning, ModelChoice } from "./config.js"
-import { resolveConfiguredModels } from "./config.js"
+import type { AgentsConfig, AgentsConfigWarning, ModelAliasChoice, ModelChoice } from "./config.js"
+import { MODEL_ALIASES, resolveConfiguredModels } from "./config.js"
 import { getAgentCoordinator } from "./coordinator.js"
 import { type AgentDefinition, discoverAgentDefinitions } from "./definitions.js"
 import { renderExpandableResult } from "./rendering.js"
@@ -64,6 +64,7 @@ export type AgentRosterResult = {
 	definitions: RosterDefinition[]
 	diagnostics: RosterDiagnostic[]
 	models: RosterModel[]
+	aliases: Array<{ name: ModelAliasChoice["name"]; model: string; thinking: ModelAliasChoice["thinkingLevel"]; description: string }>
 	depth: { current: number; maximum: number }
 }
 
@@ -78,6 +79,8 @@ export type TaskListRow = {
 	id: string
 	kind: "agent"
 	label: string
+	/** Human-only bounded run input; omitted from ordinary tool loads. */
+	inputPreview?: string
 	definition: string
 	state: TaskMetadata["state"]
 	latestOutcome: TaskMetadata["latestOutcome"]
@@ -126,9 +129,13 @@ export function registerRosterTool(
 	pi.registerTool({
 		name: "agent_roster",
 		label: "Agent Roster",
-		description: "List available Lovely Agent definitions, configured model choices, validation diagnostics, and delegation depth.",
-		promptSnippet: "List available Lovely Agent definitions and model choices",
-		promptGuidelines: ["Call agent_roster before delegating work and after editing Agent Definition files."],
+		description:
+			"List available Lovely Agent definitions, configured models and model/thinking aliases, diagnostics, and delegation depth.",
+		promptSnippet: "List available Lovely Agent definitions, model choices, and aliases",
+		promptGuidelines: [
+			"Call agent_roster before delegating work and after editing Agent Definition files.",
+			"Choose any model ID or alias listed by agent_roster. Alias descriptions are guidance, not routing rules; explicit thinking overrides the preset."
+		],
 		parameters: Type.Object({}),
 		renderCall(_args, theme) {
 			return new Text(theme.fg("toolTitle", theme.bold("agent_roster")), 0, 0)
@@ -164,6 +171,7 @@ export function registerRosterTool(
 					}))
 				],
 				models: resolvedModels.models,
+				aliases: resolvedModels.aliases,
 				currentDepth: options.getDepth?.() ?? 0,
 				maximumDepth: config.maxDepth
 			})
@@ -175,6 +183,7 @@ export function buildRosterToolResult(options: {
 	definitions: readonly AgentDefinition[]
 	diagnostics: readonly RosterDiagnostic[]
 	models: readonly ModelChoice[]
+	aliases?: readonly ModelAliasChoice[]
 	currentDepth: number
 	maximumDepth: number
 }): {
@@ -195,6 +204,12 @@ export function buildRosterToolResult(options: {
 		diagnostics: [...options.diagnostics],
 		models: options.models.map(choice => ({
 			id: `${choice.model.provider}/${choice.model.id}`
+		})),
+		aliases: (options.aliases ?? []).map(alias => ({
+			name: alias.name,
+			model: `${alias.model.provider}/${alias.model.id}`,
+			thinking: alias.thinkingLevel,
+			description: MODEL_ALIASES[alias.name]
 		})),
 		depth: { current: options.currentDepth, maximum: options.maximumDepth }
 	}
@@ -227,6 +242,14 @@ export function buildRosterToolResult(options: {
 		}
 	}
 
+	if (result.aliases.length > 0) {
+		lines.push("aliases:")
+		for (const alias of result.aliases) {
+			lines.push(`  - name: ${alias.name}`)
+			lines.push(`    model: ${yamlScalar(`${alias.model}:${alias.thinking}`)}`)
+			lines.push(`    description: ${yamlScalar(alias.description)}`)
+		}
+	}
 	lines.push(result.models.length === 0 ? "models: []" : "models:")
 	for (const model of result.models) {
 		lines.push(`  - ${yamlScalar(model.id)}`)
@@ -318,9 +341,13 @@ export function registerTaskTools(
 	})
 }
 
-export async function loadTaskList(cwd: string, parentSessionId: string): Promise<ReturnType<typeof buildTaskListToolResult>> {
+export async function loadTaskList(
+	cwd: string,
+	parentSessionId: string,
+	options: { includeInputPreviews?: boolean } = {}
+): Promise<ReturnType<typeof buildTaskListToolResult>> {
 	await acquireParentLease(cwd, parentSessionId)
-	return buildTaskListToolResult(await scanDirectTasks(cwd, parentSessionId))
+	return buildTaskListToolResult(await scanDirectTasks(cwd, parentSessionId, options.includeInputPreviews ?? false))
 }
 
 export function buildTaskListToolResult(options: { rows: readonly TaskListRow[]; diagnostics: readonly TaskDiagnostic[] }): {
@@ -357,7 +384,11 @@ export function buildTaskOutputToolResult(
 	return { content: [{ type: "text", text: lines.join("\n") }], details: result }
 }
 
-async function scanDirectTasks(cwd: string, parentSessionId: string): Promise<{ rows: TaskListRow[]; diagnostics: TaskDiagnostic[] }> {
+async function scanDirectTasks(
+	cwd: string,
+	parentSessionId: string,
+	includeInputPreviews: boolean
+): Promise<{ rows: TaskListRow[]; diagnostics: TaskDiagnostic[] }> {
 	const parent = parentStoragePaths(cwd, parentSessionId)
 	const entries = await readTaskDirectory(parent.parentDirectory)
 	const rows: TaskListRow[] = []
@@ -401,12 +432,18 @@ async function scanDirectTasks(cwd: string, parentSessionId: string): Promise<{ 
 				id: entry.name
 			})
 		}
-		rows.push(await taskListRow(cwd, paths, loaded.metadata, outputLines))
+		rows.push(await taskListRow(cwd, paths, loaded.metadata, outputLines, includeInputPreviews))
 	}
 	return { rows, diagnostics }
 }
 
-async function taskListRow(cwd: string, paths: TaskStoragePaths, metadata: TaskMetadata, outputLines: number | null): Promise<TaskListRow> {
+async function taskListRow(
+	cwd: string,
+	paths: TaskStoragePaths,
+	metadata: TaskMetadata,
+	outputLines: number | null,
+	includeInputPreviews: boolean
+): Promise<TaskListRow> {
 	const descendants = emptyDescendantAccumulator()
 	await collectDescendants(cwd, metadata.childSessionId, new Set([metadata.parentSessionId]), descendants)
 	const activeRun = metadata.activeRun
@@ -414,6 +451,7 @@ async function taskListRow(cwd: string, paths: TaskStoragePaths, metadata: TaskM
 		id: metadata.taskRef,
 		kind: "agent",
 		label: metadata.label,
+		...(includeInputPreviews && metadata.inputPreview ? { inputPreview: metadata.inputPreview } : {}),
 		definition: metadata.definitionName,
 		state: metadata.state,
 		latestOutcome: metadata.latestOutcome,

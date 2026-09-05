@@ -12,6 +12,31 @@ management UI are available.
 - `/lovely-agents` — inspect Definitions/tasks, create test fixtures, and edit
   user/workspace settings
 
+## Model aliases
+
+In **Configuration**, pick a model and thinking level for any of these presets:
+
+| Alias | Intended use | Default thinking |
+| --- | --- | --- |
+| `fast` | Cheap, low-latency work | `low` |
+| `smart` | Difficult reasoning and complex work | `high` |
+| `workhorse` | Routine coding and research | `medium` |
+
+Aliases start disabled. Their targets become available automatically; no need
+to also select them under **Models**. The roster describes enabled aliases, but
+the parent chooses freely—there is no automatic routing.
+
+Use `model: "fast"` (or another alias) in an `agent` call or Definition.
+An explicit `thinking` argument overrides the preset. An alias selected in the
+call overrides the Definition's thinking; a Definition's own `thinking` overrides
+its alias preset. Pi clamps unsupported levels. Explicit model IDs do not
+inherit preset thinking, and omitted `model` keeps Definition/parent inheritance.
+
+Config keys are `fastModel` / `fastThinking`, `smartModel` / `smartThinking`,
+and `workhorseModel` / `workhorseThinking`. Set a model field to `disabled` to
+hide that alias. Existing agents keep their resolved model and thinking after
+alias edits; unavailable aliases fail explicitly rather than choosing a substitute.
+
 ## Tools
 
 - `agent_roster` — list effective Agent Definitions, model choices, diagnostics,
@@ -22,6 +47,13 @@ management UI are available.
   no inputs, older replies, or pagination
 - `task_input` — queue a Follow-up or Steer a running agent
 - `task_stop` / `task_discard` — stop work or permanently archive the owned subtree
+
+Agent tool calls fit the Definition, `label=`, quoted `prompt=` preview, and
+`-> task ID` on one line. Ctrl+O expands the full prompt and result.
+Tool errors stay visible without expansion.
+
+The below-editor task list uses full-width rows with prompt previews captured
+for new runs. Previews remain after completion; older completed runs are not backfilled.
 
 Task inspection reports last observed activity and shared held/max execution
 permits. Queued work shows `capacity`, `provider-limit`, or transitional

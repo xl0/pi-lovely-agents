@@ -12,6 +12,7 @@ import {
 	SettingsManager,
 	type Skill
 } from "@earendil-works/pi-coding-agent"
+import { MODEL_ALIASES, type ModelAliasChoice } from "./config.js"
 import { getAgentCoordinator } from "./coordinator.js"
 import type { AgentDefinition, AgentThinkingLevel } from "./definitions.js"
 import type { TaskStoragePaths } from "./state.js"
@@ -62,12 +63,20 @@ export function resolveChildSessionSelection(options: {
 	callThinking?: AgentThinkingLevel
 	definition: AgentDefinition
 	configuredModels: readonly ScopedModel[]
+	aliases?: readonly ModelAliasChoice[]
 	availableModels: readonly ScopedModel["model"][]
 	parentModel: ScopedModel["model"] | undefined
 	parentThinking: AgentThinkingLevel
 }): ChildSessionSelection {
 	let model: ScopedModel["model"] | undefined
-	if (options.callModel) {
+	const reference = options.callModel ?? options.definition.model
+	const alias = options.aliases?.find(alias => alias.name === reference)
+	if (reference && Object.hasOwn(MODEL_ALIASES, reference) && !alias) {
+		throw new Error(`Model alias "${reference}" is not configured or its model is unavailable`)
+	}
+	if (alias) {
+		model = alias.model
+	} else if (options.callModel) {
 		model = options.configuredModels.find(choice => modelId(choice.model) === options.callModel)?.model
 		if (!model) throw new Error(`Model "${options.callModel}" is not an available configured choice`)
 	} else if (options.definition.model) {
@@ -79,7 +88,12 @@ export function resolveChildSessionSelection(options: {
 	}
 	return {
 		model,
-		thinking: options.callThinking ?? options.definition.thinking ?? options.parentThinking
+		thinking:
+			options.callThinking ??
+			(options.callModel ? alias?.thinkingLevel : undefined) ??
+			options.definition.thinking ??
+			alias?.thinkingLevel ??
+			options.parentThinking
 	}
 }
 

@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionContext, SessionShutdownEvent } from "@eare
 import {
 	ensureParentStorage,
 	initializeRetainedLogs,
+	mutateTaskMetadata,
 	reserveTaskStorage,
 	TASK_METADATA_VERSION,
 	type TaskMetadata,
@@ -12,6 +13,7 @@ import {
 } from "../../extensions/lovely-agents/state.js"
 import {
 	buildTaskListToolResult,
+	loadTaskList,
 	registerTaskTools,
 	type TaskListResult,
 	type TaskListRow,
@@ -20,6 +22,27 @@ import {
 import { withTempWorkspace } from "./test-helpers.js"
 
 describe("read-only task tools", () => {
+	test("input previews are loaded only for human task views, including settled runs", async () => {
+		await withTempWorkspace(async workspace => {
+			const paths = await createTask(workspace.cwd, "parent-session", {
+				id: "a_00000001",
+				childSessionId: "child-one",
+				label: "Preview",
+				state: "queued",
+				updatedAt: 10
+			})
+			await mutateTaskMetadata(paths, current => ({ ...current, state: "idle", activeRun: null, latestOutcome: "succeeded" }))
+			const ui = await loadTaskList(workspace.cwd, "parent-session", { includeInputPreviews: true })
+			expect(ui.details.tasks[0]?.inputPreview).toBe("Inspect")
+			const { tools } = captureTaskTools()
+			const tool = tools.get("task_list")
+			if (!tool) throw new Error("Missing task_list")
+			const result = await tool.execute("call", {}, undefined, taskContext(workspace.cwd))
+			expect(JSON.stringify(result)).not.toContain("inputPreview")
+			expect(JSON.stringify(result)).not.toContain("Inspect")
+		})
+	})
+
 	test("lists every direct task in stable order with diagnostics and descendant summaries", async () => {
 		await withTempWorkspace(async workspace => {
 			await createTask(workspace.cwd, "parent-session", {

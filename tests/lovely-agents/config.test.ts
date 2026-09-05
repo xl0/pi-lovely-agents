@@ -3,8 +3,10 @@ import { join } from "node:path"
 import type { ExtensionContext, ScopedModel } from "@earendil-works/pi-coding-agent"
 import {
 	createAgentsConfigSpec,
+	defaultAgentsConfig,
 	loadAgentsConfig,
 	resolveAgentsConfig,
+	resolveConfiguredModels,
 	resolveModelChoices
 } from "../../extensions/lovely-agents/config.js"
 import { withTempWorkspace } from "./test-helpers.js"
@@ -37,6 +39,7 @@ describe("Lovely Agents config", () => {
 
 			const loaded = loadAgentsConfig(workspace.cwd, configContext)
 			expect(loaded.value).toEqual({
+				...defaultAgentsConfig,
 				models: ["openai/gpt"],
 				maxConcurrency: 3,
 				maxDepth: 4,
@@ -79,9 +82,73 @@ describe("Lovely Agents config", () => {
 		const sonnet: string = "anthropic/sonnet"
 		expect(field.valueDescriptions?.[sonnet]).toBe("sonnet")
 	})
+
+	test("alias pickers expose authenticated models and scoped thinking presets", async () => {
+		await withTempWorkspace(async workspace => {
+			environment.PI_CODING_AGENT_DIR = workspace.agentDir
+			let config = createAgentsConfigSpec(configContext).load(workspace.cwd)
+			for (const name of ["fast", "smart", "workhorse"]) {
+				expect(config.fields.find(field => field.key === `${name}Model`)).toMatchObject({
+					kind: "enum",
+					values: ["disabled", "anthropic/sonnet", "openai/gpt"],
+					default: "disabled",
+					search: true
+				})
+				expect(config.fields.find(field => field.key === `${name}Thinking`)).toMatchObject({ kind: "enum", depth: 1 })
+			}
+			config = config.update("user", "fastModel", "openai/gpt")
+			config = config.update("user", "fastThinking", "low")
+			config = config.update("workspace", "fastThinking", "high")
+			expect(resolveAgentsConfig(config).value).toMatchObject({ fastModel: "openai/gpt", fastThinking: "high", models: [] })
+			config = config.update("workspace", "fastModel", "disabled")
+			expect(resolveAgentsConfig(config).value.fastModel).toBe("disabled")
+		})
+	})
 })
 
 describe("model choice", () => {
+	test("alias targets join model choices without duplicating IDs or imposing their thinking on explicit IDs", () => {
+		const result = resolveConfiguredModels(
+			{
+				...defaultAgentsConfig,
+				fastModel: "openai/gpt",
+				smartModel: "openai/gpt",
+				workhorseModel: "anthropic/sonnet"
+			},
+			configContext as ExtensionContext
+		)
+		expect(result.models).toEqual([{ model: models[0] }, { model: models[1] }])
+		expect(result.aliases).toEqual([
+			{ name: "fast", model: models[1], thinkingLevel: "low" },
+			{ name: "smart", model: models[1], thinkingLevel: "high" },
+			{ name: "workhorse", model: models[0], thinkingLevel: "medium" }
+		])
+		expect(result.diagnostics).toEqual([])
+		const explicit = resolveConfiguredModels(
+			{
+				...defaultAgentsConfig,
+				models: ["openai/gpt"],
+				fastModel: "openai/gpt"
+			},
+			configContext as ExtensionContext
+		)
+		expect(explicit.models).toEqual([{ model: models[1] }])
+	})
+
+	test("disabled aliases disappear and unavailable targets are diagnosed, never rerouted", () => {
+		expect(resolveConfiguredModels(defaultAgentsConfig, configContext as ExtensionContext).aliases).toEqual([])
+		const result = resolveConfiguredModels(
+			{
+				...defaultAgentsConfig,
+				fastModel: "missing/model"
+			},
+			configContext as ExtensionContext
+		)
+		expect(result.aliases).toEqual([])
+		expect(result.diagnostics[0]?.message).toContain('Model alias "fast" targets unavailable model')
+		expect(result.models).toEqual([{ model: models[0] }])
+	})
+
 	test("resolves the parent fallback or selected models", () => {
 		expect(resolveModelChoices({ selections: [], availableModels: models, parentModel: models[0] }).models).toEqual([{ model: models[0] }])
 		expect(

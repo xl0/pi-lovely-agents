@@ -2,18 +2,53 @@ import type { ExtensionContext, ScopedModel } from "@earendil-works/pi-coding-ag
 import { type ConfigFromSchema, defineScopedConfig, field, type ScopedConfig } from "@xl0/pi-lovely-config"
 
 const NO_MODELS = "(no authenticated models)"
+const DISABLED_MODEL = "disabled"
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const
+export const MODEL_ALIASES = {
+	fast: "Cheap, low-latency model for straightforward tasks.",
+	smart: "Most capable model for difficult reasoning and complex work.",
+	workhorse: "Balanced cost and capability for routine coding and research."
+} as const
+export type ModelAliasName = keyof typeof MODEL_ALIASES
+/** A user-selected preset, resolved to an authenticated model before creation. */
+export type ModelAliasChoice = {
+	name: ModelAliasName
+	model: ScopedModel["model"]
+	thinkingLevel: NonNullable<ScopedModel["thinkingLevel"]>
+}
 type ModelConfigContext = Pick<ExtensionContext, "model" | "modelRegistry">
 
 function createConfigSchema(ctx?: ModelConfigContext) {
 	const availableModels = ctx?.modelRegistry.getAvailable() ?? []
 	const modelIds = [...new Set(availableModels.map(model => `${model.provider}/${model.id}`))]
 	const modelValues = (modelIds.length > 0 ? modelIds : [NO_MODELS]) as [string, ...string[]]
+	const valueDescriptions = Object.fromEntries(availableModels.map(model => [`${model.provider}/${model.id}`, model.name || model.id]))
+	const aliasModel = (name: ModelAliasName) =>
+		field.enum([DISABLED_MODEL, ...modelIds] as [string, ...string[]], DISABLED_MODEL, {
+			label: `${name} model`,
+			description: MODEL_ALIASES[name],
+			search: true,
+			valueDescriptions: { [DISABLED_MODEL]: "Do not expose this alias", ...valueDescriptions }
+		})
+	const aliasThinking = (name: ModelAliasName, level: ModelAliasChoice["thinkingLevel"]) =>
+		field.enum(THINKING_LEVELS, level, {
+			label: `${name} thinking`,
+			description: "Preset effort; an explicit thinking argument overrides it.",
+			depth: 1,
+			visibleWhen: ctx => ctx.get(`${name}Model`) !== DISABLED_MODEL
+		})
 	return {
 		models: field.multiEnum(modelValues, [], {
 			label: "Models",
-			description: "Models available for explicit agent selection. Empty allows only the current parent model.",
-			valueDescriptions: Object.fromEntries(availableModels.map(model => [`${model.provider}/${model.id}`, model.name || model.id]))
+			description: "Additional model IDs available for agent selection. Empty includes the parent. Alias targets are always included.",
+			valueDescriptions
 		}),
+		fastModel: aliasModel("fast"),
+		fastThinking: aliasThinking("fast", "low"),
+		smartModel: aliasModel("smart"),
+		smartThinking: aliasThinking("smart", "high"),
+		workhorseModel: aliasModel("workhorse"),
+		workhorseThinking: aliasThinking("workhorse", "medium"),
 		maxConcurrency: field.number(4, {
 			label: "Max concurrency",
 			description: "Maximum agent runs executing in this process.",
@@ -141,9 +176,30 @@ export function resolveModelChoices(options: {
 }
 
 export function resolveConfiguredModels(config: AgentsConfig, ctx: ExtensionContext) {
-	return resolveModelChoices({
+	const availableModels = ctx.modelRegistry.getAvailable()
+	const resolved = resolveModelChoices({
 		selections: config.models,
-		availableModels: ctx.modelRegistry.getAvailable(),
+		availableModels,
 		parentModel: ctx.model
 	})
+	const aliases: ModelAliasChoice[] = []
+	for (const name of Object.keys(MODEL_ALIASES) as ModelAliasName[]) {
+		const target = config[`${name}Model`]
+		if (target === DISABLED_MODEL) continue
+		const model = availableModels.find(model => `${model.provider}/${model.id}` === target)
+		if (!model) {
+			resolved.diagnostics.push({
+				type: "warning",
+				code: "no-match",
+				pattern: target,
+				message: `Model alias "${name}" targets unavailable model "${target}"`
+			})
+			continue
+		}
+		aliases.push({ name, model, thinkingLevel: config[`${name}Thinking`] })
+		if (!resolved.models.some(choice => choice.model.provider === model.provider && choice.model.id === model.id)) {
+			resolved.models.push({ model })
+		}
+	}
+	return { ...resolved, aliases }
 }

@@ -10,7 +10,7 @@ import {
 	type TaskInputResult
 } from "../../extensions/lovely-agents/agent.js"
 import type { ChildSessionHandle, CreateChildSessionOptions } from "../../extensions/lovely-agents/child-session.js"
-import type { AgentsConfig } from "../../extensions/lovely-agents/config.js"
+import { type AgentsConfig, defaultAgentsConfig } from "../../extensions/lovely-agents/config.js"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
 import { recoverOwnedTaskTree } from "../../extensions/lovely-agents/lifecycle.js"
 import {
@@ -27,6 +27,7 @@ import { definitionSource, withTempWorkspace } from "./test-helpers.js"
 
 const selectedModel = model("anthropic", "sonnet")
 const config: AgentsConfig = {
+	...defaultAgentsConfig,
 	models: [],
 	maxConcurrency: 2,
 	maxDepth: 2,
@@ -35,6 +36,58 @@ const config: AgentsConfig = {
 }
 
 describe("agent tool", () => {
+	test("resolves aliases before creation and retains the concrete model across later alias edits", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const first = fakeChild(async child => child.assistant("first"))
+			const second = fakeChild(async child => child.assistant("second"))
+			const children = [first.handle, second.handle]
+			const received: CreateChildSessionOptions[] = []
+			const currentConfig = { ...config, fastModel: "anthropic/sonnet" }
+			const tools = captureAgentTools(
+				workspace.agentDir,
+				async options => {
+					received.push(options)
+					const child = children.shift()
+					if (!child) throw new Error("Unexpected child creation")
+					return child
+				},
+				currentConfig
+			)
+			try {
+				const created = await tools.agent.execute(
+					"create",
+					{ definition: "reviewer", label: "Alias", prompt: "initial", model: "fast" },
+					undefined,
+					taskContext(workspace.cwd)
+				)
+				const id = (created.details as AgentCreationResult).id
+				const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
+				expect(received[0]?.selection).toEqual({ model: selectedModel, thinking: "low" })
+				const saved = await readTaskMetadata(paths)
+				if (saved.status !== "ok") throw new Error("Invalid saved task")
+				expect(saved.metadata.model).toEqual({ provider: "anthropic", id: "sonnet" })
+				while (!first.disposed) await Bun.sleep(1)
+				currentConfig.fastModel = "unavailable/model"
+				currentConfig.fastThinking = "max"
+				await tools.input.execute("follow", { id, content: "again" }, undefined, taskContext(workspace.cwd))
+				await waitForRunCount(paths, 2)
+				expect(received[1]?.selection).toEqual({ model: selectedModel, thinking: saved.metadata.thinking })
+				await expect(
+					tools.agent.execute(
+						"unavailable",
+						{ definition: "reviewer", label: "Alias", prompt: "new", model: "fast" },
+						undefined,
+						taskContext(workspace.cwd)
+					)
+				).rejects.toThrow('Model alias "fast" is not configured or its model is unavailable')
+				expect(received).toHaveLength(2)
+			} finally {
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
+			}
+		})
+	})
+
 	test("accepts and returns a synchronously completed initial run", async () => {
 		await withTempWorkspace(async workspace => {
 			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
