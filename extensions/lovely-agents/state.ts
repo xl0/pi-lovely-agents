@@ -6,10 +6,10 @@ import { type Static, Type } from "typebox"
 import { Value } from "typebox/value"
 import { publishTaskUpdate } from "./updates.js"
 
-export const TASK_METADATA_VERSION = 2
+export const TASK_METADATA_VERSION = 3
 export const TASK_REFERENCE_PATTERN = /^a_[0-9a-f]{8}$/
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
-export const STORAGE_GITIGNORE = "*\n!.gitignore\n"
+export const STORAGE_GITIGNORE = "*\n"
 export const MAX_AGENT_INPUT_BYTES = 64 * 1024
 export const MAX_AGENT_LABEL_BYTES = 80
 export const MAX_QUEUED_FOLLOWUPS = 32
@@ -18,7 +18,6 @@ export const MAX_NOTIFICATION_CONTENT_BYTES = 8 * 1024
 export const PARENT_LEASE_VERSION = 1
 export const RETAINED_OUTPUT_MAX_LINES = 2_000
 export const RETAINED_OUTPUT_MAX_BYTES = 50 * 1024
-export const RETAINED_ACTIVITY_PREVIEW_BYTES = 2 * 1024
 export const RETAINED_OUTPUT_MAX_WAIT_MS = 10 * 60 * 1_000
 
 const DIRECTORY_MODE = 0o700
@@ -133,6 +132,10 @@ export const TaskMetadataSchema = Type.Object(
 		),
 		state: TaskState,
 		latestOutcome: Type.Union([RunOutcome, Type.Null()]),
+		latestReply: Type.Union([
+			Type.Object({ text: Type.String(), streaming: Type.Boolean() }, { additionalProperties: false }),
+			Type.Null()
+		]),
 		lastRunSequence: Type.Integer({ minimum: 0 }),
 		activeRun: Type.Union([ActiveRun, Type.Null()]),
 		queuedFollowUps: Type.Array(QueuedFollowUp, { maxItems: MAX_QUEUED_FOLLOWUPS }),
@@ -162,8 +165,7 @@ export type TaskStoragePaths = ParentStoragePaths & {
 	taskDirectory: string
 	metadata: string
 	session: string
-	output: string
-	activity: string
+	history: string
 }
 
 /** Process-global ownership proof for one parent partition. */
@@ -171,46 +173,33 @@ export type ParentLease = Readonly<ParentLeaseFile & { paths: Readonly<ParentSto
 
 /** Stable model-visible paths for retained task artifacts. */
 export type RetainedPaths = {
-	output: string
-	activity: string
+	history: string
 	session: string
 }
 
-/** Structured events rendered into the readable output log. */
-export type OutputLogEntry =
+/** Chronological inputs, replies, compact tool summaries, and run outcomes. */
+export type HistoryEntry =
 	| { type: "run-start"; sequence: number; kind: "initial" | "followup"; timestamp: number }
 	| { type: "input"; delivery: "initial" | "followup" | "steer"; timestamp: number; content: string }
 	| { type: "assistant"; content: string }
 	| { type: "run-end"; sequence: number; outcome: Static<typeof RunOutcome>; timestamp: number; summary?: string }
-
-/** One bounded tool record rendered into the activity index. */
-export type ActivityLogEntry = {
-	tool: string
-	timestamp: number
-	arguments: string
-	result: string
-	isError: boolean
-	fullOutputPath?: string
-}
+	| { type: "tool"; tool: string; arguments: string; result: string; isError: boolean }
 
 export type RetainedOutputReadOptions = {
-	offset?: number
-	limit?: number
 	waitMs?: number
 	signal?: AbortSignal
 }
 
+/** Latest assistant reply only; run status is independent of reply streaming. */
 export type RetainedOutputRead = {
 	text: string
-	startLine: number | null
-	endLine: number | null
 	totalLines: number
-	returnedLines: number
-	nextOffset: number
 	truncated: boolean
-	truncatedBy: "lines" | "bytes" | null
 	timedOut: boolean
 	state: Static<typeof TaskState>
+	latestOutcome: Static<typeof RunOutcome> | null
+	streaming: boolean
+	queuedFollowUps: number
 	paths: RetainedPaths
 }
 
@@ -283,9 +272,57 @@ export function taskStoragePaths(parent: ParentStoragePaths, taskRef: string): T
 		taskDirectory,
 		metadata: join(taskDirectory, "metadata.json"),
 		session: join(taskDirectory, "session.jsonl"),
-		output: join(taskDirectory, "output.md"),
-		activity: join(taskDirectory, "activity.md")
+		history: join(taskDirectory, "history.md")
 	}
+}
+
+export function archivedTaskStoragePaths(paths: TaskStoragePaths): TaskStoragePaths {
+	return taskStoragePaths({ ...paths, parentDirectory: join(paths.root, "archive", paths.parentSessionId) }, paths.taskRef)
+}
+
+/** Only ownership is decoded across versions. Unsupported execution recipes stay unreadable. */
+export async function readTaskIdentity(paths: TaskStoragePaths): Promise<{ childSessionId: string } | undefined> {
+	try {
+		await assertRegularDirectory(dirname(paths.parentDirectory))
+		await assertRegularDirectory(paths.parentDirectory)
+		await assertRegularDirectory(paths.taskDirectory)
+	} catch (error) {
+		if (hasCode(error, "ENOENT")) return undefined
+		throw error
+	}
+	const stats = await lstat(paths.metadata)
+	if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Task metadata is not a regular file: ${paths.metadata}`)
+	const value: unknown = JSON.parse(await readFile(paths.metadata, "utf8"))
+	if (!isRecord(value) || property(value, "taskRef") !== paths.taskRef || property(value, "parentSessionId") !== paths.parentSessionId) {
+		throw new Error("Metadata identity does not match its parent/task path")
+	}
+	const childSessionId = property(value, "childSessionId")
+	if (typeof childSessionId !== "string" || !SESSION_ID_PATTERN.test(childSessionId) || childSessionId === paths.parentSessionId) {
+		throw new Error("Invalid child session identity")
+	}
+	return { childSessionId }
+}
+
+/** Moves stopped work under archive without rewriting its retained metadata. */
+export async function archiveTaskStorage(paths: TaskStoragePaths): Promise<void> {
+	await serializeMetadataMutation(paths.metadata, async () => {
+		const archived = archivedTaskStoragePaths(paths)
+		await assertRegularDirectory(paths.taskDirectory)
+		for (const directory of [dirname(archived.parentDirectory), archived.parentDirectory]) {
+			await mkdir(directory, { recursive: true, mode: DIRECTORY_MODE })
+			await assertRegularDirectory(directory)
+		}
+		try {
+			await lstat(archived.taskDirectory)
+		} catch (error) {
+			if (!hasCode(error, "ENOENT")) throw error
+			await rename(paths.taskDirectory, archived.taskDirectory)
+			await Promise.all([syncDirectory(paths.parentDirectory), syncDirectory(archived.parentDirectory)])
+			publishTaskUpdate(paths.workspace, paths.parentSessionId)
+			return
+		}
+		throw new Error(`Archive already exists: ${archived.taskDirectory}`)
+	})
 }
 
 export function createTaskReference(): string {
@@ -430,65 +467,68 @@ export async function releaseParentLeaseFor(cwd: string, parentSessionId: string
 
 /** Creates empty retained logs without touching Pi's authoritative session. */
 export async function initializeRetainedLogs(paths: TaskStoragePaths): Promise<void> {
-	await Promise.all([ensurePrivateLogFile(paths.output), ensurePrivateLogFile(paths.activity)])
+	await ensurePrivateLogFile(paths.history)
 	await syncDirectory(paths.taskDirectory)
 }
 
-export async function appendOutputLog(paths: TaskStoragePaths, entry: OutputLogEntry): Promise<void> {
-	await appendRetainedLog(paths.output, renderOutputLogEntry(entry))
+export async function appendHistoryLog(paths: TaskStoragePaths, entry: HistoryEntry): Promise<void> {
+	await appendRetainedLog(paths.history, renderHistoryEntry(entry))
 	publishTaskUpdate(paths.workspace, paths.parentSessionId)
 }
 
-export function appendActivityLog(paths: TaskStoragePaths, entry: ActivityLogEntry): Promise<void> {
-	return appendRetainedLog(paths.activity, renderActivityLogEntry(paths, entry))
+/** Late events cannot overwrite a newer run or a discarded task. */
+export async function writeLatestReply(paths: TaskStoragePaths, runId: string, text: string, streaming: boolean): Promise<void> {
+	await mutateTaskMetadata(paths, metadata => {
+		if (metadata.discardedAt !== null || metadata.activeRun?.id !== runId || metadata.state !== "running") return metadata
+		return { ...metadata, latestReply: { text, streaming }, updatedAt: Date.now() }
+	})
 }
 
 export function retainedPaths(paths: TaskStoragePaths): RetainedPaths {
 	return {
-		output: displayWorkspacePath(paths.workspace, paths.output),
-		activity: displayWorkspacePath(paths.workspace, paths.activity),
+		history: displayWorkspacePath(paths.workspace, paths.history),
 		session: displayWorkspacePath(paths.workspace, paths.session)
 	}
 }
 
 export async function countRetainedOutputLines(paths: TaskStoragePaths): Promise<number> {
-	return splitCompleteLines(await readRetainedLog(paths.output)).length
+	return splitCompleteLines((await requireTaskMetadata(paths)).latestReply?.text ?? "").length
 }
 
 /**
- * Reads complete lines from output.md. When positioned at the live end, waits
- * for output growth or a task-state transition.
+ * Returns a snapshot, never transcript pages. With waitMs, active tasks wait
+ * for a reply/status change, even when there is already text.
  */
 export async function readRetainedOutput(paths: TaskStoragePaths, options: RetainedOutputReadOptions = {}): Promise<RetainedOutputRead> {
-	const offset = options.offset ?? 1
-	const limit = options.limit ?? RETAINED_OUTPUT_MAX_LINES
 	const waitMs = options.waitMs ?? 0
-	assertPositiveInteger(offset, "offset")
-	assertPositiveInteger(limit, "limit")
 	if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > RETAINED_OUTPUT_MAX_WAIT_MS) {
 		throw new Error(`waitMs must be an integer from 0 to ${RETAINED_OUTPUT_MAX_WAIT_MS}`)
 	}
 
-	let output = await readRetainedLog(paths.output)
+	if (options.signal?.aborted) throw abortReason(options.signal)
 	let metadata = await requireTaskMetadata(paths)
-	let lines = splitCompleteLines(output)
-	if (offset > lines.length + 1) throw new Error(`Offset ${offset} is beyond end of output (${lines.length} lines total)`)
-
 	let timedOut = false
-	if (waitMs > 0 && isActiveTaskState(metadata.state) && offset > lines.length) {
-		const changed = await waitForRetainedChange(
-			paths,
-			{ outputBytes: Buffer.byteLength(output), state: metadata.state },
-			waitMs,
-			options.signal
-		)
+	if (waitMs > 0 && isActiveTaskState(metadata.state)) {
+		const changed = await waitForRetainedChange(paths, retainedObservation(metadata), waitMs, options.signal)
 		timedOut = !changed
-		output = await readRetainedLog(paths.output)
 		metadata = await requireTaskMetadata(paths)
-		lines = splitCompleteLines(output)
 	}
 
-	return buildRetainedOutputRead(paths, lines, metadata.state, offset, limit, timedOut)
+	const fullText = metadata.latestReply?.text ?? ""
+	const lines = splitCompleteLines(fullText)
+	const text = truncateUtf8(lines.slice(0, RETAINED_OUTPUT_MAX_LINES).join("\n"), RETAINED_OUTPUT_MAX_BYTES)
+	const truncated = lines.length > RETAINED_OUTPUT_MAX_LINES || Buffer.byteLength(fullText) > RETAINED_OUTPUT_MAX_BYTES
+	return {
+		text: truncated ? `${text}\n\n[Reply truncated. Full replies: ${retainedPaths(paths).history}]` : fullText,
+		totalLines: lines.length,
+		truncated,
+		timedOut,
+		state: metadata.state,
+		latestOutcome: metadata.activeRun ? null : metadata.latestOutcome,
+		streaming: metadata.state === "running" && (metadata.latestReply?.streaming ?? false),
+		queuedFollowUps: metadata.queuedFollowUps.length,
+		paths: retainedPaths(paths)
+	}
 }
 
 /** Atomically reserves a fresh task directory; existing names are collisions. */
@@ -499,8 +539,17 @@ export async function reserveTaskStorage(
 	for (let attempt = 0; attempt < MAX_TASK_REFERENCE_ATTEMPTS; attempt++) {
 		const paths = taskStoragePaths(parent, nextReference())
 		try {
-			await mkdir(paths.taskDirectory, { mode: DIRECTORY_MODE })
-			return paths
+			const reserved = await serializeMetadataMutation(paths.metadata, async () => {
+				try {
+					await lstat(archivedTaskStoragePaths(paths).taskDirectory)
+					return false
+				} catch (error) {
+					if (!hasCode(error, "ENOENT")) throw error
+				}
+				await mkdir(paths.taskDirectory, { mode: DIRECTORY_MODE })
+				return true
+			})
+			if (reserved) return paths
 		} catch (error) {
 			if (!hasCode(error, "EEXIST")) throw error
 		}
@@ -517,7 +566,16 @@ export async function readTaskMetadata(paths: TaskStoragePaths): Promise<Metadat
 		}
 		source = await readFile(paths.metadata, "utf8")
 	} catch (error) {
-		if (hasCode(error, "ENOENT")) return { status: "missing" }
+		if (hasCode(error, "ENOENT")) {
+			try {
+				if (await readTaskIdentity(archivedTaskStoragePaths(paths))) {
+					return invalidMetadata(paths.metadata, "unreadable", `Task ${paths.taskRef} has been discarded`)
+				}
+				return { status: "missing" }
+			} catch (archiveError) {
+				return invalidMetadata(paths.metadata, "unreadable", errorMessage(archiveError))
+			}
+		}
 		return invalidMetadata(paths.metadata, "unreadable", errorMessage(error))
 	}
 
@@ -557,6 +615,8 @@ export function mutateTaskMetadata(
 		const loaded = await readTaskMetadata(paths)
 		if (loaded.status !== "ok") throw new InvalidTaskMetadataError(metadataLoadError(loaded, paths.metadata))
 		const updated = await mutate(structuredClone(loaded.metadata))
+		if (updated.activeRun && updated.activeRun.id !== loaded.metadata.activeRun?.id) updated.latestReply = null
+		if (updated.state !== "running" && updated.latestReply) updated.latestReply.streaming = false
 		assertMetadataForPath(paths, updated)
 		await atomicWriteMetadata(paths.metadata, updated)
 		publishTaskUpdate(paths.workspace, paths.parentSessionId)
@@ -628,7 +688,7 @@ function assertMetadataForPath(paths: TaskStoragePaths, metadata: unknown): asse
 	}
 }
 
-function renderOutputLogEntry(entry: OutputLogEntry): string {
+function renderHistoryEntry(entry: HistoryEntry): string {
 	switch (entry.type) {
 		case "run-start":
 			return `<run ${entry.sequence} ${entry.kind}>\n`
@@ -638,6 +698,8 @@ function renderOutputLogEntry(entry: OutputLogEntry): string {
 			return taggedBlockEntry("agent", entry.content)
 		case "run-end":
 			return `<outcome ${entry.outcome}>\n${entry.summary ? taggedBlockEntry("summary", entry.summary) : ""}\n`
+		case "tool":
+			return `<tool ${historyPreview(entry.tool, 80)} ${entry.isError ? "error" : "ok"}>\n${historyPreview(entry.arguments, 160)} → ${historyPreview(entry.result, 240)}\n`
 	}
 }
 
@@ -646,105 +708,27 @@ function taggedBlockEntry(tag: string, content: string): string {
 	return `<${tag}>\n${normalized}\n`
 }
 
-function renderActivityLogEntry(paths: TaskStoragePaths, entry: ActivityLogEntry): string {
-	const fullOutput = entry.fullOutputPath
-		? `\nFull output: ${isAbsolute(entry.fullOutputPath) ? displayWorkspacePath(paths.workspace, entry.fullOutputPath) : entry.fullOutputPath}\n`
-		: ""
-	const headerArguments = activityHeaderArguments(entry.arguments)
-	return `## ${entry.tool}${headerArguments ? ` ${headerArguments}` : ""}\n\nTime: ${formatTimestamp(entry.timestamp)}\nStatus: ${entry.isError ? "error" : "ok"}\n\n### Arguments\n\n${previewActivityText(entry.arguments)}\n\n### Result\n\n${previewActivityText(entry.result)}\n${fullOutput}\n---\n`
+function historyPreview(content: string, maximumBytes: number): string {
+	const singleLine = content.replace(/\s+/g, " ").trim()
+	return truncateUtf8(singleLine, maximumBytes)
 }
 
-function activityHeaderArguments(content: string): string {
-	const singleLine = content.replace(/\s+/g, " ").trim()
-	const bytes = Buffer.from(singleLine)
-	if (bytes.length <= 160) return singleLine
-	let end = 157
+function truncateUtf8(content: string, maximumBytes: number): string {
+	const bytes = Buffer.from(content)
+	if (bytes.length <= maximumBytes) return content
+	let end = maximumBytes - 3
 	while (end > 0 && isUtf8Continuation(bytes[end])) end--
 	return `${bytes.subarray(0, end).toString("utf8")}...`
-}
-
-function previewActivityText(content: string): string {
-	const bytes = Buffer.from(content)
-	if (bytes.length <= RETAINED_ACTIVITY_PREVIEW_BYTES) return content
-
-	const headBudget = Math.floor(RETAINED_ACTIVITY_PREVIEW_BYTES / 2)
-	const tailBudget = RETAINED_ACTIVITY_PREVIEW_BYTES - headBudget
-	let headEnd = headBudget
-	while (headEnd > 0 && isUtf8Continuation(bytes[headEnd])) headEnd--
-	let tailStart = bytes.length - tailBudget
-	while (tailStart < bytes.length && isUtf8Continuation(bytes[tailStart])) tailStart++
-
-	const head = bytes.subarray(0, headEnd).toString("utf8")
-	const tail = bytes.subarray(tailStart).toString("utf8")
-	const omitted = bytes.length - headEnd - (bytes.length - tailStart)
-	return `${head}\n\n[... omitted ${omitted} UTF-8 bytes ...]\n\n${tail}`
-}
-
-function buildRetainedOutputRead(
-	paths: TaskStoragePaths,
-	lines: string[],
-	state: Static<typeof TaskState>,
-	offset: number,
-	requestedLimit: number,
-	timedOut: boolean
-): RetainedOutputRead {
-	const lineLimit = Math.min(requestedLimit, RETAINED_OUTPUT_MAX_LINES)
-	const selected: string[] = []
-	let selectedBytes = 0
-	let index = offset - 1
-	let truncatedBy: RetainedOutputRead["truncatedBy"] = null
-	while (index < lines.length && selected.length < lineLimit) {
-		const line = lines[index]
-		if (line === undefined) break
-		const bytes = Buffer.byteLength(line) + (selected.length > 0 ? 1 : 0)
-		if (selectedBytes + bytes > RETAINED_OUTPUT_MAX_BYTES) {
-			truncatedBy = "bytes"
-			break
-		}
-		selected.push(line)
-		selectedBytes += bytes
-		index++
-	}
-	if (index < lines.length && truncatedBy === null) truncatedBy = "lines"
-
-	const startLine = selected.length > 0 ? offset : null
-	const endLine = selected.length > 0 ? offset + selected.length - 1 : null
-	const nextOffset = endLine === null ? offset : endLine + 1
-	let text = selected.join("\n")
-	if (truncatedBy !== null && selected.length === 0) {
-		text = `[Line ${offset} exceeds 50KB. Inspect ${retainedPaths(paths).output} directly.]`
-	} else if (truncatedBy !== null) {
-		const byteNote = truncatedBy === "bytes" ? " (50KB limit)" : ""
-		text += `\n\n[Showing lines ${offset}-${endLine} of ${lines.length}${byteNote}. Use offset=${nextOffset} to continue.]`
-	}
-
-	return {
-		text,
-		startLine,
-		endLine,
-		totalLines: lines.length,
-		returnedLines: selected.length,
-		nextOffset,
-		truncated: truncatedBy !== null,
-		truncatedBy,
-		timedOut,
-		state,
-		paths: retainedPaths(paths)
-	}
 }
 
 async function requireTaskMetadata(paths: TaskStoragePaths): Promise<TaskMetadata> {
 	const loaded = await readTaskMetadata(paths)
 	if (loaded.status !== "ok") throw new InvalidTaskMetadataError(metadataLoadError(loaded, paths.metadata))
+	if (loaded.metadata.discardedAt !== null) throw new Error(`Task ${paths.taskRef} has been discarded`)
 	return loaded.metadata
 }
 
-async function waitForRetainedChange(
-	paths: TaskStoragePaths,
-	baseline: { outputBytes: number; state: Static<typeof TaskState> },
-	waitMs: number,
-	signal?: AbortSignal
-): Promise<boolean> {
+async function waitForRetainedChange(paths: TaskStoragePaths, baseline: string, waitMs: number, signal?: AbortSignal): Promise<boolean> {
 	if (signal?.aborted) throw abortReason(signal)
 	return new Promise<boolean>((resolvePromise, rejectPromise) => {
 		let settled = false
@@ -783,8 +767,8 @@ async function waitForRetainedChange(
 			if (settled) return
 			checking = true
 			try {
-				const current = await retainedObservation(paths)
-				if (current.outputBytes !== baseline.outputBytes || current.state !== baseline.state) finish(true)
+				const current = retainedObservation(await requireTaskMetadata(paths))
+				if (current !== baseline) finish(true)
 			} catch (error) {
 				fail(error)
 			} finally {
@@ -802,16 +786,14 @@ async function waitForRetainedChange(
 	})
 }
 
-async function retainedObservation(paths: TaskStoragePaths): Promise<{ outputBytes: number; state: Static<typeof TaskState> }> {
-	let outputBytes = 0
-	try {
-		const stats = await lstat(paths.output)
-		if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Retained log is not a regular file: ${paths.output}`)
-		outputBytes = stats.size
-	} catch (error) {
-		if (!hasCode(error, "ENOENT")) throw error
-	}
-	return { outputBytes, state: (await requireTaskMetadata(paths)).state }
+function retainedObservation(metadata: TaskMetadata): string {
+	return JSON.stringify([
+		metadata.activeRun?.id,
+		metadata.state,
+		metadata.latestOutcome,
+		metadata.latestReply,
+		metadata.queuedFollowUps.length
+	])
 }
 
 function isActiveTaskState(state: Static<typeof TaskState>): boolean {
@@ -831,16 +813,8 @@ export function displayWorkspacePath(workspace: string, path: string): string {
 	return display.split(sep).join("/")
 }
 
-function formatTimestamp(timestamp: number): string {
-	return new Date(timestamp).toISOString()
-}
-
 function isUtf8Continuation(byte: number | undefined): boolean {
 	return byte !== undefined && (byte & 0xc0) === 0x80
-}
-
-function assertPositiveInteger(value: number, name: string): void {
-	if (!Number.isInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`)
 }
 
 function abortReason(signal?: AbortSignal): unknown {
@@ -872,17 +846,6 @@ async function ensurePrivateLogFile(path: string): Promise<void> {
 	const stats = await lstat(path)
 	if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Retained log is not a regular file: ${path}`)
 	await chmod(path, FILE_MODE)
-}
-
-async function readRetainedLog(path: string): Promise<string> {
-	try {
-		const stats = await lstat(path)
-		if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Retained log is not a regular file: ${path}`)
-		return await readFile(path, "utf8")
-	} catch (error) {
-		if (hasCode(error, "ENOENT")) return ""
-		throw error
-	}
 }
 
 function appendRetainedLog(path: string, content: string): Promise<void> {

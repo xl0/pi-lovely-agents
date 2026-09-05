@@ -22,3 +22,9 @@
 - Add durable Follow-up queues, live Steer delivery, scheduler reservations,
   and immutable cold-session reopening through `task_input`.
 - Compact model-visible task output while retaining full structured details.
+- Return latest-reply/status snapshots from `task_output`, including streaming
+  updates. Replace transcript pagination and separate activity logs with
+  `history.md`; notifications preview only the latest reply.
+- Archive discarded task subtrees, including unsupported metadata versions
+  after ownership validation. Add a cleanup guideline for unneeded agents.
+- Ignore the entire runtime storage tree, including its generated `.gitignore`.

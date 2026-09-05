@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { unlink, writeFile } from "node:fs/promises"
+import { unlink } from "node:fs/promises"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
 import {
 	appendTaskNotification,
@@ -69,16 +69,18 @@ describe("durable notifications", () => {
 		})
 	})
 
-	test("bounds UTF-8 output tails and total payloads", async () => {
+	test("bounds the latest reply preview without inputs or history dependency", async () => {
 		await withTempWorkspace(async workspace => {
 			const { paths, metadata } = await createTask(workspace.cwd)
 			await createTask(workspace.cwd, "child", "a_87654321", "grandchild")
-			await writeFile(paths.output, `old\n${"🙂".repeat(2_000)}\ntail`, "utf8")
+			metadata.latestReply = { text: `Latest answer\n${"🙂".repeat(2_000)}`, streaming: false }
 			const run = metadata.activeRun
 			if (!run) throw new Error("fixture has no run")
 			const notification = await prepareTaskNotification(paths, metadata, run, "suspension")
 			expect(Buffer.byteLength(notification.content)).toBeLessThanOrEqual(8 * 1024)
-			expect(notification.content).toContain("tail")
+			expect(notification.content).toContain("Output:\nLatest answer")
+			expect(notification.content).not.toContain("Inspect")
+			expect(notification.content).not.toContain("activity.md")
 			expect(notification.content).toContain("Descendants:")
 			expect(notification.content).not.toContain("�")
 			const full = Array.from({ length: 128 }, (_, index) => ({ ...notification, id: `notice-${index}` }))
@@ -86,8 +88,10 @@ describe("durable notifications", () => {
 			expect(bounded).toHaveLength(128)
 			expect(bounded[0]?.id).toBe("notice-1")
 			expect(bounded.at(-1)?.id).toBe("notice-new")
-			await unlink(paths.output)
-			expect((await prepareTaskNotification(paths, metadata, run, "completion", "failed")).content).toContain("Output tail: (unavailable)")
+			await unlink(paths.history)
+			expect((await prepareTaskNotification(paths, metadata, run, "completion", "failed")).content).toContain("Latest answer")
+			metadata.latestReply = null
+			expect((await prepareTaskNotification(paths, metadata, run, "completion", "failed")).content).toContain("Output: (empty)")
 			await releaseParentLeaseFor(workspace.cwd, "parent")
 		})
 	})
@@ -117,6 +121,7 @@ async function createTask(cwd: string, parentSessionId = "parent", taskRef = "a_
 		state: "running",
 		latestOutcome: null,
 		lastRunSequence: 1,
+		latestReply: null,
 		activeRun: {
 			id: "r_1111111111111111",
 			sequence: 1,

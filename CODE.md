@@ -11,6 +11,7 @@ stop/discard controls, restart recovery, and the management UI are implemented.
 - `extensions/lovely-agents/index.ts`: extension registration, management
   command, and `/continue`
 - `extensions/lovely-agents/management.ts`: unified TUI and development fixtures
+- `extensions/lovely-agents/task-panel.ts`: below-editor task status/navigation
 - `extensions/lovely-agents/coordinator.ts`: process-global scheduling, tuple
   gates, and runtime bindings
 - `extensions/lovely-agents/child-session.ts`: fixed child configuration,
@@ -53,14 +54,18 @@ compact YAML-like model output. Full structured details remain available to Pi.
 
 Task state is stored under `.pi/lovely-agents/<parent-session-id>/<task-ref>/`.
 Task directories are reserved atomically with collision-checked `a_` references.
-Metadata is strictly validated against its path and v2 schema before use.
+Metadata is strictly validated against its path and v3 schema before use.
 Writes are serialized per task and use a private same-directory temporary file,
 file fsync, rename, and directory fsync. Malformed and unsupported snapshots
-remain untouched.
+are never migrated implicitly. The generated `.gitignore` ignores all storage
+contents, including itself.
 
-Metadata v2 retains the immutable child-session recipe: Definition prompt,
+Metadata v3 retains the immutable child-session recipe: Definition prompt,
 explicit-vs-omitted tool policy, context exclusion, and scoped model identities.
-It also retains scheduler acceptance order for active and queued runs. Earlier
+It also retains scheduler acceptance order and the latest assistant reply.
+Reply snapshots share the metadata mutation lane, so status and text are read
+atomically. Promoting a new run clears the old reply; run-ID checks fence late
+stream events. Streaming writes coalesce token bursts. Earlier
 metadata versions are rejected rather than cold-loaded with wider capabilities.
 Metadata and retained-log queues are process-global so surviving runtimes and
 new extension instances remain serialized across reload.
@@ -73,27 +78,29 @@ absent is reclaimed. Simultaneous stale reclamation is best-effort; fresh and
 live-owner acquisition remains atomic. Release verifies the ownership token
 before unlinking.
 
-`output.md` retains runs as a flat tagged user/agent event stream without
-timestamps or per-line indentation; `activity.md` retains tool records with
-bounded single-line argument headers and UTF-8-safe 2 KiB head/tail previews.
-Reads use
-1-indexed line offsets, return whole lines under the 2,000-line/50 KiB caps,
-and can long-poll active work until output size or task state changes. Retained
-paths are workspace-relative when possible; `session.jsonl` remains owned by
-Pi.
+`history.md` retains runs as a flat tagged input/assistant event stream, with
+compact tool argument/result summaries and outcomes. No reasoning or full tool
+payloads are copied; Pi's `session.jsonl` remains the authoritative transcript.
+There is no separate output or activity log. Retained paths are
+workspace-relative when possible.
 
 `task_list` scans only the exact parent-session partition under its lease,
 hides tombstones, isolates corrupt direct records, and sorts by state then
 recency. Direct rows include retained paths and bounded recursive descendant
 summaries without descendant Task References. All direct rows and diagnostics
-are returned at once. `task_output` rejects foreign/discarded tasks and exposes
-retained line ranges with optional long-polling. Semantic session shutdown
+are returned at once. `task_output` rejects foreign/discarded tasks and returns
+only the latest assistant reply from the current run, bounded to 2,000
+lines/50 KiB with a full-history reference on truncation. Optional long-polling
+waits for reply or status changes, including equal-length text replacements.
+It returns snapshots, not offsets or continuation pages. Streaming is separate
+from run status; message completion is not run completion. Semantic shutdown
 releases the parent lease; reload keeps it.
 
 Model-visible task rendering avoids repeating structured details. Lists group
 tasks by state, combine model/thinking, show only relative creation/update
 times, omit empty descendant summaries, and expose one task directory. Output
-reads render the selected event range and source file. Input acknowledgements
+reads render the latest reply, run status/outcome, and streaming flag.
+Input acknowledgements
 use one line, and agent creation omits redundant task inventory. Full artifact
 paths and exact metadata remain in tool `details`. Potentially long Lovely
 Agent, roster, list, and output tool results show a ten-line head/tail preview;
@@ -131,6 +138,10 @@ reconciles IDs in the transcript and resends only absent notices; semantic
 parent shutdown clears process-local in-flight suppression. Synchronous initial
 results and explicit stops do not notify.
 
+Notification previews come from the run's latest reply, not transcript tails:
+inputs and older replies never enter the preview. History/session paths link
+to the full records.
+
 Child sessions use Pi's SDK in-process and own the task's retained
 `session.jsonl`. Selection follows call, Definition, then parent precedence.
 Explicit Definition tools are hard allowlists; omitted tools preserve normal
@@ -162,10 +173,16 @@ expected Pi UUID, without rescanning mutable Definitions.
 `task_stop` aborts resident execution or cancels retained queued/suspended work,
 clears Follow-ups, recursively stops descendants, and preserves the task's
 session for later input. Completion and stop settle the active run by matching
-its durable ID, so the first transition wins. `task_discard` performs the same
-stop before writing a permanent tombstone. Discarded files remain retained,
-while listing and later model I/O hide or reject the task; repeated discard is
-idempotent.
+its durable ID, so the first transition wins. `task_discard` stops and archives
+the owned subtree under `.pi/lovely-agents/archive/<parent>/<task>/`, moving each
+whole task directory after descendant cleanup. Supported metadata is first
+tombstoned to fence concurrent input. Unsupported versions are decoded only for
+validated ownership identities; their metadata and logs move unchanged.
+Malformed identities, unsafe paths, and archive collisions fail explicitly.
+Concurrent discards share one operation; repeats succeed and archived IDs are
+never reused. Listing excludes the archive; later model I/O rejects it.
+The discard tool guideline asks agents to discard consumed, unneeded tasks
+while keeping specialists likely to receive Follow-ups. No automatic deletion.
 
 On quit/new/resume/fork, the outgoing runtime recursively stops resident and
 retained descendants before releasing exact-parent leases. Reload skips this
@@ -183,9 +200,15 @@ Definition previews include their complete system-prompt body. Definition/task
 detail views never rebind Pi's active session. Task views provide event-driven
 live output, Follow-up/Steer entry, stop, and discard. Active counts appear in
 the footer and up to five active rows appear below the editor. Down on an empty
-editor opens task management through a replacement-safe editor wrapper.
+editor focuses that same panel, exposing all direct tasks and diagnostics in a
+five-row scrolling list. `/lovely-agents` → Tasks hands off to the panel rather
+than opening another selector. Selection follows task identity across updates.
+Enter opens actions; Esc or Up past the first row returns to the editor, and
+other input passes through unchanged. Action/output views hide the panel until
+they close. The editor wrapper preserves and restores the prior factory.
 Process-global update routes refresh these surfaces on durable metadata/output
-writes without polling. Live fixture timers use a process-global registry so
+writes without polling; panel disposal fences in-flight refreshes.
+Live fixture timers use a process-global registry so
 reload preserves them and semantic shutdown stops them before releasing the
 parent lease.
 

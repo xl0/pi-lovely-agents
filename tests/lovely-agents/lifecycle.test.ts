@@ -29,7 +29,7 @@ describe("task lifecycle recovery", () => {
 				queuedFollowUps: [],
 				notifications: [{ id: "a_11111111:r_1111111111111111:interruption", type: "interruption" }]
 			})
-			expect(await readFile(paths.output, "utf8")).toContain("interrupted")
+			expect(await readFile(paths.history, "utf8")).toContain("interrupted")
 			expect(await reconcileParentTasks(workspace.cwd, "parent")).toEqual({ interrupted: 0, diagnostics: [] })
 			const repeated = await readTaskMetadata(paths)
 			expect(repeated.status === "ok" ? repeated.metadata.notifications : []).toHaveLength(1)
@@ -181,6 +181,7 @@ async function createTask(
 						...(state === "queued" ? {} : { startedAt: 2 })
 					},
 		lastRunSequence: 2,
+		latestReply: null,
 		model: { provider: "provider", id: "model" },
 		thinking: "medium",
 		allowAgents: false,

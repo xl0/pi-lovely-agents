@@ -108,7 +108,6 @@ export type TaskListResult = {
 
 export type TaskOutputResult = Awaited<ReturnType<typeof readRetainedOutput>> & {
 	id: string
-	queuedFollowUps: number
 }
 
 export function registerRosterTool(
@@ -258,26 +257,21 @@ export function registerTaskTools(
 	pi.registerTool({
 		name: "task_output",
 		label: "Task Output",
-		description: "Read retained output from a Lovely Agent task, optionally waiting for live changes.",
-		promptSnippet: "Read retained output from a durable task",
-		promptGuidelines: ["Use task_output with nextOffset to follow detached work without rereading prior output."],
+		description:
+			"Read the latest assistant reply and run status from a Lovely Agent task. Snapshots are capped at 2,000 lines/50 KiB; full replies and inputs are in history.md.",
+		promptSnippet: "Read a task's latest reply and current run status",
+		promptGuidelines: [
+			"task_output returns a snapshot, not history. Use waitMs to wait for reply or status changes; inspect history.md for earlier replies and inputs."
+		],
 		parameters: Type.Object(
 			{
 				id: Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" }),
-				offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-indexed output line" })),
-				limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum output lines" })),
 				waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 600_000, description: "Maximum wait for output or state changes" }))
 			},
 			{ additionalProperties: false }
 		),
 		renderCall(args, theme) {
-			const range = [
-				args.offset ? `offset=${args.offset}` : "",
-				args.limit ? `limit=${args.limit}` : "",
-				args.waitMs ? `wait=${args.waitMs}ms` : ""
-			]
-				.filter(Boolean)
-				.join(" ")
+			const range = args.waitMs ? `wait=${args.waitMs}ms` : ""
 			return new Text(
 				`${theme.fg("toolTitle", theme.bold("task_output"))}${args.id ? ` ${theme.fg("muted", args.id)}` : ""}${range ? ` ${theme.fg("dim", range)}` : ""}`,
 				0,
@@ -300,19 +294,12 @@ export function registerTaskTools(
 
 			const readOutput = () =>
 				readRetainedOutput(paths, {
-					...(params.offset !== undefined ? { offset: params.offset } : {}),
-					...(params.limit !== undefined ? { limit: params.limit } : {}),
 					...(params.waitMs !== undefined ? { waitMs: params.waitMs } : {}),
 					...(signal ? { signal } : {})
 				})
 			const shouldLend = (params.waitMs ?? 0) > 0 && isActiveState(loaded.metadata.state)
 			const output = shouldLend ? await getAgentCoordinator().withLentPermit(readOutput, signal) : await readOutput()
-			const refreshed = await readTaskMetadata(paths)
-			return buildTaskOutputToolResult(
-				params.id,
-				refreshed.status === "ok" ? refreshed.metadata.queuedFollowUps.length : loaded.metadata.queuedFollowUps.length,
-				output
-			)
+			return buildTaskOutputToolResult(params.id, output)
 		}
 	})
 
@@ -341,20 +328,17 @@ export function buildTaskListToolResult(options: { rows: readonly TaskListRow[];
 
 export function buildTaskOutputToolResult(
 	id: string,
-	queuedFollowUps: number,
 	output: Awaited<ReturnType<typeof readRetainedOutput>>
 ): {
 	content: [{ type: "text"; text: string }]
 	details: TaskOutputResult
 } {
-	const result: TaskOutputResult = { id, queuedFollowUps, ...output }
-	const range = result.returnedLines > 0 ? `${result.startLine}-${result.endLine}/${result.totalLines}` : `none/${result.totalLines}`
+	const result: TaskOutputResult = { id, ...output }
 	const lines = [
-		`task_output state=${result.state} queued=${result.queuedFollowUps} lines=${range}`,
-		`source=${yamlScalar(result.paths.output)}`,
+		`task_output state=${result.state} outcome=${result.latestOutcome ?? "none"} streaming=${result.streaming} queued=${result.queuedFollowUps}`,
 		...(result.timedOut ? ["timed_out=true"] : []),
 		"",
-		result.text || "(no events)"
+		result.text || "(no reply yet)"
 	]
 	return { content: [{ type: "text", text: lines.join("\n") }], details: result }
 }
@@ -399,7 +383,7 @@ async function scanDirectTasks(cwd: string, parentSessionId: string): Promise<{ 
 			diagnostics.push({
 				code: "unreadable-output",
 				message: errorMessage(error),
-				path: displayWorkspacePath(cwd, paths.output),
+				path: displayWorkspacePath(cwd, paths.metadata),
 				id: entry.name
 			})
 		}
@@ -515,7 +499,7 @@ function renderTaskListResult(result: TaskListResult): string {
 			if (task.descendants.total > 0) lines.push(`      descendants: ${renderDescendantSummary(task.descendants)}`)
 			lines.push(`      created: ${relativeTime(task.createdAt, now)}`)
 			lines.push(`      updated: ${relativeTime(task.updatedAt, now)}`)
-			lines.push(`      dir: ${yamlScalar(dirname(task.paths.output))}`)
+			lines.push(`      dir: ${yamlScalar(dirname(task.paths.history))}`)
 		}
 	}
 	if (result.diagnostics.length > 0) {

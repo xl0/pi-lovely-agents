@@ -148,7 +148,7 @@ describe("read-only task tools", () => {
 		})
 	})
 
-	test("reads only owned, non-discarded task output with continuation metadata", async () => {
+	test("reads only owned, non-discarded latest replies with run status", async () => {
 		await withTempWorkspace(async workspace => {
 			await createTask(workspace.cwd, "parent-session", {
 				id: "a_00000001",
@@ -177,21 +177,20 @@ describe("read-only task tools", () => {
 
 			const captured = captureTaskTools()
 			const ctx = taskContext(workspace.cwd)
-			const result = await captured.tools.get("task_output")?.execute("output", { id: "a_00000001", offset: 2, limit: 1 }, undefined, ctx)
+			const result = await captured.tools.get("task_output")?.execute("output", { id: "a_00000001" }, undefined, ctx)
 			if (!result) throw new Error("task_output was not registered")
 			const details = result.details as TaskOutputResult
 			expect(details).toMatchObject({
 				id: "a_00000001",
 				state: "running",
 				queuedFollowUps: 1,
-				startLine: 2,
-				endLine: 2,
 				totalLines: 3,
-				nextOffset: 3
+				streaming: false,
+				latestOutcome: null
 			})
-			expect(result.content[0]?.text).toContain("task_output state=running queued=1 lines=2-2/3")
-			expect(result.content[0]?.text).toContain("second\n\n[Showing lines 2-2 of 3. Use offset=3 to continue.]")
-			expect(result.content[0]?.text).toContain("source=.pi/lovely-agents/parent-session/a_00000001/output.md")
+			expect(result.content[0]?.text).toContain("task_output state=running outcome=none streaming=false queued=1")
+			expect(result.content[0]?.text).toContain("first\nsecond\nthird")
+			expect(details.paths.history).toBe(".pi/lovely-agents/parent-session/a_00000001/history.md")
 			expect(result.content[0]?.text).not.toContain("activity.md")
 
 			await expect(captured.tools.get("task_output")?.execute("nested", { id: "a_10000001" }, undefined, ctx)).rejects.toThrow(
@@ -244,7 +243,6 @@ async function createTask(cwd: string, parentSessionId: string, fixture: TaskFix
 	const paths = await reserveTaskStorage(parent, () => fixture.id)
 	await initializeRetainedLogs(paths)
 	await writeTaskMetadata(paths, taskMetadata(paths, fixture))
-	if (fixture.output) await writeFile(paths.output, fixture.output, "utf8")
 	return paths
 }
 
@@ -276,6 +274,7 @@ function taskMetadata(paths: TaskStoragePaths, fixture: TaskFixture): TaskMetada
 		},
 		state: fixture.state,
 		latestOutcome: fixture.outcome ?? null,
+		latestReply: fixture.output ? { text: fixture.output, streaming: false } : null,
 		lastRunSequence: activeState ? 1 + queuedFollowUps.length : fixture.outcome ? 1 : 0,
 		activeRun: activeState
 			? {
@@ -356,7 +355,7 @@ function largeRow(index: number): TaskListRow {
 		detachedAt: null,
 		queuedFollowUps: 0,
 		outputLines: 1,
-		paths: { output: `${longPath}/output.md`, activity: `${longPath}/activity.md`, session: `${longPath}/session.jsonl` },
+		paths: { history: `${longPath}/history.md`, session: `${longPath}/session.jsonl` },
 		descendants: {
 			total: 0,
 			states: { idle: 0, queued: 0, running: 0, suspended: 0, interrupted: 0 },

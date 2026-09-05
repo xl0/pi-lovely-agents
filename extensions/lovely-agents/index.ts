@@ -1,5 +1,4 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent"
-import { Key, matchesKey } from "@earendil-works/pi-tui"
 import { ScopedConfigEditor } from "@xl0/pi-lovely-config"
 import { controlTaskLifecycle, recoverProviderTuple, registerAgentTool, registerTaskInputTool, sendTaskInput } from "./agent.js"
 import { type AgentsConfig, type AgentsConfigWarning, createAgentsConfigSpec, defaultAgentsConfig, resolveAgentsConfig } from "./config.js"
@@ -16,11 +15,9 @@ import {
 	reconcileParentNotifications
 } from "./notifications.js"
 import { renderExpandableResult } from "./rendering.js"
+import { createTaskPanel } from "./task-panel.js"
 import { loadTaskList, registerRosterTool, registerTaskTools } from "./tools.js"
-import { bindTaskUpdateRoute } from "./updates.js"
 
-const TASK_STATUS_ID = "lovely-agents"
-const TASK_WIDGET_ID = "lovely-agents"
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>
 
 export default function lovelyAgentsExtension(pi: ExtensionAPI) {
@@ -28,7 +25,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	let configWarnings: AgentsConfigWarning[] = []
 	let currentDepth = 0
 	let unbindNotificationRoute: (() => void) | undefined
-	let unbindTaskUpdates: (() => void) | undefined
+	let taskPanel: ReturnType<typeof createTaskPanel> | undefined
 	let previousEditorFactory: EditorFactory | undefined
 	let taskEditorFactory: EditorFactory | undefined
 
@@ -64,6 +61,10 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 				models: ctx.modelRegistry.getAll()
 			}),
 		loadTasks: async () => (await loadTaskList(ctx.cwd, ctx.sessionManager.getSessionId())).details,
+		focusTasks: async () => {
+			await taskPanel?.refresh()
+			taskPanel?.focus()
+		},
 		inputTask: async (id, content, delivery) => {
 			await sendTaskInput(ctx, { getConfig: () => configValue }, id, content, delivery)
 		},
@@ -102,29 +103,15 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 				{ triggerTurn: true, deliverAs: "steer" }
 			)
 		})
-		unbindTaskUpdates?.()
-		let refreshing = false
-		let refreshAgain = false
-		const refreshTasks = async () => {
-			if (ctx.mode !== "tui") return
-			if (refreshing) {
-				refreshAgain = true
-				return
-			}
-			refreshing = true
-			try {
-				do {
-					refreshAgain = false
-					const tasks = (await loadTaskList(ctx.cwd, parentSessionId)).details.tasks
-					const active = tasks.filter(task => task.state === "queued" || task.state === "running" || task.state === "suspended")
-					ctx.ui.setStatus(TASK_STATUS_ID, active.length > 0 ? `agents:${active.length}` : undefined)
-					ctx.ui.setWidget(TASK_WIDGET_ID, active.length > 0 ? renderActiveTaskRows(active) : undefined, { placement: "belowEditor" })
-				} while (refreshAgain)
-			} finally {
-				refreshing = false
-			}
+		taskPanel?.dispose()
+		taskPanel = undefined
+		if (ctx.mode === "tui") {
+			const options = managementOptions(ctx)
+			taskPanel = createTaskPanel(ctx, {
+				loadTasks: options.loadTasks,
+				openSelection: selection => openTaskManagementUi(ctx, options, selection)
+			})
 		}
-		unbindTaskUpdates = bindTaskUpdateRoute(ctx.cwd, parentSessionId, refreshTasks)
 		try {
 			currentDepth = getAgentCoordinator().getSessionContext(parentSessionId)?.depth ?? 0
 			loadConfig(ctx)
@@ -164,12 +151,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 					get(target, property) {
 						if (property === "handleInput") {
 							return (data: string) => {
-								if (matchesKey(data, Key.down) && target.getText() === "") {
-									void openTaskManagementUi(ctx, managementOptions(ctx)).catch(error =>
-										ctx.ui.notify(`Lovely Agents task UI error: ${errorMessage(error)}`, "error")
-									)
-									return
-								}
+								if (taskPanel?.handleInput(data, target.getText() === "")) return
 								target.handleInput(data)
 							}
 						}
@@ -183,7 +165,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			}
 			ctx.ui.setEditorComponent(taskEditorFactory)
 		}
-		await refreshTasks().catch(error => ctx.ui.notify(`Lovely Agents status refresh failed: ${errorMessage(error)}`, "warning"))
+		await taskPanel?.refresh().catch(error => ctx.ui.notify(`Lovely Agents status refresh failed: ${errorMessage(error)}`, "warning"))
 	})
 
 	pi.on("message_end", async (event, ctx) => {
@@ -200,11 +182,9 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	pi.on("session_shutdown", (event, ctx) => {
 		unbindNotificationRoute?.()
 		unbindNotificationRoute = undefined
-		unbindTaskUpdates?.()
-		unbindTaskUpdates = undefined
+		taskPanel?.dispose()
+		taskPanel = undefined
 		if (ctx.mode === "tui") {
-			ctx.ui.setStatus(TASK_STATUS_ID, undefined)
-			ctx.ui.setWidget(TASK_WIDGET_ID, undefined)
 			if (ctx.ui.getEditorComponent() === taskEditorFactory) ctx.ui.setEditorComponent(previousEditorFactory)
 			taskEditorFactory = undefined
 			previousEditorFactory = undefined
@@ -273,14 +253,6 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			}
 		}
 	})
-}
-
-export function renderActiveTaskRows(tasks: readonly { id: string; label: string; state: string; queuedFollowUps: number }[]): string[] {
-	const rows = tasks
-		.slice(0, 5)
-		.map(task => `↳ ${task.id} ${task.state} ${task.label}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}`)
-	if (tasks.length > rows.length) rows.push(`  … ${tasks.length - rows.length} more active`)
-	return rows
 }
 
 export function successfulTurnTuple(message: {

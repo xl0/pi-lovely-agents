@@ -29,6 +29,16 @@ describe("private task storage", () => {
 			if (process.platform !== "win32") await chmod(configDirectory, 0o755)
 			const paths = await ensureParentStorage(workspace.cwd, "parent-session")
 			expect(await readFile(join(paths.root, ".gitignore"), "utf8")).toBe(STORAGE_GITIGNORE)
+			expect(Bun.spawnSync(["git", "init", "-q", workspace.cwd]).exitCode).toBe(0)
+			const ignored = Bun.spawnSync([
+				"git",
+				"-C",
+				workspace.cwd,
+				"check-ignore",
+				".pi/lovely-agents/.gitignore",
+				".pi/lovely-agents/parent-session/metadata.json"
+			])
+			expect(ignored.stdout.toString().trim().split("\n")).toHaveLength(2)
 			if (process.platform !== "win32") {
 				expect((await stat(configDirectory)).mode & 0o777).toBe(0o755)
 				expect((await stat(paths.root)).mode & 0o077).toBe(0)
@@ -260,6 +270,7 @@ function metadata(paths: TaskStoragePaths): TaskMetadata {
 		state: "idle",
 		latestOutcome: null,
 		lastRunSequence: 0,
+		latestReply: null,
 		activeRun: null,
 		queuedFollowUps: [],
 		notifications: [],

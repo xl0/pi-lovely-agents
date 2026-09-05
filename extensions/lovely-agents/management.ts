@@ -6,8 +6,7 @@ import { Container, Key, matchesKey, type SelectItem, SelectList, Text } from "@
 import type { AgentDefinition, DefinitionDiagnostic, DefinitionDiscoveryResult } from "./definitions.js"
 import {
 	acquireParentLease,
-	appendActivityLog,
-	appendOutputLog,
+	appendHistoryLog,
 	ensureParentStorage,
 	initializeRetainedLogs,
 	mutateTaskMetadata,
@@ -36,6 +35,7 @@ type FixtureTimerRegistry = Map<string, Set<FixtureLiveTask>>
 export type ManagementUiOptions = {
 	discoverDefinitions: () => DefinitionDiscoveryResult
 	loadTasks: () => Promise<TaskListResult>
+	focusTasks: () => Promise<void>
 	openConfig: () => Promise<void>
 	inputTask: (id: string, content: string, delivery: "followup" | "steer") => Promise<void>
 	controlTask: (id: string, action: "stop" | "discard") => Promise<void>
@@ -62,8 +62,8 @@ export async function openManagementUi(ctx: ExtensionContext, options: Managemen
 				await showDefinitions(ctx, definitions)
 				break
 			case "tasks":
-				await showTasks(ctx, options)
-				break
+				await options.focusTasks()
+				return
 			case "fixtures":
 				await showFixtureMenu(ctx)
 				break
@@ -74,8 +74,14 @@ export async function openManagementUi(ctx: ExtensionContext, options: Managemen
 	}
 }
 
-export async function openTaskManagementUi(ctx: ExtensionContext, options: ManagementUiOptions): Promise<void> {
-	await showTasks(ctx, options)
+export async function openTaskManagementUi(ctx: ExtensionContext, options: ManagementUiOptions, selection: string): Promise<void> {
+	if (selection.startsWith("task:")) {
+		await manageTask(ctx, selection.slice("task:".length), options)
+	} else {
+		const tasks = await options.loadTasks()
+		const diagnostic = tasks.diagnostics.find(item => item.path === selection.slice("diagnostic:".length))
+		if (diagnostic) await showText(ctx, diagnostic.code, `${diagnostic.message}\n\n${diagnostic.path}`)
+	}
 }
 
 export async function seedFixtureTasks(cwd: string, parentSessionId: string): Promise<string[]> {
@@ -117,6 +123,7 @@ export async function seedFixtureEdgeCases(cwd: string, parentSessionId: string)
 	await mutateTaskMetadata(showcase, metadata => ({
 		...metadata,
 		lastRunSequence: 2,
+		latestReply: { text: `Large UTF-8 line: ${"🦋".repeat(20_000)}`, streaming: false },
 		queuedFollowUps: [
 			{
 				id: `r_${randomBytes(8).toString("hex")}`,
@@ -127,7 +134,7 @@ export async function seedFixtureEdgeCases(cwd: string, parentSessionId: string)
 		],
 		updatedAt: Date.now()
 	}))
-	await appendOutputLog(showcase, { type: "assistant", content: `Large UTF-8 line: ${"🦋".repeat(20_000)}` })
+	await appendHistoryLog(showcase, { type: "assistant", content: `Large UTF-8 line: ${"🦋".repeat(20_000)}` })
 	const loaded = await readTaskMetadata(showcase)
 	if (loaded.status !== "ok") throw new Error(`Could not read fixture ${showcase.taskRef}`)
 	await createFixtureTask(cwd, loaded.metadata.childSessionId, parentSessionId, "[fixture] Nested running child", "running", null)
@@ -150,10 +157,15 @@ export async function seedLiveFixtureTask(cwd: string, parentSessionId: string):
 		if (live.pending) return
 		live.pending = (async () => {
 			tick++
-			await appendOutputLog(paths, { type: "assistant", content: `Fixture update ${tick}` })
+			await appendHistoryLog(paths, { type: "assistant", content: `Fixture update ${tick}` })
+			await mutateTaskMetadata(paths, metadata => ({
+				...metadata,
+				latestReply: { text: `Fixture update ${tick}`, streaming: false },
+				updatedAt: Date.now()
+			}))
 			if (tick < 5) return
 			clearInterval(timer)
-			await appendOutputLog(paths, { type: "run-end", sequence: 1, outcome: "succeeded", timestamp: Date.now() })
+			await appendHistoryLog(paths, { type: "run-end", sequence: 1, outcome: "succeeded", timestamp: Date.now() })
 			await mutateTaskMetadata(paths, metadata => ({
 				...metadata,
 				state: "idle",
@@ -238,48 +250,17 @@ async function showDefinitions(ctx: ExtensionContext, discovered: DefinitionDisc
 	}
 }
 
-async function showTasks(ctx: ExtensionContext, options: ManagementUiOptions): Promise<void> {
-	while (true) {
-		const tasks = await options.loadTasks()
-		const items: SelectItem[] = [
-			...tasks.tasks.map(task => ({
-				value: `task:${task.id}`,
-				label: `${task.id}  ${task.label}`,
-				description: `${task.state}${task.latestOutcome ? `/${task.latestOutcome}` : ""} · ${task.model}`
-			})),
-			...tasks.diagnostics.map((diagnostic, index) => ({
-				value: `diagnostic:${index}`,
-				label: `[error] ${diagnostic.id ?? diagnostic.code}`,
-				description: diagnostic.message
-			}))
-		]
-		if (items.length === 0) {
-			await showText(ctx, "Tasks", "No durable tasks for this session. Use Developer fixtures to create test data.")
-			return
-		}
-		const choice = await select(ctx, "Tasks", items)
-		if (!choice) return
-		if (choice.startsWith("task:")) {
-			const task = tasks.tasks.find(item => item.id === choice.slice("task:".length))
-			if (task) await manageTask(ctx, task.id, options)
-		} else {
-			const diagnostic = tasks.diagnostics[Number(choice.slice("diagnostic:".length))]
-			if (diagnostic) await showText(ctx, diagnostic.code, `${diagnostic.message}\n\n${diagnostic.path}`)
-		}
-	}
-}
-
 async function manageTask(ctx: ExtensionContext, id: string, options: ManagementUiOptions): Promise<void> {
 	while (true) {
 		const task = (await options.loadTasks()).tasks.find(candidate => candidate.id === id)
 		if (!task) return
 		const choice = await select(ctx, task.label, [
 			{ value: "details", label: "Details", description: `${task.state}${task.latestOutcome ? `/${task.latestOutcome}` : ""}` },
-			{ value: "output", label: "Live output", description: `${task.outputLines ?? 0} retained lines` },
+			{ value: "output", label: "Live output", description: "Latest assistant reply and run status" },
 			{ value: "followup", label: "Follow-up", description: "Queue durable work after the current run" },
 			{ value: "steer", label: "Steer", description: "Redirect running work; otherwise becomes a Follow-up" },
 			{ value: "stop", label: "Stop", description: "Stop work and preserve the session" },
-			{ value: "discard", label: "Discard", description: "Stop, hide, and retain files" }
+			{ value: "discard", label: "Discard", description: "Stop and archive this task and its descendants" }
 		])
 		if (!choice) return
 		if (choice === "details") await showText(ctx, task.label, renderTask(task))
@@ -294,7 +275,7 @@ async function manageTask(ctx: ExtensionContext, id: string, options: Management
 			if (await ctx.ui.confirm(`Stop ${task.id}?`, "The retained session remains reusable.")) {
 				await options.controlTask(task.id, "stop")
 			}
-		} else if (await ctx.ui.confirm(`Discard ${task.id}?`, "Files remain retained, but later model I/O is rejected.")) {
+		} else if (await ctx.ui.confirm(`Discard ${task.id}?`, "Files move to the archive. Later model I/O is rejected.")) {
 			await options.controlTask(task.id, "discard")
 			return
 		}
@@ -307,12 +288,20 @@ async function showLiveTaskOutput(ctx: ExtensionContext, task: TaskListRow): Pro
 	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
 		let closed = false
 		let loading = false
+		let refreshAgain = false
 		const refresh = async () => {
-			if (closed || loading) return
+			if (closed) return
+			refreshAgain = true
+			if (loading) return
 			loading = true
 			try {
-				output = await readRetainedOutput(paths)
-				tui.requestRender()
+				do {
+					refreshAgain = false
+					const latest = await readRetainedOutput(paths)
+					if (closed) return
+					output = latest
+					tui.requestRender()
+				} while (refreshAgain)
 			} finally {
 				loading = false
 			}
@@ -320,7 +309,12 @@ async function showLiveTaskOutput(ctx: ExtensionContext, task: TaskListRow): Pro
 		const unbind = bindTaskUpdateRoute(ctx.cwd, ctx.sessionManager.getSessionId(), refresh)
 		return {
 			render(width: number) {
-				const heading = theme.fg("accent", theme.bold(`${task.id} · ${output.state} · ${output.totalLines} lines`))
+				const heading = theme.fg(
+					"accent",
+					theme.bold(
+						`${task.id} · ${output.state}${output.latestOutcome ? `/${output.latestOutcome}` : ""}${output.streaming ? " · streaming" : ""}`
+					)
+				)
 				return new Text(`${heading}\n\n${output.text || "(no output)"}\n\n${theme.fg("dim", "Esc or Enter to go back")}`, 1, 0).render(
 					width
 				)
@@ -481,6 +475,7 @@ async function createFixtureTask(
 		},
 		state,
 		latestOutcome,
+		latestReply: { text: `${title(state)} fixture output.`, streaming: false },
 		lastRunSequence: 1,
 		activeRun: active
 			? {
@@ -501,18 +496,18 @@ async function createFixtureTask(
 		updatedAt: now
 	}
 	await writeTaskMetadata(paths, metadata)
-	await appendOutputLog(paths, { type: "run-start", sequence: 1, kind: "initial", timestamp: now })
-	await appendOutputLog(paths, {
+	await appendHistoryLog(paths, { type: "run-start", sequence: 1, kind: "initial", timestamp: now })
+	await appendHistoryLog(paths, {
 		type: "input",
 		delivery: "initial",
 		timestamp: now,
 		content: "Exercise the Lovely Agents development UI."
 	})
-	await appendOutputLog(paths, { type: "assistant", content: `${title(state)} fixture output.` })
-	if (!active) await appendOutputLog(paths, { type: "run-end", sequence: 1, outcome: latestOutcome ?? "succeeded", timestamp: now })
-	await appendActivityLog(paths, {
+	await appendHistoryLog(paths, { type: "assistant", content: `${title(state)} fixture output.` })
+	if (!active) await appendHistoryLog(paths, { type: "run-end", sequence: 1, outcome: latestOutcome ?? "succeeded", timestamp: now })
+	await appendHistoryLog(paths, {
+		type: "tool",
 		tool: "fixture",
-		timestamp: now,
 		arguments: JSON.stringify({ state }),
 		result: "Fixture task created",
 		isError: false
@@ -565,8 +560,7 @@ function renderTask(task: TaskListRow): string {
 		`Output lines: ${task.outputLines ?? "unknown"}`,
 		`Descendants: ${task.descendants.total}`,
 		"",
-		`Output: ${task.paths.output}`,
-		`Activity: ${task.paths.activity}`,
+		`History: ${task.paths.history}`,
 		`Session: ${task.paths.session}`
 	].join("\n")
 }

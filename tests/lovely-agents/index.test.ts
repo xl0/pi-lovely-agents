@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { SessionEntry } from "@earendil-works/pi-coding-agent"
-import { latestReplyWasInterrupted, renderActiveTaskRows, successfulTurnTuple } from "../../extensions/lovely-agents/index.js"
+import { latestReplyWasInterrupted, successfulTurnTuple } from "../../extensions/lovely-agents/index.js"
+import { renderActiveTaskRows } from "../../extensions/lovely-agents/task-panel.js"
 
 describe("/continue eligibility", () => {
 	test("accepts only the latest errored or aborted assistant reply", () => {

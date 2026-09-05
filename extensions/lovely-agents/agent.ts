@@ -14,14 +14,15 @@ import type { AgentsConfig } from "./config.js"
 import { resolveConfiguredModels } from "./config.js"
 import { type AgentReservation, getAgentCoordinator, type ModelTuple, type ResidentAgent, type ResidentInputResult } from "./coordinator.js"
 import { type AgentDefinition, discoverAgentDefinitions } from "./definitions.js"
-import { stopOwnedTaskTree, stopTask } from "./lifecycle.js"
+import { discardTask, stopOwnedTaskTree, stopTask } from "./lifecycle.js"
 import { appendTaskNotification, deliverTaskNotifications, prepareTaskNotification } from "./notifications.js"
 import { isProviderLimitError } from "./provider-limits.js"
 import { renderExpandableResult } from "./rendering.js"
 import {
 	acquireParentLease,
-	appendActivityLog,
-	appendOutputLog,
+	appendHistoryLog,
+	archivedTaskStoragePaths,
+	displayWorkspacePath,
 	ensureParentStorage,
 	initializeRetainedLogs,
 	MAX_AGENT_INPUT_BYTES,
@@ -37,6 +38,7 @@ import {
 	type TaskMetadata,
 	type TaskStoragePaths,
 	taskStoragePaths,
+	writeLatestReply,
 	writeTaskMetadata
 } from "./state.js"
 import { loadTaskList } from "./tools.js"
@@ -206,6 +208,7 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 					},
 					state: "queued",
 					latestOutcome: null,
+					latestReply: null,
 					lastRunSequence: 1,
 					activeRun: {
 						id: runId,
@@ -222,8 +225,8 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 					createdAt: acceptedAt,
 					updatedAt: acceptedAt
 				}
-				await appendOutputLog(paths, { type: "run-start", sequence: 1, kind: "initial", timestamp: acceptedAt })
-				await appendOutputLog(paths, { type: "input", delivery: "initial", timestamp: acceptedAt, content: params.prompt })
+				await appendHistoryLog(paths, { type: "run-start", sequence: 1, kind: "initial", timestamp: acceptedAt })
+				await appendHistoryLog(paths, { type: "input", delivery: "initial", timestamp: acceptedAt, content: params.prompt })
 				await writeTaskMetadata(paths, metadata)
 				accepted = true
 
@@ -296,8 +299,14 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 			description:
 				action === "stop"
 					? "Stop active or queued work for an owned Lovely Agent task while preserving its session."
-					: "Stop and durably discard an owned Lovely Agent task while retaining its files.",
+					: "Stop and permanently discard an owned Lovely Agent subtree, archiving its files. Unsupported metadata versions can also be archived.",
 			promptSnippet: action === "stop" ? "Stop work for a durable task" : "Discard a durable task",
+			promptGuidelines:
+				action === "discard"
+					? [
+							"After consuming an agent's results, use task_discard if no Follow-up is expected. Keep reusable specialists; do not discard agents whose results are still needed."
+						]
+					: [],
 			parameters: Type.Object(
 				{ id: Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" }) },
 				{ additionalProperties: false }
@@ -313,7 +322,7 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 							type: "text",
 							text:
 								action === "discard"
-									? `${details.id}: discarded (${details.state}; files retained)`
+									? `${details.id}: discarded (files archived at ${details.archiveDirectory})`
 									: `${details.id}: stop complete (${details.state}; outcome ${details.latestOutcome ?? "none"}; ${details.queuedFollowUps} queued)`
 						}
 					],
@@ -367,27 +376,27 @@ export async function sendTaskInput(
 export async function controlTaskLifecycle(ctx: ExtensionContext, id: string, action: "stop" | "discard") {
 	const lease = await acquireParentLease(ctx.cwd, ctx.sessionManager.getSessionId())
 	const paths = taskStoragePaths(lease.paths, id)
+	if (action === "discard") {
+		await discardTask(paths)
+		const archived = archivedTaskStoragePaths(paths)
+		return {
+			id,
+			action,
+			state: "archived",
+			latestOutcome: null,
+			discarded: true,
+			queuedFollowUps: 0,
+			archiveDirectory: displayWorkspacePath(ctx.cwd, archived.taskDirectory)
+		}
+	}
 	let loaded = await readTaskMetadata(paths)
 	if (loaded.status === "missing") throw new Error(`Unknown Task Reference: ${id}`)
 	if (loaded.status === "invalid") throw new Error(loaded.diagnostic.message)
-	if (action === "stop" && loaded.metadata.discardedAt !== null) throw new Error(`Task ${id} has been discarded`)
-	if (loaded.metadata.discardedAt === null) {
-		await stopTask(paths)
-		if (action === "discard") {
-			const discardedAt = Date.now()
-			await mutateTaskMetadata(paths, metadata => ({
-				...metadata,
-				discardedAt,
-				queuedFollowUps: [],
-				updatedAt: discardedAt
-			}))
-			// Fence input accepted between the initial stop and tombstone.
-			await stopTask(paths)
-		}
-		await stopOwnedTaskTree(ctx.cwd, loaded.metadata.childSessionId)
-		loaded = await readTaskMetadata(paths)
-		if (loaded.status !== "ok") throw new Error(`Could not read task ${id}`)
-	}
+	if (loaded.metadata.discardedAt !== null) throw new Error(`Task ${id} has been discarded`)
+	await stopTask(paths)
+	await stopOwnedTaskTree(ctx.cwd, loaded.metadata.childSessionId)
+	loaded = await readTaskMetadata(paths)
+	if (loaded.status !== "ok") throw new Error(`Could not read task ${id}`)
 	const metadata = loaded.metadata
 	return {
 		id: metadata.taskRef,
@@ -396,6 +405,7 @@ export async function controlTaskLifecycle(ctx: ExtensionContext, id: string, ac
 		latestOutcome: metadata.latestOutcome,
 		discarded: metadata.discardedAt !== null,
 		queuedFollowUps: metadata.queuedFollowUps.length,
+		archiveDirectory: undefined,
 		paths: retainedPaths(paths)
 	}
 }
@@ -417,6 +427,9 @@ class AgentRuntime implements ResidentAgent {
 	#unsubscribe: (() => void) | undefined
 	#eventWrites: Promise<void> = Promise.resolve()
 	#eventWriteFailed = false
+	#recordingRunId: string | undefined
+	#pendingReply: { runId: string; text: string; streaming: boolean } | undefined
+	#replyWriteQueued = false
 	#started = false
 	#stopRequested = false
 	#accepting = true
@@ -654,6 +667,7 @@ class AgentRuntime implements ResidentAgent {
 	}
 
 	private async executeRun(run: NonNullable<TaskMetadata["activeRun"]>): Promise<boolean> {
+		this.#recordingRunId = run.id
 		let outcome: NonNullable<TaskMetadata["latestOutcome"]> = "failed"
 		const recovering = run.state === "suspended"
 		this.#lastAssistantOutcome = undefined
@@ -681,13 +695,13 @@ class AgentRuntime implements ResidentAgent {
 					if (!won) return
 					this.#recoveryMode = undefined
 					if (run.kind === "followup" && !recovering) {
-						await appendOutputLog(this.#paths, {
+						await appendHistoryLog(this.#paths, {
 							type: "run-start",
 							sequence: run.sequence,
 							kind: "followup",
 							timestamp: startedAt
 						})
-						await appendOutputLog(this.#paths, {
+						await appendHistoryLog(this.#paths, {
 							type: "input",
 							delivery: "followup",
 							timestamp: startedAt,
@@ -820,7 +834,7 @@ class AgentRuntime implements ResidentAgent {
 				updatedAt: timestamp
 			}
 		})
-		if (won) await appendOutputLog(this.#paths, { type: "run-end", sequence: run.sequence, outcome, timestamp })
+		if (won) await appendHistoryLog(this.#paths, { type: "run-end", sequence: run.sequence, outcome, timestamp })
 		if (won && notification) await deliverTaskNotifications(this.#paths).catch(() => {})
 		if (run.id === this.#initialRunId) this.#initialCompletion.resolve(undefined)
 		return promoted.run
@@ -843,6 +857,34 @@ class AgentRuntime implements ResidentAgent {
 	}
 
 	private recordEvent(event: AgentSessionEvent): void {
+		if (
+			(event.type === "message_start" || event.type === "message_update" || event.type === "message_end") &&
+			event.message.role === "assistant" &&
+			(event.type !== "message_update" || event.assistantMessageEvent.type === "text_delta")
+		) {
+			const text = event.message.content
+				.filter(part => part.type === "text")
+				.map(part => part.text)
+				.join("")
+			if (this.#recordingRunId) {
+				this.#pendingReply = { runId: this.#recordingRunId, text, streaming: event.type !== "message_end" }
+				if (!this.#replyWriteQueued) {
+					this.#replyWriteQueued = true
+					this.queueEventWrite(async () => {
+						try {
+							// Coalesce token bursts instead of fsyncing every intermediate partial reply.
+							while (this.#pendingReply) {
+								const reply = this.#pendingReply
+								this.#pendingReply = undefined
+								await writeLatestReply(this.#paths, reply.runId, reply.text, reply.streaming)
+							}
+						} finally {
+							this.#replyWriteQueued = false
+						}
+					})
+				}
+			}
+		}
 		if (event.type === "tool_execution_start") {
 			this.#toolArguments.set(event.toolCallId, { name: event.toolName, arguments: renderUnknown(event.args) })
 			return
@@ -854,7 +896,7 @@ class AgentRuntime implements ResidentAgent {
 				.filter(part => part.type === "text")
 				.map(part => part.text)
 				.join("")
-			if (content) this.queueEventWrite(() => appendOutputLog(this.#paths, { type: "assistant", content }))
+			if (content) this.queueEventWrite(() => appendHistoryLog(this.#paths, { type: "assistant", content }))
 			return
 		}
 		if (event.type === "message_start" && event.message.role === "user" && this.#awaitingPrimaryInput) {
@@ -872,7 +914,7 @@ class AgentRuntime implements ResidentAgent {
 								.map(part => part.text)
 								.join("")
 				this.queueEventWrite(() =>
-					appendOutputLog(this.#paths, {
+					appendHistoryLog(this.#paths, {
 						type: "input",
 						delivery: "steer",
 						timestamp: Date.now(),
@@ -886,9 +928,9 @@ class AgentRuntime implements ResidentAgent {
 			const started = this.#toolArguments.get(event.toolCallId)
 			this.#toolArguments.delete(event.toolCallId)
 			this.queueEventWrite(() =>
-				appendActivityLog(this.#paths, {
+				appendHistoryLog(this.#paths, {
+					type: "tool",
 					tool: started?.name ?? event.toolName,
-					timestamp: Date.now(),
 					arguments: started?.arguments ?? "(unavailable)",
 					result: renderUnknown(event.result),
 					isError: event.isError

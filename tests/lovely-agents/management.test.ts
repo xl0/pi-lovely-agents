@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { readdir, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
 import {
 	clearFixtureTasks,
+	openManagementUi,
 	renderDefinition,
 	seedFixtureEdgeCases,
 	seedFixtureTasks,
@@ -18,6 +20,32 @@ import {
 	taskStoragePaths
 } from "../../extensions/lovely-agents/state.js"
 import { withTempWorkspace } from "./test-helpers.js"
+
+test("management Tasks hands off to the existing panel instead of opening another selector", async () => {
+	let selectors = 0
+	let focused = 0
+	const ctx = {
+		ui: {
+			custom: async () => {
+				selectors++
+				if (selectors > 1) throw new Error("Duplicate selector")
+				return "tasks"
+			}
+		}
+	} as unknown as ExtensionContext
+	await openManagementUi(ctx, {
+		discoverDefinitions: () => ({ definitions: [], diagnostics: [], projectAgentsDir: undefined }),
+		loadTasks: async () => ({ tasks: [], diagnostics: [], total: 0 }),
+		focusTasks: async () => {
+			focused++
+		},
+		openConfig: async () => {},
+		inputTask: async () => {},
+		controlTask: async () => {}
+	})
+	expect(selectors).toBe(1)
+	expect(focused).toBe(1)
+})
 
 describe("management fixtures", () => {
 	test("renders the Agent Definition body in its preview", () => {
@@ -73,7 +101,7 @@ describe("management fixtures", () => {
 			expect(showcase.status).toBe("ok")
 			if (showcase.status !== "ok") throw new Error("Showcase fixture is invalid")
 			expect(showcase.metadata.queuedFollowUps).toHaveLength(1)
-			expect((await stat(taskStoragePaths(parent, showcaseId).output)).size).toBeGreaterThan(50_000)
+			expect((await stat(taskStoragePaths(parent, showcaseId).history)).size).toBeGreaterThan(50_000)
 
 			const descendantParent = await ensureParentStorage(workspace.cwd, showcase.metadata.childSessionId)
 			const descendants = (await readdir(descendantParent.parentDirectory)).filter(name => /^a_[0-9a-f]{8}$/.test(name))
@@ -95,13 +123,12 @@ describe("management fixtures", () => {
 			const id = await seedLiveFixtureTask(workspace.cwd, "parent-session")
 			const parent = await ensureParentStorage(workspace.cwd, "parent-session")
 			const paths = taskStoragePaths(parent, id)
-			const nextOffset = (await countRetainedOutputLines(paths)) + 1
-			const update = await readRetainedOutput(paths, { offset: nextOffset, waitMs: 2_000 })
+			const update = await readRetainedOutput(paths, { waitMs: 2_000 })
 			expect(update.timedOut).toBe(false)
 			expect(update.text).toContain("Fixture update 1")
 			let completion = update
 			for (let attempt = 0; attempt < 6 && completion.state !== "idle"; attempt++) {
-				completion = await readRetainedOutput(paths, { offset: completion.nextOffset, waitMs: 1_000 })
+				completion = await readRetainedOutput(paths, { waitMs: 1_000 })
 			}
 			expect(completion.timedOut).toBe(false)
 			expect(completion.state).toBe("idle")

@@ -136,7 +136,7 @@ new task; existing direct children remain available through `task_list`.
 
 ```ts
 task_list({})
-task_output({ id: TaskRef, offset?: number, limit?: number, waitMs?: number })
+task_output({ id: TaskRef, waitMs?: number })
 task_input({ id: TaskRef, content: string, delivery?: "followup" | "steer" })
 task_stop({ id: TaskRef })
 task_discard({ id: TaskRef })
@@ -180,26 +180,19 @@ through the process-global registry.
 
 ### Reading output
 
-`task_output` reads `output.md` with the same conventions as Pi's `read` tool:
-`offset` is a 1-indexed line number and `limit` is a maximum line count. Output
-keeps complete lines from the head of the requested range and is capped at
-2,000 lines or 50 KiB, whichever comes first.
+`task_output` returns only the latest assistant reply from the latest run,
+partial while streaming. It excludes inputs, tool logs, and earlier replies.
+Starting a new run clears the prior answer, including while queued. Run
+status/outcome is independent of assistant-message completion.
 
-The result includes the returned line range, total current lines, next offset,
-current task state, queued Follow-up count, and paths to every retained log.
-Structured details retain all artifact paths; model-visible lists show one task
-directory and output reads show only the selected source.
-Truncated results use Pi's continuation messages:
+Snapshots are capped at 2,000 lines/50 KiB with UTF-8-safe truncation and a
+reference to `history.md` for full replies. There are no offsets or pages.
+Structured details include status, outcome, streaming, queued Follow-ups,
+truncation, and retained history/session paths.
 
-```text
-[Showing lines X-Y of Z. Use offset=N to continue.]
-[Showing lines X-Y of Z (50KB limit). Use offset=N to continue.]
-```
-
-`waitMs` waits until output size or state changes and caps at ten minutes. A
-caller can follow live output by passing the previous `nextOffset`. Idle or
-terminal work returns immediately. Normal file tools can inspect retained files
-directly.
+`waitMs` waits for a reply/status change and caps at ten minutes, even when
+text already exists. Idle or terminal work returns immediately. Normal file
+tools can inspect `history.md` directly.
 
 ## Runs and input
 
@@ -257,10 +250,16 @@ Stop and completion share one serialized transition:
 - if stop commits first, no redundant completion notification is sent
 - if completion commits first, stop is a no-op and its notification remains
 
-`task_discard` stops work and writes a durable hidden tombstone. It is
-idempotent, has no undelete operation, and never removes files. A discarded task
-rejects later model I/O except repeated discard; the discard result returns its
-retained paths.
+`task_discard` stops and archives the owned subtree, returning its archive
+directory. It is idempotent, has no undelete operation, and never deletes files.
+Current metadata is tombstoned before moving to fence concurrent input.
+Unsupported versions can be archived after validating ownership identities,
+without migrating metadata or executing their recipes. Later model I/O is
+rejected, and archived Task References cannot be reused.
+
+Prompt policy: discard tasks after consuming their results when no Follow-up
+is expected; retain reusable specialists. Idle sessions already unload, so no
+automatic idle deletion or retention timer is needed.
 
 ## Session state and residency
 
@@ -455,16 +454,19 @@ Lovely Config.
     <task-ref>/
       metadata.json
       session.jsonl
-      output.md
-      activity.md
+      history.md
+  archive/
+    <parent-session-uuid>/
+      <task-ref>/           # entire discarded task directory
 ```
 
 On first use, create this file without overwriting an existing one:
 
 ```gitignore
 *
-!.gitignore
 ```
+
+The generated ignore file ignores itself too; no runtime storage is committed.
 
 Create runtime directories and files owner-only (`0700`/`0600`) where the
 platform supports it. Definition files retain their existing permissions.
@@ -474,13 +476,14 @@ Descendant summaries follow child Pi session UUIDs into their own parent
 partitions.
 
 `metadata.json` is a versioned current snapshot containing identity, ownership,
-state/outcome, fixed model settings, run state, queued Follow-ups, tombstone,
+state/outcome, latest reply/streaming, fixed model settings, run state, queued Follow-ups, tombstone,
 and notifications. Per-task mutations are serialized. A durable mutation is
 acknowledged only after temp write, fsync, and atomic rename.
 
-Version 2 also retains the immutable Definition prompt/tool/context recipe,
-fixed scoped model identities, and scheduler acceptance order. Earlier
-versions are rejected rather than rebuilt from mutable Definitions.
+Version 3 retains the immutable Definition prompt/tool/context recipe, fixed
+scoped model identities, scheduler acceptance order, and the latest reply.
+Earlier versions are rejected for execution but support ownership-validated
+archival. Their retained files are not rewritten.
 
 One PID lease protects each open parent partition. Reload and same-process
 rebind reuse it. A second live OS process opening the same parent session gets an
@@ -494,12 +497,10 @@ metadata is left untouched and reported by path.
 
 `session.jsonl` is Pi's authoritative, unabridged transcript.
 
-`output.md` contains run boundaries/outcomes, delivered initial/Follow-up/Steer
-inputs, and assistant text. It excludes reasoning and tool activity.
-
-`activity.md` indexes tool calls. Each argument and result keeps at most a 2 KiB
-head/tail preview, exact omission counts, and any tool-provided full-output
-path.
+`history.md` contains run boundaries/outcomes, delivered initial/Follow-up/Steer
+inputs, assistant replies, and compact tool summaries. Tool arguments/results
+use bounded single-line UTF-8 previews. Reasoning and full tool payloads remain
+only in Pi's session file. There is no separate activity log.
 
 Model-visible paths are relative to `ctx.cwd` when inside the workspace. User
 definition paths use readable home-relative display. Files remain after stop,
@@ -520,8 +521,8 @@ A completion notification includes:
 - Task Reference and label
 - state and latest outcome
 - effective model and thinking level
-- up to 2 KiB of final output tail
-- retained output/activity/session paths
+- up to 2 KiB of the latest assistant reply, never echoed inputs or earlier replies
+- retained history/session paths
 - compact descendant summary
 
 Notification state is persisted before delivery. A live parent receives a
@@ -606,7 +607,7 @@ diagnostics.
 
 #### [x] 2.1 State schema and private storage
 
-Added strict v1 metadata, safe parent/task paths, atomically reserved Task
+Added strict versioned metadata, safe parent/task paths, atomically reserved Task
 References, owner-only storage, non-destructive `.gitignore` creation, and
 serialized fsynced snapshot replacement. Invalid and unsupported snapshots are
 reported without modification.
@@ -620,10 +621,9 @@ Simultaneous stale takeover is deliberately best-effort.
 
 #### [x] 2.3 Retained output
 
-Added private `output.md` and `activity.md` writers with stable run/tool
-boundaries and bounded UTF-8-safe activity previews. Added line counting,
-workspace-relative retained paths, 1-indexed whole-line reads under the
-2,000-line/50 KiB caps, continuation markers, and active-task long-polling.
+Private `history.md` records inputs/replies, outcomes, and compact UTF-8-safe
+tool summaries. The latest reply is a coalesced atomic metadata snapshot,
+read with size caps and optional reply/status waiting, without pagination.
 Pi remains the sole writer of authoritative `session.jsonl`.
 
 #### [x] 2.4 `task_list` and `task_output`
@@ -632,7 +632,7 @@ Added leased read-only tools over durable metadata. `task_list` provides stable
 state/recency ordering, the complete direct-task set, tombstone filtering,
 isolated diagnostics, output counts, retained paths, and recursive descendant
 summaries without nested references. `task_output` enforces direct ownership
-and exposes bounded retained ranges with continuation and long-poll metadata.
+and exposes bounded latest-reply snapshots with run/streaming status.
 
 #### [x] 2.5 Interactive management UI
 
@@ -716,9 +716,9 @@ and executes each as a separate prompt in the same Pi session.
 A Steer enters Pi's live steering queue only while the matching session is
 running. Completion, queued, suspended, idle, and interrupted races fall back
 to a Follow-up under the process-global task lane. Only observed Steer
-deliveries enter retained output; stop drops pending deliveries.
+deliveries enter retained history; stop drops pending deliveries.
 
-Cold Follow-ups reopen the same Pi UUID from an immutable v2 session recipe,
+Cold Follow-ups reopen the same Pi UUID from an immutable session recipe,
 independent of later Definition/config edits. Tests cover all source states,
 queue limits/positions, concurrent acceptance, sequential success/failure,
 literal and duplicate Steers, delivery omission, completion races, fixed cold
@@ -729,8 +729,7 @@ configuration, and queued counts.
 Added idempotent `task_stop` and `task_discard`: first-writer-wins settlement,
 Follow-up clearing, recursive descendant stop, permanent retained tombstones,
 and hidden/rejected post-discard model I/O. Task lists group by state with
-relative times, retained output is a flat tagged user/agent stream without
-per-line indentation, and tool activity headers expose concise arguments. Long
+relative times; retained history uses flat tags and compact tool summaries. Long
 tool results use bounded head/tail previews with full Ctrl+O expansion.
 
 ### [x] 5. Quota recovery and notifications
@@ -760,7 +759,7 @@ before exact-parent delivery as custom Steers. Deterministic task/run/type IDs
 are marked delivered only when the parent observes the custom message.
 Process-local in-flight suppression avoids live duplicates; startup transcript
 reconciliation marks observed IDs and resends only absent notices. Payloads
-include bounded output tails, retained paths, and descendant summaries while
+include bounded latest-reply previews, retained paths, and descendant summaries while
 excluding synchronous initial results and explicit stops.
 
 ### [ ] 6. Live controls and release readiness
@@ -769,7 +768,11 @@ excluding synchronous initial results and explicit stops.
 
 Compact active counts, below-editor rows, event-driven live output,
 Follow-up/Steer entry, stop/discard, and empty-editor Down task access without
-rebinding the main Pi session. Durable metadata/output writes publish through a
+rebinding the main Pi session. The below-editor panel doubles as the task
+navigator: Down focuses all tasks, arrows scroll, Enter opens actions, and
+Esc/Up at the top returns to editing. Typing passes through unchanged.
+The management menu focuses the same panel; selection survives live reordering.
+Durable metadata/output writes publish through a
 process-global update bus; no polling is used. Print/JSON behavior remains
 noninteractive and plain. Notifications share Ctrl+O expansion with tool
 results; Pi custom-message rendering does not provide tool-style click toggles.

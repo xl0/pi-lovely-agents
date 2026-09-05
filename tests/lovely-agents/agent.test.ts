@@ -14,6 +14,7 @@ import type { AgentsConfig } from "../../extensions/lovely-agents/config.js"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
 import { recoverOwnedTaskTree } from "../../extensions/lovely-agents/lifecycle.js"
 import {
+	archivedTaskStoragePaths,
 	mutateTaskMetadata,
 	parentStoragePaths,
 	readRetainedOutput,
@@ -57,9 +58,9 @@ describe("agent tool", () => {
 				queuedFollowUps: 0,
 				detached: false
 			})
-			expect(details.output.text).toContain("Completed review")
+			expect(details.output.text).toBe("Completed review")
 			expect(result.content[0]?.text).not.toContain("tasks:")
-			expect(await readFile(resolve(workspace.cwd, details.output.paths.activity), "utf8")).toContain("## read")
+			expect(await readFile(resolve(workspace.cwd, details.output.paths.history), "utf8")).toContain("<tool read ok>")
 			expect(fake.prompts).toEqual([{ text: "Inspect this change", expandPromptTemplates: false }])
 			while (!fake.disposed) await Bun.sleep(1)
 			expect(fake.disposed).toBe(true)
@@ -68,6 +69,61 @@ describe("agent tool", () => {
 			const metadata = await readTaskMetadata(paths)
 			expect(metadata.status === "ok" ? metadata.metadata.notifications : null).toEqual([])
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
+		})
+	})
+
+	test("retains streaming snapshots, replacing prior messages without exposing inputs or tools", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const finishReply = deferred<void>()
+			const finishRun = deferred<void>()
+			const fake = fakeChild(async child => {
+				child.assistant("Preamble")
+				child.tool("read", { path: "secret-input" }, { content: "tool result" })
+				child.assistant("", "message_start")
+				child.assistant("Draft", "message_update")
+				await finishReply.promise
+				child.assistant("Final answer")
+				await finishRun.promise
+			})
+			const tool = captureAgentTool(workspace.agentDir, fake.handle)
+			const result = await tool.execute(
+				"create",
+				{
+					definition: "reviewer",
+					label: "Streaming",
+					prompt: "Private input",
+					waitMs: 0
+				},
+				undefined,
+				taskContext(workspace.cwd)
+			)
+			const { id } = result.details as AgentCreationResult
+			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
+			try {
+				let partial = await readRetainedOutput(paths)
+				for (let attempt = 0; attempt < 20 && partial.text !== "Draft"; attempt++) {
+					partial = await readRetainedOutput(paths, { waitMs: 50 })
+				}
+				expect(partial).toMatchObject({ text: "Draft", streaming: true, state: "running", latestOutcome: null })
+				finishReply.resolve(undefined)
+				let final = await readRetainedOutput(paths)
+				for (let attempt = 0; attempt < 20 && final.streaming; attempt++) {
+					final = await readRetainedOutput(paths, { waitMs: 50 })
+				}
+				expect(final).toMatchObject({ text: "Final answer", streaming: false, state: "running", latestOutcome: null })
+			} finally {
+				finishReply.resolve(undefined)
+				finishRun.resolve(undefined)
+				await waitForOutcome(paths)
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
+			}
+			const history = await readFile(paths.history, "utf8")
+			expect(history).toContain("Private input")
+			expect(history).toContain("<agent>\nPreamble")
+			expect(history).toContain("<tool read ok>")
+			expect(history).toContain("<agent>\nFinal answer")
+			expect(history).not.toContain("Draft")
 		})
 	})
 
@@ -97,7 +153,7 @@ describe("agent tool", () => {
 
 			abort.abort()
 			finish.resolve(undefined)
-			expect(await waitForOutcome(paths, details.output.nextOffset)).toBe("succeeded")
+			expect(await waitForOutcome(paths)).toBe("succeeded")
 			expect(fake.prompts).toHaveLength(1)
 			const completed = await readTaskMetadata(paths)
 			const notifications = completed.status === "ok" ? completed.metadata.notifications : []
@@ -205,13 +261,13 @@ describe("agent tool", () => {
 				const recovery = await recoverOwnedTaskTree(workspace.cwd, "parent-session")
 				expect(recovery).toEqual({ resumed: 1, diagnostics: [] })
 				expect(await recoverOwnedTaskTree(workspace.cwd, "parent-session")).toEqual({ resumed: 0, diagnostics: [] })
-				expect(await waitForOutcome(paths, details.output.nextOffset)).toBe("succeeded")
+				expect(await waitForOutcome(paths)).toBe("succeeded")
 				expect(fake.prompts).toEqual([
 					{ text: "Inspect", expandPromptTemplates: false },
 					{ text: "Continue.", expandPromptTemplates: false },
 					{ text: "Continue.", expandPromptTemplates: false }
 				])
-				const output = await readFile(paths.output, "utf8")
+				const output = await readFile(paths.history, "utf8")
 				expect(output.match(/<run 1 initial>/g)).toHaveLength(1)
 				expect(output).not.toContain("<user>\nContinue.")
 			} finally {
@@ -265,7 +321,7 @@ describe("agent tool", () => {
 				expect(details).toMatchObject({ state: "queued", detached: true })
 				blocker.release()
 				const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
-				expect(await waitForOutcome(paths, details.output.nextOffset)).toBe("succeeded")
+				expect(await waitForOutcome(paths)).toBe("succeeded")
 			} finally {
 				blocker.release()
 				coordinator.setMaxConcurrency(2)
@@ -316,7 +372,7 @@ describe("task_input tool", () => {
 			const paths = acceptedPaths
 			await waitForRunCount(paths, 3)
 			expect(fake.prompts.map(prompt => prompt.text)).toEqual(["initial", "follow one", "follow two"])
-			const output = await readFile(paths.output, "utf8")
+			const output = await readFile(paths.history, "utf8")
 			expect(output).toContain("<run 2 followup>")
 			expect(output).toContain("<user>\nfollow one")
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
@@ -387,7 +443,7 @@ describe("task_input tool", () => {
 			finish.resolve(undefined)
 			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
 			await waitForRunCount(paths, 1)
-			expect(await readFile(paths.output, "utf8")).toContain("<steer>\nchange direction")
+			expect(await readFile(paths.history, "utf8")).toContain("<steer>\nchange direction")
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
 		})
 	})
@@ -417,7 +473,7 @@ describe("task_input tool", () => {
 			finish.resolve(undefined)
 			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
 			await waitForRunCount(paths, 1)
-			const output = await readFile(paths.output, "utf8")
+			const output = await readFile(paths.history, "utf8")
 			expect(output.match(/<steer>/g)).toHaveLength(2)
 			expect(output.match(/same steer/g)).toHaveLength(2)
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
@@ -618,7 +674,7 @@ describe("task_input tool", () => {
 			await tools.input.execute("steer", { id, content: "never delivered", delivery: "steer" }, undefined, taskContext(workspace.cwd))
 			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
 			await getAgentCoordinator().getResident(paths.taskDirectory)?.stop()
-			expect(await readFile(paths.output, "utf8")).not.toContain("### Steer")
+			expect(await readFile(paths.history, "utf8")).not.toContain("<steer>")
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
 		})
 	})
@@ -784,7 +840,8 @@ describe("task lifecycle controls", () => {
 			expect(again.details).toMatchObject({ id: details.id, discarded: true })
 			const listed = await loadTaskList(workspace.cwd, "parent-session")
 			expect(listed.details.tasks).toHaveLength(0)
-			expect(await readFile(resolve(workspace.cwd, details.output.paths.output), "utf8")).toContain("done")
+			const archived = archivedTaskStoragePaths(taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id))
+			expect(await readFile(archived.history, "utf8")).toContain("done")
 			await expect(tools.input.execute("input", { id: details.id, content: "later" }, undefined, ctx)).rejects.toThrow("has been discarded")
 			await expect(tools.stop.execute("stop", { id: details.id }, undefined, ctx)).rejects.toThrow("has been discarded")
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
@@ -869,7 +926,7 @@ type FakeChild = {
 	readonly streaming: boolean
 	steers: string[]
 	steerExpansions: Array<boolean | undefined>
-	assistant(text: string): void
+	assistant(text: string, phase?: "message_start" | "message_update" | "message_end"): void
 	assistantError(errorMessage: string): void
 	tool(name: string, args: unknown, resultValue: unknown): void
 }
@@ -896,10 +953,12 @@ function fakeChild(runPrompt: (child: FakeChild) => Promise<void>, deliverSteers
 		get disposed() {
 			return disposed
 		},
-		assistant(text: string) {
+		assistant(text: string, phase = "message_end") {
 			const message = { role: "assistant" as const, content: [{ type: "text" as const, text }], stopReason: "stop" as const }
-			messages.push(message)
-			for (const listener of listeners) listener({ type: "message_end", message } as unknown as AgentSessionEvent)
+			if (phase === "message_end") messages.push(message)
+			for (const listener of listeners) {
+				listener({ type: phase, message, assistantMessageEvent: { type: "text_delta" } } as unknown as AgentSessionEvent)
+			}
 		},
 		assistantError(errorMessage: string) {
 			const message = { role: "assistant" as const, content: [], stopReason: "error" as const, errorMessage }
@@ -986,13 +1045,11 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T | PromiseLike<T>
 	return { promise, resolve }
 }
 
-async function waitForOutcome(paths: ReturnType<typeof taskStoragePaths>, offset: number): Promise<string | null> {
-	let nextOffset = offset
+async function waitForOutcome(paths: ReturnType<typeof taskStoragePaths>): Promise<string | null> {
 	for (let attempt = 0; attempt < 6; attempt++) {
 		const loaded = await readTaskMetadata(paths)
 		if (loaded.status === "ok" && loaded.metadata.latestOutcome) return loaded.metadata.latestOutcome
-		const output = await readRetainedOutput(paths, { offset: nextOffset, waitMs: 2_000 })
-		nextOffset = output.nextOffset
+		await readRetainedOutput(paths, { waitMs: 2_000 })
 	}
 	return null
 }

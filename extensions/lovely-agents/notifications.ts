@@ -1,5 +1,5 @@
 import type { Dirent } from "node:fs"
-import { open, readdir } from "node:fs/promises"
+import { readdir } from "node:fs/promises"
 import { resolve } from "node:path"
 import { getAgentCoordinator } from "./coordinator.js"
 import {
@@ -16,7 +16,7 @@ import {
 import { loadTaskList } from "./tools.js"
 
 export const NOTIFICATION_CUSTOM_TYPE = "lovely-agents:notification"
-export const NOTIFICATION_OUTPUT_TAIL_BYTES = 2 * 1024
+export const NOTIFICATION_OUTPUT_PREVIEW_BYTES = 2 * 1024
 const NOTIFICATION_IN_FLIGHT_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/notification-in-flight/v1")
 
 type TaskNotification = TaskMetadata["notifications"][number]
@@ -45,10 +45,8 @@ export async function prepareTaskNotification(
 	type: NotificationType,
 	outcome?: TaskMetadata["latestOutcome"]
 ): Promise<TaskNotification> {
-	const [outputTail, taskList] = await Promise.all([
-		readOutputTail(paths.output, NOTIFICATION_OUTPUT_TAIL_BYTES).catch(() => undefined),
-		loadTaskList(paths.workspace, metadata.parentSessionId).catch(() => undefined)
-	])
+	const output = truncateUtf8(metadata.latestReply?.text ?? "", NOTIFICATION_OUTPUT_PREVIEW_BYTES)
+	const taskList = await loadTaskList(paths.workspace, metadata.parentSessionId).catch(() => undefined)
 	const descendants = taskList?.details.tasks.find(task => task.id === metadata.taskRef)?.descendants
 	const descendantText = descendants && descendants.total > 0 ? `\nDescendants: ${JSON.stringify(descendants)}` : ""
 	const pathsForDisplay = retainedPaths(paths)
@@ -58,8 +56,8 @@ export async function prepareTaskNotification(
 			`[Lovely Agent ${metadata.taskRef}:${run.id}:${type}]`,
 			`Task ${metadata.taskRef} ${JSON.stringify(metadata.label)} ${status}`,
 			`Model: ${metadata.model.provider}/${metadata.model.id}:${metadata.thinking}`,
-			outputTail === undefined ? "Output tail: (unavailable)" : outputTail ? `Output tail:\n${outputTail}` : "Output tail: (empty)",
-			`Files: output=${pathsForDisplay.output} activity=${pathsForDisplay.activity} session=${pathsForDisplay.session}${descendantText}`
+			output ? `Output:\n${output}` : "Output: (empty)",
+			`Files: history=${pathsForDisplay.history} session=${pathsForDisplay.session}${descendantText}`
 		].join("\n"),
 		MAX_NOTIFICATION_CONTENT_BYTES
 	)
@@ -200,21 +198,6 @@ async function directTaskPaths(cwd: string, parentSessionId: string): Promise<Ta
 		.filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && /^a_[0-9a-f]{8}$/.test(entry.name))
 		.map(entry => taskStoragePaths(parent, entry.name))
 		.sort((left, right) => left.taskDirectory.localeCompare(right.taskDirectory))
-}
-
-async function readOutputTail(path: string, maximumBytes: number): Promise<string> {
-	const file = await open(path, "r")
-	try {
-		const stats = await file.stat()
-		const length = Math.min(stats.size, maximumBytes + 3)
-		const bytes = Buffer.alloc(length)
-		const { bytesRead } = await file.read(bytes, 0, length, stats.size - length)
-		let start = Math.max(0, bytesRead - maximumBytes)
-		while (start < bytesRead && isUtf8Continuation(bytes[start])) start++
-		return bytes.subarray(start, bytesRead).toString("utf8").trim()
-	} finally {
-		await file.close()
-	}
 }
 
 function truncateUtf8(content: string, maximumBytes: number): string {

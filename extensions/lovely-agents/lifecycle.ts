@@ -3,9 +3,12 @@ import { getAgentCoordinator } from "./coordinator.js"
 import { appendTaskNotification, prepareTaskNotification } from "./notifications.js"
 import {
 	acquireParentLease,
-	appendOutputLog,
+	appendHistoryLog,
+	archivedTaskStoragePaths,
+	archiveTaskStorage,
 	mutateTaskMetadata,
 	parentStoragePaths,
+	readTaskIdentity,
 	readTaskMetadata,
 	releaseParentLease,
 	type TaskMetadata,
@@ -21,6 +24,55 @@ export type ReconciliationResult = {
 export type RecoveryResult = {
 	resumed: number
 	diagnostics: string[]
+}
+
+const DISCARD_OPERATIONS = Symbol.for("@xl0/pi-lovely-agents/discards/v1")
+
+/** Stops and archives an owned subtree, decoding only identity for unsupported versions. */
+export function discardTask(paths: TaskStoragePaths, visited = new Set([paths.parentSessionId])): Promise<void> {
+	const global = globalThis as typeof globalThis & { [DISCARD_OPERATIONS]?: Map<string, Promise<void>> }
+	global[DISCARD_OPERATIONS] ??= new Map()
+	const operations = global[DISCARD_OPERATIONS]
+	const existing = operations.get(paths.taskDirectory)
+	if (existing) return existing
+	const pending = (async () => {
+		const identity = await readTaskIdentity(paths)
+		if (!identity) {
+			if (await readTaskIdentity(archivedTaskStoragePaths(paths))) return
+			throw new Error(`Unknown Task Reference: ${paths.taskRef}`)
+		}
+		if (visited.has(identity.childSessionId)) throw new Error("Cyclic task ownership")
+		const descendants = new Set([...visited, identity.childSessionId])
+		const loaded = await readTaskMetadata(paths)
+		if (loaded.status === "ok") {
+			await stopTask(paths)
+			await mutateTaskMetadata(paths, metadata => ({
+				...metadata,
+				discardedAt: metadata.discardedAt ?? Date.now(),
+				queuedFollowUps: [],
+				updatedAt: Date.now()
+			}))
+			// Fence input that raced the first stop before the tombstone committed.
+			await stopTask(paths)
+		} else if (loaded.status === "invalid" && loaded.diagnostic.code === "unsupported-version") {
+			await getAgentCoordinator().getResident(paths.taskDirectory)?.stop()
+		} else {
+			throw new Error(loaded.status === "invalid" ? loaded.diagnostic.message : `Missing metadata: ${paths.metadata}`)
+		}
+		const lease = await acquireParentLease(paths.workspace, identity.childSessionId)
+		try {
+			for (const child of await directTaskPaths(paths.workspace, identity.childSessionId)) {
+				await discardTask(child, descendants)
+			}
+		} finally {
+			await releaseParentLease(lease)
+		}
+		await archiveTaskStorage(paths)
+	})().finally(() => {
+		if (operations.get(paths.taskDirectory) === pending) operations.delete(paths.taskDirectory)
+	})
+	operations.set(paths.taskDirectory, pending)
+	return pending
 }
 
 /** Marks stale direct work interrupted after a non-reload parent session start. */
@@ -67,7 +119,7 @@ export async function reconcileParentTasks(cwd: string, parentSessionId: string)
 			}
 		})
 		if (!settled.run || changed.latestOutcome !== "interrupted") continue
-		await appendOutputLog(paths, {
+		await appendHistoryLog(paths, {
 			type: "run-end",
 			sequence: settled.run.sequence,
 			outcome: "interrupted",
@@ -158,7 +210,7 @@ async function settleStopped(paths: TaskStoragePaths): Promise<void> {
 		return { ...metadata, state: "idle", latestOutcome: "stopped", activeRun: null, queuedFollowUps: [], updatedAt }
 	})
 	if (settled.run) {
-		await appendOutputLog(paths, {
+		await appendHistoryLog(paths, {
 			type: "run-end",
 			sequence: settled.run.sequence,
 			outcome: "stopped",
