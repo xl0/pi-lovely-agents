@@ -1,10 +1,53 @@
 import { describe, expect, test } from "bun:test"
-import { createAgentCoordinator, getAgentCoordinator, type ModelTuple } from "../../extensions/lovely-agents/coordinator.js"
+import {
+	createAgentCoordinator,
+	getAgentCoordinator,
+	getBashCoordinator,
+	type ModelTuple
+} from "../../extensions/lovely-agents/coordinator.js"
 
 const alpha: ModelTuple = { provider: "provider", model: "alpha" }
 const beta: ModelTuple = { provider: "provider", model: "beta" }
 
 describe("process-global Agent coordinator", () => {
+	test("Bash retains an independent FIFO pool unaffected by Agent capacity or gates", async () => {
+		const agents = getAgentCoordinator()
+		const bash = getBashCoordinator()
+		expect(getBashCoordinator()).toBe(bash)
+		expect(bash).not.toBe(agents)
+		const oldAgentLimit = agents.maxConcurrency
+		const oldBashLimit = bash.maxConcurrency
+		const tuple = { provider: "bash", model: "process" }
+		agents.setMaxConcurrency(1)
+		bash.setMaxConcurrency(1)
+		const agentPermit = await agents.acquire({ tuple })
+		agents.closeTuple(tuple)
+		const bashPermit = await bash.acquire({ tuple })
+		try {
+			expect(agents.activeCount).toBe(1)
+			expect(bash.activeCount).toBe(1)
+			const order: number[] = []
+			const second = bash.run({ tuple }, async () => {
+				order.push(2)
+			})
+			const third = bash.run({ tuple }, async () => {
+				order.push(3)
+			})
+			expect(bash.queuedCount).toBe(2)
+			expect(agents.queuedCount).toBe(0)
+			bashPermit.release()
+			await Promise.all([second, third])
+			expect(order).toEqual([2, 3])
+			expect(agents.activeCount).toBe(1)
+		} finally {
+			agentPermit.release()
+			bashPermit.release()
+			agents.openTuple(tuple)
+			agents.setMaxConcurrency(oldAgentLimit)
+			bash.setMaxConcurrency(oldBashLimit)
+		}
+	})
+
 	test("reuses one versioned coordinator across extension runtimes", () => {
 		const first = getAgentCoordinator()
 		const second = getAgentCoordinator()

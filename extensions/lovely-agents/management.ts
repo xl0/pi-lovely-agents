@@ -38,7 +38,7 @@ export type ManagementUiOptions = {
 	focusTasks: () => Promise<void>
 	openConfig: () => Promise<void>
 	/** False means the foreground input was cancelled and must not be reported accepted. */
-	inputTask: (id: string, content: string, delivery: "followup" | "steer") => Promise<undefined | false>
+	inputTask: (id: string, content: string, delivery: "followup" | "steer" | "stdin", eof?: boolean) => Promise<undefined | false>
 	controlTask: (id: string, action: "stop" | "discard") => Promise<void>
 }
 
@@ -137,7 +137,7 @@ export async function seedFixtureEdgeCases(cwd: string, parentSessionId: string)
 	}))
 	await appendHistoryLog(showcase, { type: "assistant", content: `Large UTF-8 line: ${"🦋".repeat(20_000)}` })
 	const loaded = await readTaskMetadata(showcase)
-	if (loaded.status !== "ok") throw new Error(`Could not read fixture ${showcase.taskRef}`)
+	if (loaded.status !== "ok" || loaded.metadata.kind !== "agent") throw new Error(`Could not read fixture ${showcase.taskRef}`)
 	await createFixtureTask(cwd, loaded.metadata.childSessionId, parentSessionId, "[fixture] Nested running child", "running", null)
 
 	const discarded = await createFixtureTask(cwd, parentSessionId, parentSessionId, "[fixture] Discarded", "idle", "stopped")
@@ -257,27 +257,53 @@ async function manageTask(ctx: ExtensionContext, id: string, options: Management
 		if (!task) return
 		const choice = await select(ctx, task.label, [
 			{ value: "details", label: "Details", description: `${task.state}${task.latestOutcome ? `/${task.latestOutcome}` : ""}` },
-			{ value: "output", label: "Live output", description: "Latest assistant reply and run status" },
-			{ value: "history", label: "Inputs / history", description: "Current and queued inputs, past runs, and delivered Steers" },
-			{ value: "prompt", label: "System prompt", description: "Captured Pi system prompt" },
-			{ value: "followup", label: "Follow-up", description: "Run more work in this retained session" },
-			{ value: "steer", label: "Steer", description: "Redirect running work; otherwise becomes a Follow-up" },
-			{ value: "stop", label: "Stop", description: "Stop work and preserve the session" },
+			{
+				value: "output",
+				label: "Live output",
+				description: task.kind === "bash" ? "Command output tail and exit status" : "Latest assistant reply and run status"
+			},
+			{
+				value: "history",
+				label: "Inputs / history",
+				description: task.kind === "bash" ? "Command, stdin, and outcome" : "Current and queued inputs, past runs, and delivered Steers"
+			},
+			...(task.kind === "bash"
+				? task.state === "running"
+					? [
+							{ value: "stdin", label: "Write stdin", description: "Send literal input; include a newline if the command expects one" },
+							{ value: "eof", label: "Close stdin", description: "Send EOF; stdin cannot be reopened" }
+						]
+					: []
+				: [
+						{ value: "prompt", label: "System prompt", description: "Captured Pi system prompt" },
+						{ value: "followup", label: "Follow-up", description: "Run more work in this retained session" },
+						{ value: "steer", label: "Steer", description: "Redirect running work; otherwise becomes a Follow-up" }
+					]),
+			{ value: "stop", label: "Stop", description: "Stop work and preserve retained files" },
 			{ value: "discard", label: "Discard", description: "Stop and archive this task and its descendants" }
 		])
 		if (!choice) return
 		if (choice === "details") await showText(ctx, task.label, renderTask(task))
 		else if (choice === "output") await showLiveTaskOutput(ctx, task)
 		else if (choice === "history" || choice === "prompt") await showTaskContext(ctx, task, choice)
-		else if (choice === "followup" || choice === "steer") {
+		else if (choice === "followup" || choice === "steer" || choice === "stdin") {
 			const content = await ctx.ui.editor(`${title(choice)} ${task.id}`)
-			if (content?.trim()) {
+			if (content !== undefined && (choice === "stdin" ? content.length > 0 : !!content.trim())) {
 				if ((await options.inputTask(task.id, content, choice)) !== false) {
 					ctx.ui.notify(`${title(choice)} accepted for ${task.id}`, "info")
 				}
 			}
+		} else if (choice === "eof") {
+			if (await ctx.ui.confirm(`Close stdin for ${task.id}?`, "This cannot be undone.")) {
+				if ((await options.inputTask(task.id, "", "stdin", true)) !== false) ctx.ui.notify(`Stdin closed for ${task.id}`, "info")
+			}
 		} else if (choice === "stop") {
-			if (await ctx.ui.confirm(`Stop ${task.id}?`, "The retained session remains reusable.")) {
+			if (
+				await ctx.ui.confirm(
+					`Stop ${task.id}?`,
+					task.kind === "bash" ? "The command will not restart. Output remains available." : "The retained session remains reusable."
+				)
+			) {
 				await options.controlTask(task.id, "stop")
 			}
 		} else if (await ctx.ui.confirm(`Discard ${task.id}?`, "Files move to the archive. Later model I/O is rejected.")) {
@@ -294,6 +320,7 @@ async function showTaskContext(ctx: ExtensionContext, task: TaskListRow, view: "
 	const metadata = loaded.metadata
 	if (metadata.discardedAt !== null) throw new Error(`Task ${task.id} has been discarded`)
 	if (view === "prompt") {
+		if (metadata.kind !== "agent") throw new Error("Bash tasks do not have a system prompt")
 		const captured = metadata.effectiveSystemPrompt
 		if (captured === undefined) {
 			ctx.ui.notify("No system prompt captured for this run.", "info")
@@ -615,17 +642,26 @@ function renderTask(task: TaskListRow): string {
 		`Task: ${task.id}`,
 		`State: ${task.state}`,
 		`Outcome: ${task.latestOutcome ?? "none"}`,
-		`Definition: ${task.definition}`,
-		`Model: ${task.model}`,
-		`Thinking: ${task.thinking}`,
-		`Queued Follow-ups: ${task.queuedFollowUps}`,
+		...(task.kind === "bash"
+			? [
+					`Command: ${task.command}`,
+					`Working directory: ${task.cwd}`,
+					`Exit code: ${task.exitCode ?? "none"}`,
+					`Signal: ${task.signal ?? "none"}`
+				]
+			: [
+					`Definition: ${task.definition}`,
+					`Model: ${task.model}`,
+					`Thinking: ${task.thinking}`,
+					`Queued Follow-ups: ${task.queuedFollowUps}`
+				]),
 		`Output lines: ${task.outputLines ?? "unknown"}`,
 		...(task.queueReason ? [`Waiting: ${task.queueReason}`] : []),
 		...(task.lastActivity ? [`Last activity: ${task.lastActivity.action} (${relativeTime(task.lastActivity.at, Date.now())})`] : []),
-		`Descendants: ${task.descendants.total}`,
+		...(task.kind === "agent" ? [`Descendants: ${task.descendants.total}`] : []),
 		"",
 		`History: ${task.paths.history}`,
-		`Session: ${task.paths.session}`
+		task.kind === "bash" ? `Output: ${task.paths.output}` : `Session: ${task.paths.session}`
 	].join("\n")
 }
 

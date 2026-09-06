@@ -9,6 +9,7 @@ import {
 	parentStoragePaths,
 	readTaskMetadata,
 	retainedPaths,
+	TASK_REFERENCE_PATTERN,
 	type TaskMetadata,
 	type TaskStoragePaths,
 	taskStoragePaths
@@ -53,11 +54,13 @@ export async function prepareTaskNotification(
 	const status = type === "suspension" ? "suspended by a provider limit" : type === "interruption" ? "interrupted" : `completed: ${outcome}`
 	const content = truncateUtf8(
 		[
-			`[Lovely Agent ${metadata.taskRef}:${run.id}:${type}]`,
+			`[Lovely ${metadata.kind === "bash" ? "Bash" : "Agent"} ${metadata.taskRef}:${run.id}:${type}]`,
 			`Task ${metadata.taskRef} ${JSON.stringify(metadata.label)} ${status}`,
-			`Model: ${metadata.model.provider}/${metadata.model.id}:${metadata.thinking}`,
+			metadata.kind === "bash"
+				? `Command: ${truncateUtf8(metadata.command, 1024)}\nExit: ${metadata.exitCode ?? "unknown"}${metadata.signal ? ` signal=${metadata.signal}` : ""}`
+				: `Model: ${metadata.model.provider}/${metadata.model.id}:${metadata.thinking}`,
 			output ? `Output:\n${output}` : "Output: (empty)",
-			`Files: history=${pathsForDisplay.history} session=${pathsForDisplay.session}${descendantText}`
+			`Files: history=${pathsForDisplay.history} ${metadata.kind === "bash" ? `output=${pathsForDisplay.output}` : `session=${pathsForDisplay.session}`}${descendantText}`
 		].join("\n"),
 		MAX_NOTIFICATION_CONTENT_BYTES
 	)
@@ -195,7 +198,7 @@ async function directTaskPaths(cwd: string, parentSessionId: string): Promise<Ta
 		throw error
 	}
 	return entries
-		.filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && /^a_[0-9a-f]{8}$/.test(entry.name))
+		.filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && TASK_REFERENCE_PATTERN.test(entry.name))
 		.map(entry => taskStoragePaths(parent, entry.name))
 		.sort((left, right) => left.taskDirectory.localeCompare(right.taskDirectory))
 }

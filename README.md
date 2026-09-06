@@ -3,7 +3,7 @@
 Agent orchestration for [Pi](https://github.com/earendil-works/pi).
 
 Durable agent creation/execution, Follow-up and Steer control, retained task
-inspection, stop/discard, quota recovery, notifications, configuration, and the
+inspection, Background Bash, stop/discard, quota recovery, notifications, configuration, and the
 management UI are available.
 
 ## Commands
@@ -42,6 +42,7 @@ alias edits; unavailable aliases fail explicitly rather than choosing a substitu
 - `agent_roster` — list effective Agent Definitions, model choices, diagnostics,
   and delegation depth
 - `agent` — create a durable Agent Session and start its initial run
+- `bash_bg` — start a managed background Bash command (`b_` task)
 - `task_list` — list every durable direct task owned by this Pi session
 - `task_output({ id, waitMs? })` — latest assistant reply and run/streaming status;
   no inputs, older replies, or pagination
@@ -50,21 +51,47 @@ alias edits; unavailable aliases fail explicitly rather than choosing a substitu
 
 ## Capabilities
 
-**Configuration → Capabilities** defaults to none: all new runs stay in the
-foreground. Creation waits for completion; Follow-ups require an idle task and
+**Background agents** and **Background Bash** are independent on/off switches,
+both on by default. With Background agents off, agent creation waits for
+completion; Follow-ups require an idle task and
 wait for their own result. Cancellation stops the work, including descendants.
 Foreground provider-limit failures do not restart automatically. UI inputs
 show a cancellable progress dialog.
 
-Enable `backgroundAgents` for timed detachment (`agent.waitMs`) and queued,
+`backgroundAgents` enables timed detachment (`agent.waitMs`) and queued,
 asynchronous Follow-ups. Existing accepted runs keep their execution policy
 when settings change.
 
-`backgroundBash` is a reserved setting, explicitly marked unavailable until
-implemented. Enabling it does not expose nonexistent tools.
+`backgroundBash` exposes `bash_bg`; normal Pi `bash` stays unchanged.
 Creation tools follow delegation permission/depth. Task controls remain visible
 for existing owned work, even when creation is disabled; Definition allowlists
 still apply. Tool schemas/descriptions update with the settings.
+
+## Background Bash
+
+```ts
+bash_bg({ label: "Build", command: "bun run build" })
+bash_bg({ label: "Input pipe", command: "cat", cwd: "." })
+task_input({ id: "b_12345678", content: "hello\n" })
+task_input({ id: "b_12345678", content: "", eof: true })
+```
+
+`bash_bg` returns immediately by default. Optional `waitMs` waits up to ten
+minutes before detaching the same command. Before detachment, cancellation stops
+the task; afterward use `task_stop` or `task_discard`.
+`maxBashConcurrency` defaults to 4, separate from agent permits and provider gates.
+Stdin is literal: no automatic newline, Follow-up, or Steer. EOF is irreversible.
+
+`task_output` returns a UTF-8-safe tail capped at 2,000 lines/50 KiB, with an
+explicit truncation flag. Full stdout/stderr is retained in `output.log`;
+command, delivered stdin/EOF, and outcome are recorded in `history.md`.
+Completed commands cannot restart or receive more input. Detached completion
+uses the same durable notifications as agents.
+
+POSIX only; uses `bash -c` and process-group termination. Reload preserves live
+commands; semantic parent shutdown stops them. Restart marks stale work
+interrupted, never reattaches or kills a saved PID. SIGKILL/power loss and
+commands that deliberately escape their process group require OS supervision.
 
 ## Inspection
 

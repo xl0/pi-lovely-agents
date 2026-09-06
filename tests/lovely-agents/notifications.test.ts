@@ -23,6 +23,52 @@ import {
 import { withTempWorkspace } from "./test-helpers.js"
 
 describe("durable notifications", () => {
+	test("Bash notices report command and exit, retain output links, and reconcile through the shared route", async () => {
+		await withTempWorkspace(async workspace => {
+			const { paths, metadata } = await createTask(workspace.cwd, "parent", "b_12345678")
+			if (metadata.kind !== "bash" || !metadata.activeRun) throw new Error("Expected Bash")
+			metadata.exitCode = 7
+			metadata.latestReply = { text: `Last shell output\n${"🙂".repeat(2_000)}`, streaming: false }
+			const notice = await prepareTaskNotification(paths, metadata, metadata.activeRun, "completion", "failed")
+			expect(notice.content).toContain("Command: printf hello")
+			expect(notice.content).toContain("Exit: 7")
+			expect(notice.content).toContain("Last shell output")
+			expect(notice.content).toContain("output.log")
+			expect(notice.content).not.toContain("Model:")
+			expect(notice.content).not.toContain("session.jsonl")
+			expect(notice.content).not.toContain("�")
+			expect(Buffer.byteLength(notice.content)).toBeLessThanOrEqual(8 * 1024)
+			await writeTaskMetadata(paths, {
+				...metadata,
+				state: "idle",
+				activeRun: null,
+				latestOutcome: "failed",
+				notifications: [notice]
+			})
+			const notices: string[] = []
+			const unbind = getAgentCoordinator().bindNotificationRoute(notificationRouteKey(workspace.cwd, "parent"), notice => {
+				notices.push(notice.id)
+			})
+			try {
+				expect(await reconcileParentNotifications(workspace.cwd, "parent", [])).toEqual({ delivered: 0, sent: 1, diagnostics: [] })
+				expect(notices).toEqual([notice.id])
+				expect(
+					await reconcileParentNotifications(workspace.cwd, "parent", [
+						{
+							type: "custom_message",
+							customType: NOTIFICATION_CUSTOM_TYPE,
+							details: { notificationId: notice.id }
+						}
+					])
+				).toEqual({ delivered: 1, sent: 0, diagnostics: [] })
+			} finally {
+				unbind()
+				clearNotificationInFlight(workspace.cwd, "parent")
+				await releaseParentLeaseFor(workspace.cwd, "parent")
+			}
+		})
+	})
+
 	test("persists before send, suppresses live duplicates, and reconciles transcript evidence", async () => {
 		await withTempWorkspace(async workspace => {
 			const { paths, metadata } = await createTask(workspace.cwd)
@@ -102,22 +148,32 @@ async function createTask(cwd: string, parentSessionId = "parent", taskRef = "a_
 	await initializeRetainedLogs(paths)
 	const metadata: TaskMetadata = {
 		version: TASK_METADATA_VERSION,
-		kind: "agent",
+		...(taskRef.startsWith("b_")
+			? {
+					kind: "bash" as const,
+					command: "printf hello",
+					cwd,
+					exitCode: null,
+					signal: null
+				}
+			: {
+					kind: "agent" as const,
+					childSessionId,
+					definitionName: "reviewer",
+					model: { provider: "provider", id: "model" },
+					thinking: "medium" as const,
+					depth: 1,
+					allowAgents: false,
+					sessionConfig: {
+						systemPrompt: "Review.",
+						tools: null,
+						excludeAgentsMd: false,
+						scopedModels: [{ provider: "provider", id: "model" }]
+					}
+				}),
 		taskRef: paths.taskRef,
 		parentSessionId,
-		childSessionId,
-		definitionName: "reviewer",
 		label: "Review",
-		model: { provider: "provider", id: "model" },
-		thinking: "medium",
-		depth: 1,
-		allowAgents: false,
-		sessionConfig: {
-			systemPrompt: "Review.",
-			tools: null,
-			excludeAgentsMd: false,
-			scopedModels: [{ provider: "provider", id: "model" }]
-		},
 		state: "running",
 		latestOutcome: null,
 		lastRunSequence: 1,

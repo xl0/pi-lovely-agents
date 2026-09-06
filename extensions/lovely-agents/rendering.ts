@@ -21,13 +21,16 @@ export const renderAgentNotification: MessageRenderer = (message, { expanded, ou
 					.map(part => part.text)
 					.join("\n")
 	const lines = content.split("\n")
-	const summary = (lines[0]?.startsWith("[Lovely Agent ") ? lines[1] : lines[0]) || "Notification"
+	const summary = (/^\[Lovely (Agent|Bash) /.test(lines[0] ?? "") ? lines[1] : lines[0]) || "Notification"
 	return {
 		render(width) {
 			const box = new Box(outputPad, 0, text => theme.bg("customMessageBg", text))
 			box.addChild({
 				render: available => [
-					truncateToWidth(theme.fg("customMessageLabel", theme.bold(`${expanded ? "▾" : "▸"} Lovely Agents · ${summary}`)), available)
+					truncateToWidth(
+						theme.fg("customMessageLabel", theme.bold(`${expanded ? "▾" : "▸"} Lovely Agents · ${summary}`)),
+						available
+					).replaceAll("\x1b[0m", "\x1b[22;39m")
 				],
 				invalidate() {}
 			})

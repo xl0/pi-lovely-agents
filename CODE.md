@@ -5,6 +5,7 @@
 Pi package for durable in-process agent orchestration. Definition discovery,
 configuration, scheduled execution, retained inspection, Follow-up/Steer and
 stop/discard controls, restart recovery, and the management UI are implemented.
+Background Bash shares the durable task controls without creating a Pi session.
 
 ## Layout
 
@@ -18,6 +19,8 @@ stop/discard controls, restart recovery, and the management UI are implemented.
   Definition-owned prompts, and persistent Pi SDK sessions
 - `extensions/lovely-agents/agent.ts`: agent creation, execution, input, stop,
   and discard tools
+- `extensions/lovely-agents/bash.ts`: managed shell processes, stdin, bounded
+  output tails, process-group cleanup, and completion notification settlement
 - `extensions/lovely-agents/lifecycle.ts`: graceful recursive shutdown and
   restart reconciliation
 - `extensions/lovely-agents/notifications.ts`: bounded durable notification
@@ -48,9 +51,9 @@ never reroute. The roster describes enabled presets; the parent chooses freely.
 Numeric runtime limits are also checked as integers because Lovely Config's ranged
 number fields accept fractions.
 
-`capabilities` defaults to `[]`: foreground-only agents. `backgroundAgents`
-enables timed detachment and asynchronous Follow-ups; reserved `backgroundBash`
-is explicitly unavailable until implemented. Context forks are deferred until
+`backgroundAgents` and `backgroundBash` are independent boolean switches, both
+true by default. The former enables timed detachment and asynchronous
+Follow-ups; the latter exposes `bash_bg`. Context forks are deferred until
 the required Pi SDK changes land; no fork setting or tool is exposed.
 Tool schemas refresh with config: no foreground `waitMs`, and `allowAgents`
 requires remaining descendant depth. Creation tools follow parent permission,
@@ -68,14 +71,17 @@ alias names. Aliases resolve at creation, not during Definition discovery.
 compact YAML-like model output. Full structured details remain available to Pi.
 
 Task state is stored under `.pi/lovely-agents/<parent-session-id>/<task-ref>/`.
-Task directories are reserved atomically with collision-checked `a_` references.
+Task directories are reserved atomically with collision-checked `a_`/`b_` references.
 Metadata is strictly validated against its path and v3 schema before use.
 Writes are serialized per task and use a private same-directory temporary file,
 file fsync, rename, and directory fsync. Malformed and unsupported snapshots
 are never migrated implicitly. The generated `.gitignore` ignores all storage
 contents, including itself.
 
-Metadata v3 retains the immutable child-session recipe: Definition prompt,
+Metadata v3 is a discriminated union: `a_` agents retain their original schema;
+`b_` Bash tasks carry command/cwd and exit code/signal, without invented model,
+Definition, or child-session identities. Agent metadata retains the immutable
+child-session recipe: Definition prompt,
 explicit-vs-omitted tool policy, context exclusion, and scoped model identities.
 It also retains scheduler acceptance order and the latest assistant reply.
 Reply snapshots share the metadata mutation lane, so status and text are read
@@ -103,10 +109,10 @@ absent is reclaimed. Simultaneous stale reclamation is best-effort; fresh and
 live-owner acquisition remains atomic. Release verifies the ownership token
 before unlinking.
 
-`history.md` retains runs as a flat tagged input/assistant event stream, with
+Agent `history.md` retains runs as a flat tagged input/assistant event stream, with
 compact tool argument/result summaries and outcomes. No reasoning or full tool
 payloads are copied; Pi's `session.jsonl` remains the authoritative transcript.
-There is no separate output or activity log. Retained paths are
+Agents have no separate output or activity log; Bash retains `output.log`. Paths are
 workspace-relative when possible.
 
 `task_list` scans only the exact parent-session partition under its lease,
@@ -160,6 +166,29 @@ capacity; atomic promotion activates the next reservation before the current
 permit is released.
 Coordinator implementation changes require a process restart; reload retains
 the existing coordinator object.
+
+`getBashCoordinator()` reuses the semaphore implementation through a separate
+process-global registry. Its fixed local scheduling tuple has no provider gate;
+`maxBashConcurrency` defaults to 4 and never consumes agent permits.
+Both task kinds bind residents to the main coordinator for common lifecycle
+control. Lists expose both capacities; individual snapshots report their own.
+
+`bash_bg` invokes POSIX `bash -c`, in the requested cwd with inherited environment.
+Admission is durable before spawning. It defaults to immediate detachment;
+optional `waitMs` lends a managed parent permit while waiting. Pre-detach
+cancellation owns the command; later turn cancellation does not.
+Stdout/stderr backpressure through a single open, no-follow `output.log` handle.
+Per-stream UTF-8 decoders feed a tail bounded to 2,000 lines/50 KiB; coalesced
+progress persists a sticky truncation flag. Full output is never recopied into
+metadata. Stdin/EOF writes serialize, respect backpressure, and log successful
+delivery without normalizing bytes. Cancelling a stdin wait cannot undo a
+submitted write; settlement drains its logging lane.
+Terminal settlement records exit status and detached notifications. Stop and
+archival wait for process/pipes/log cleanup; actual I/O failures are retained
+when metadata remains writable. Cleanup failures stay reachable for retry.
+Live POSIX groups are killed on stop and normal process exit. SIGKILL/power
+loss or intentional `setsid` escapes require OS supervision; restart never
+signals a stored PID or replays a command.
 
 Terminal quota, billing, budget, usage-limit, rate-limit/429, and
 `ResourceExhausted` assistant errors suspend background runs and close their exact
@@ -229,6 +258,10 @@ after their user message is observed, so stop/crash can drop undelivered input.
 Non-running Steers deterministically become Follow-ups under the task mutation
 lane. Idle/interrupted tasks cold-load from the retained immutable recipe and
 expected Pi UUID, without rescanning mutable Definitions.
+Bash input instead requires a running resident and omitted `delivery`; optional
+`eof` closes stdin. Agent `delivery` and Bash `eof` fields follow enabled
+producers or retained owned kinds. Bash tasks never cold-open or accept
+Follow-ups. Task-tree recursion follows child session IDs only for agents.
 
 `task_stop` aborts resident execution or cancels retained queued/suspended work,
 clears Follow-ups, recursively stops descendants, and preserves the task's
@@ -266,6 +299,8 @@ Static text views wrap and scroll with arrows, PgUp/PgDn, and Home/End.
 Task views also provide event-driven live output, Follow-up/Steer entry, stop,
 and discard. Foreground UI inputs use an Esc-cancellable loader, kept open until
 owned work has stopped. Cancelled inputs do not show an acceptance notice.
+Bash actions expose stdin/EOF and retained command/output details, not agent
+prompt or model controls.
 Active counts appear in
 the footer and up to five active rows appear below the editor. Down on an empty
 editor focuses that same panel, exposing all direct tasks and diagnostics in a

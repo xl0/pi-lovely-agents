@@ -6,10 +6,11 @@ import { Text } from "@earendil-works/pi-tui"
 import { Type } from "typebox"
 import type { AgentsConfig, AgentsConfigWarning, ModelAliasChoice, ModelChoice } from "./config.js"
 import { MODEL_ALIASES, resolveConfiguredModels } from "./config.js"
-import { getAgentCoordinator } from "./coordinator.js"
+import { getAgentCoordinator, getBashCoordinator } from "./coordinator.js"
 import { type AgentDefinition, discoverAgentDefinitions } from "./definitions.js"
 import { renderExpandableResult } from "./rendering.js"
 import {
+	type AgentTaskMetadata,
 	acquireParentLease,
 	countRetainedOutputLines,
 	displayWorkspacePath,
@@ -77,15 +78,19 @@ export type DescendantSummary = {
 
 export type TaskListRow = {
 	id: string
-	kind: "agent"
+	kind: TaskMetadata["kind"]
 	label: string
 	/** Human-only bounded run input; omitted from ordinary tool loads. */
 	inputPreview?: string
-	definition: string
+	definition?: string
 	state: TaskMetadata["state"]
 	latestOutcome: TaskMetadata["latestOutcome"]
-	model: string
-	thinking: TaskMetadata["thinking"]
+	model?: string
+	thinking?: AgentTaskMetadata["thinking"]
+	command?: string
+	cwd?: string
+	exitCode?: number | null
+	signal?: string | null
 	createdAt: number
 	updatedAt: number
 	acceptedAt: number | null
@@ -95,6 +100,7 @@ export type TaskListRow = {
 	outputLines: number | null
 	lastActivity: NonNullable<TaskMetadata["lastActivity"]> | null
 	queueReason: ReturnType<typeof taskSchedulingStatus>["queueReason"]
+	capacity?: ReturnType<typeof taskSchedulingStatus>["capacity"]
 	paths: RetainedPaths
 	descendants: DescendantSummary
 }
@@ -111,6 +117,7 @@ export type TaskListResult = {
 	diagnostics: TaskDiagnostic[]
 	total: number
 	capacity: ReturnType<typeof taskSchedulingStatus>["capacity"]
+	bashCapacity: ReturnType<typeof taskSchedulingStatus>["capacity"]
 }
 
 export type TaskOutputResult = Awaited<ReturnType<typeof readRetainedOutput>> & {
@@ -266,7 +273,8 @@ export function registerTaskTools(
 	pi.registerTool({
 		name: "task_list",
 		label: "Task List",
-		description: "List durable Lovely Agent tasks owned by this exact Pi session, with queue reasons, shared capacity, and last activity.",
+		description:
+			"List durable Agent and Background Bash tasks owned by this exact Pi session, with queue reasons, capacity, and last activity.",
 		promptSnippet: "List durable tasks owned by this session",
 		promptGuidelines: ["Use task_list to inspect existing work before starting duplicate agents."],
 		parameters: Type.Object({}, { additionalProperties: false }),
@@ -285,7 +293,7 @@ export function registerTaskTools(
 		name: "task_output",
 		label: "Task Output",
 		description:
-			"Read a Lovely Agent task's latest reply, run status, last activity, queue reason, and shared capacity. Snapshots are capped at 2,000 lines/50 KiB; full replies and inputs are in history.md.",
+			"Read a task's latest reply or Bash output tail, run status, last activity, queue reason, and its execution capacity. Snapshots are capped at 2,000 lines/50 KiB; full agent replies are in history.md and full Bash output in output.log.",
 		promptSnippet: "Read a task's latest reply, progress, and current run status",
 		promptGuidelines: [
 			"task_output returns a snapshot, not history. Use waitMs to wait for reply, activity, or scheduling changes; inspect history.md for earlier replies and inputs."
@@ -356,11 +364,13 @@ export function buildTaskListToolResult(options: { rows: readonly TaskListRow[];
 } {
 	const tasks = [...options.rows].sort(compareTaskRows)
 	const coordinator = getAgentCoordinator()
+	const bashCoordinator = getBashCoordinator()
 	const result: TaskListResult = {
 		tasks,
 		diagnostics: [...options.diagnostics],
 		total: tasks.length,
-		capacity: { active: coordinator.activeCount, limit: coordinator.maxConcurrency }
+		capacity: { active: coordinator.activeCount, limit: coordinator.maxConcurrency },
+		bashCapacity: { active: bashCoordinator.activeCount, limit: bashCoordinator.maxConcurrency }
 	}
 	return { content: [{ type: "text", text: renderTaskListResult(result) }], details: result }
 }
@@ -376,6 +386,7 @@ export function buildTaskOutputToolResult(
 	const lines = [
 		`task_output state=${result.state} outcome=${result.latestOutcome ?? "none"} streaming=${result.streaming} queued=${result.queuedFollowUps}`,
 		`capacity=${result.capacity.active}/${result.capacity.limit} execution permits${result.queueReason ? ` waiting=${result.queueReason}` : ""}`,
+		...(result.exitCode !== undefined ? [`exit_code=${result.exitCode ?? "unknown"} signal=${result.signal ?? "none"}`] : []),
 		...(result.lastActivity ? [`last_activity: ${result.lastActivity.action} (${relativeTime(result.lastActivity.at, Date.now())})`] : []),
 		...(result.timedOut ? ["timed_out=true"] : []),
 		"",
@@ -445,18 +456,18 @@ async function taskListRow(
 	includeInputPreviews: boolean
 ): Promise<TaskListRow> {
 	const descendants = emptyDescendantAccumulator()
-	await collectDescendants(cwd, metadata.childSessionId, new Set([metadata.parentSessionId]), descendants)
+	if (metadata.kind === "agent") await collectDescendants(cwd, metadata.childSessionId, new Set([metadata.parentSessionId]), descendants)
 	const activeRun = metadata.activeRun
 	return {
 		id: metadata.taskRef,
-		kind: "agent",
+		kind: metadata.kind,
 		label: metadata.label,
 		...(includeInputPreviews && metadata.inputPreview ? { inputPreview: metadata.inputPreview } : {}),
-		definition: metadata.definitionName,
+		...(metadata.kind === "agent"
+			? { definition: metadata.definitionName, model: `${metadata.model.provider}/${metadata.model.id}`, thinking: metadata.thinking }
+			: { command: metadata.command, cwd: metadata.cwd, exitCode: metadata.exitCode, signal: metadata.signal }),
 		state: metadata.state,
 		latestOutcome: metadata.latestOutcome,
-		model: `${metadata.model.provider}/${metadata.model.id}`,
-		thinking: metadata.thinking,
 		createdAt: metadata.createdAt,
 		updatedAt: metadata.updatedAt,
 		acceptedAt: activeRun?.acceptedAt ?? null,
@@ -465,7 +476,7 @@ async function taskListRow(
 		queuedFollowUps: metadata.queuedFollowUps.length,
 		outputLines,
 		lastActivity: metadata.lastActivity ?? null,
-		queueReason: taskSchedulingStatus(metadata).queueReason,
+		...taskSchedulingStatus(metadata),
 		paths: retainedPaths(paths),
 		descendants: {
 			total: descendants.total,
@@ -507,7 +518,7 @@ async function collectDescendants(
 		if (isActiveState(loaded.metadata.state)) {
 			summary.active.push({ label: loaded.metadata.label, state: loaded.metadata.state, updatedAt: loaded.metadata.updatedAt })
 		}
-		await collectDescendants(cwd, loaded.metadata.childSessionId, visited, summary)
+		if (loaded.metadata.kind === "agent") await collectDescendants(cwd, loaded.metadata.childSessionId, visited, summary)
 	}
 }
 
@@ -540,6 +551,7 @@ function compareTaskRows(left: TaskListRow, right: TaskListRow): number {
 function renderTaskListResult(result: TaskListResult): string {
 	const lines = [
 		`capacity: ${result.capacity.active}/${result.capacity.limit} execution permits`,
+		`bash_capacity: ${result.bashCapacity.active}/${result.bashCapacity.limit} execution permits`,
 		result.tasks.length === 0 ? "tasks: []" : "tasks:"
 	]
 	const now = Date.now()
@@ -548,9 +560,14 @@ function renderTaskListResult(result: TaskListResult): string {
 		if (tasks.length === 0) continue
 		lines.push(`  ${state}:`)
 		for (const task of tasks) {
-			lines.push(`    - ${task.kind} ${task.definition} ${task.id}: ${yamlScalar(task.label)}`)
+			lines.push(`    - ${task.kind}${task.definition ? ` ${task.definition}` : ""} ${task.id}: ${yamlScalar(task.label)}`)
 			if (state === "idle" || state === "interrupted") lines.push(`      outcome: ${task.latestOutcome ?? "none"}`)
-			lines.push(`      model: ${yamlScalar(`${task.model}:${task.thinking}`)}`)
+			if (task.kind === "agent") lines.push(`      model: ${yamlScalar(`${task.model}:${task.thinking}`)}`)
+			else {
+				lines.push(`      command: ${yamlScalar(task.command ?? "")}`)
+				lines.push(`      exit_code: ${task.exitCode ?? "unknown"} signal: ${task.signal ?? "none"}`)
+				lines.push(`      output: ${yamlScalar(task.paths.output ?? "")}`)
+			}
 			lines.push(`      queued_followups: ${task.queuedFollowUps}`)
 			lines.push(`      output_lines: ${task.outputLines ?? "unknown"}`)
 			if (task.queueReason) lines.push(`      waiting: ${task.queueReason}`)

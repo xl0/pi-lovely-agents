@@ -25,28 +25,38 @@ afterEach(() => {
 })
 
 describe("Lovely Agents config", () => {
-	test("capabilities default to foreground-only and workspace values replace user capabilities", async () => {
+	test("background features are independent on-by-default switches with scoped overrides", async () => {
 		await withTempWorkspace(async workspace => {
 			environment.PI_CODING_AGENT_DIR = workspace.agentDir
 			let config = createAgentsConfigSpec(configContext).load(workspace.cwd)
-			expect(config.value.capabilities).toEqual([])
-			expect(config.fields.find(field => field.key === "capabilities")).toMatchObject({
-				values: ["backgroundAgents", "backgroundBash"]
-			})
-			const wait = config.fields.find(field => field.key === "waitMs")
-			const visible = () =>
-				wait?.visibleWhen?.({
-					scope: "workspace",
-					get: key => (key === "capabilities" ? config.value.capabilities : undefined),
-					getScoped: () => undefined
-				})
-			expect(visible()).toBe(false)
-			config = config.update("user", "capabilities", ["backgroundAgents"])
-			expect(config.value.capabilities).toEqual(["backgroundAgents"])
-			expect(visible()).toBe(true)
-			config = config.update("workspace", "capabilities", [])
-			expect(config.value.capabilities).toEqual([])
-			expect(visible()).toBe(false)
+			expect(config.value).toMatchObject({ backgroundAgents: true, backgroundBash: true, maxBashConcurrency: 4 })
+			expect(config.fields.find(field => field.key === "capabilities")).toBeUndefined()
+			for (const key of ["backgroundAgents", "backgroundBash"]) {
+				expect(config.fields.find(field => field.key === key)).toMatchObject({ kind: "boolean", default: true })
+			}
+			const visible = (key: "waitMs" | "maxBashConcurrency") =>
+				config.fields
+					.find(field => field.key === key)
+					?.visibleWhen?.({
+						scope: "workspace",
+						get: key =>
+							key === "backgroundAgents"
+								? config.value.backgroundAgents
+								: key === "backgroundBash"
+									? config.value.backgroundBash
+									: undefined,
+						getScoped: () => undefined
+					})
+			expect(visible("waitMs")).toBe(true)
+			expect(visible("maxBashConcurrency")).toBe(true)
+			config = config.update("user", "backgroundAgents", false)
+			expect(visible("waitMs")).toBe(false)
+			expect(config.value.backgroundBash).toBe(true)
+			config = config.update("workspace", "backgroundAgents", true)
+			config = config.update("workspace", "backgroundBash", false)
+			expect(config.value).toMatchObject({ backgroundAgents: true, backgroundBash: false })
+			expect(visible("waitMs")).toBe(true)
+			expect(visible("maxBashConcurrency")).toBe(false)
 		})
 	})
 
@@ -59,7 +69,7 @@ describe("Lovely Agents config", () => {
 			)
 			await workspace.write(
 				"workspace/.pi/xl0-pi-lovely-agents.json",
-				JSON.stringify({ models: ["openai/gpt"], maxConcurrency: 2.5, maxDepth: -1 })
+				JSON.stringify({ models: ["openai/gpt"], maxConcurrency: 2.5, maxBashConcurrency: 1.5, maxDepth: -1 })
 			)
 
 			const loaded = loadAgentsConfig(workspace.cwd, configContext)
@@ -71,7 +81,7 @@ describe("Lovely Agents config", () => {
 				waitMs: 1000,
 				expandPromptTemplates: true
 			})
-			expect(loaded.warnings.map(warning => warning.key)).toEqual(["maxDepth", "maxConcurrency"])
+			expect(loaded.warnings.map(warning => warning.key)).toEqual(["maxDepth", "maxConcurrency", "maxBashConcurrency"])
 		})
 	})
 

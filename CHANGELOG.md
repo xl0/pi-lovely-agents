@@ -2,11 +2,14 @@
 
 ## [Unreleased]
 
+- Add `bash_bg` with independent concurrency, durable `b_` task controls,
+  literal stdin/EOF, bounded output tails/full logs, and process-group cleanup.
+  Configure background agents and Bash with separate on-by-default switches.
 - Fix stale-context crashes on idle child disposal and background-color gaps in
   truncated agent calls. Sort UI rows by creation time; hide internal activity.
-- Add opt-in capabilities with foreground-only defaults, synchronous Follow-ups,
-  cancellation, and config-aware tool schemas/visibility. Background Bash is
-  marked unavailable; context forks are deferred until Pi SDK support lands.
+- Add optional foreground-only execution, synchronous Follow-ups,
+  cancellation, and config-aware tool schemas/visibility. Context forks are
+  deferred until Pi SDK support lands.
 - Style notifications as distinct messages with bold headers and bodies hidden
   until expanded.
 - Notify the parent model after manual task discard, without waking an idle

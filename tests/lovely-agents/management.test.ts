@@ -23,7 +23,7 @@ import {
 	reserveTaskStorage,
 	taskStoragePaths
 } from "../../extensions/lovely-agents/state.js"
-import { loadTaskList } from "../../extensions/lovely-agents/tools.js"
+import { loadTaskList, type TaskListRow } from "../../extensions/lovely-agents/tools.js"
 import { withTempWorkspace } from "./test-helpers.js"
 
 test("management Tasks hands off to the existing panel instead of opening another selector", async () => {
@@ -40,7 +40,13 @@ test("management Tasks hands off to the existing panel instead of opening anothe
 	} as unknown as ExtensionContext
 	await openManagementUi(ctx, {
 		discoverDefinitions: () => ({ definitions: [], diagnostics: [], projectAgentsDir: undefined }),
-		loadTasks: async () => ({ tasks: [], diagnostics: [], total: 0, capacity: { active: 0, limit: 4 } }),
+		loadTasks: async () => ({
+			tasks: [],
+			diagnostics: [],
+			total: 0,
+			capacity: { active: 0, limit: 4 },
+			bashCapacity: { active: 0, limit: 4 }
+		}),
 		focusTasks: async () => {
 			focused++
 		},
@@ -53,6 +59,78 @@ test("management Tasks hands off to the existing panel instead of opening anothe
 })
 
 describe("management fixtures", () => {
+	test("Bash actions expose literal stdin and EOF, not agent controls or invented model fields", async () => {
+		const task = {
+			id: "b_12345678",
+			kind: "bash",
+			label: "Input pipe",
+			state: "running",
+			latestOutcome: null,
+			command: "cat",
+			cwd: "/workspace",
+			exitCode: null,
+			signal: null,
+			queuedFollowUps: 0,
+			outputLines: 0,
+			lastActivity: null,
+			queueReason: null,
+			paths: { history: "history.md", output: "output.log" }
+		} as TaskListRow
+		const inputs: unknown[][] = []
+		let step = 0
+		const ctx = {
+			ui: {
+				editor: async () => " \n",
+				confirm: async () => true,
+				notify() {},
+				custom: async (factory: Parameters<ExtensionContext["ui"]["custom"]>[0]) => {
+					const component = await factory(
+						{ terminal: { rows: 40 }, requestRender() {} } as never,
+						{ fg: (_color: string, text: string) => text, bold: (text: string) => text } as never,
+						{} as never,
+						() => {}
+					)
+					const text = component.render(120).join("\n")
+					const current = step++
+					if (current === 1) {
+						expect(text).toContain("Command: cat")
+						expect(text).toContain("Output: output.log")
+						expect(text).not.toMatch(/Model:|Definition:|Session:|undefined/)
+						return
+					}
+					expect(text).toContain("Write stdin")
+					expect(text).toContain("Close stdin")
+					expect(text).not.toMatch(/System prompt|Follow-up|Steer/)
+					return current === 0 ? "details" : current === 2 ? "stdin" : current === 3 ? "eof" : undefined
+				}
+			}
+		} as unknown as ExtensionContext
+		await openTaskManagementUi(
+			ctx,
+			{
+				discoverDefinitions: () => ({ definitions: [], diagnostics: [], projectAgentsDir: undefined }),
+				loadTasks: async () => ({
+					tasks: [task],
+					diagnostics: [],
+					total: 1,
+					capacity: { active: 0, limit: 4 },
+					bashCapacity: { active: 1, limit: 4 }
+				}),
+				focusTasks: async () => {},
+				openConfig: async () => {},
+				controlTask: async () => {},
+				inputTask: async (...args) => {
+					inputs.push(args)
+				}
+			},
+			`task:${task.id}`
+		)
+		expect(inputs).toEqual([
+			[task.id, " \n", "stdin"],
+			[task.id, "", "stdin", true]
+		])
+	})
+
 	test("cancelled foreground input does not show an acceptance notice", async () => {
 		await withTempWorkspace(async workspace => {
 			const [id] = await seedFixtureTasks(workspace.cwd, "parent")
@@ -264,7 +342,7 @@ describe("management fixtures", () => {
 					.filter(Boolean)
 					.sort()
 			).toEqual(["failed", "interrupted", "stopped", "succeeded"])
-			expect(metadata.every(task => task.definitionName === "lovely-fixture")).toBe(true)
+			expect(metadata.every(task => task.kind === "agent" && task.definitionName === "lovely-fixture")).toBe(true)
 			expect(await Promise.all(ids.map(id => countRetainedOutputLines(taskStoragePaths(parent, id))))).not.toContain(0)
 
 			const foreignFixture = await reserveTaskStorage(parent, () => "a_ffffffff")
@@ -287,7 +365,7 @@ describe("management fixtures", () => {
 			const parent = await ensureParentStorage(workspace.cwd, "parent-session")
 			const showcase = await readTaskMetadata(taskStoragePaths(parent, showcaseId))
 			expect(showcase.status).toBe("ok")
-			if (showcase.status !== "ok") throw new Error("Showcase fixture is invalid")
+			if (showcase.status !== "ok" || showcase.metadata.kind !== "agent") throw new Error("Showcase fixture is invalid")
 			expect(showcase.metadata.queuedFollowUps).toHaveLength(1)
 			expect((await stat(taskStoragePaths(parent, showcaseId).history)).size).toBeGreaterThan(50_000)
 

@@ -14,6 +14,31 @@ import {
 import { loadTaskList } from "../../extensions/lovely-agents/tools.js"
 import { withTempWorkspace } from "./test-helpers.js"
 
+test("archives unsupported Bash identities without a fabricated child session and enforces kind prefixes", async () => {
+	await withTempWorkspace(async workspace => {
+		const parent = await ensureParentStorage(workspace.cwd, "parent")
+		const paths = await reserveTaskStorage(parent, () => "b_11111111")
+		const value = { version: 99, kind: "bash", taskRef: paths.taskRef, parentSessionId: "parent", pid: 123, futureField: true }
+		for (const patch of [{ kind: "agent" }, { childSessionId: "child" }]) {
+			await writeFile(paths.metadata, JSON.stringify({ ...value, ...patch }))
+			await expect(controlTaskLifecycle(context(workspace.cwd), paths.taskRef, "discard")).rejects.toThrow()
+		}
+		const original = JSON.stringify(value)
+		await writeFile(paths.metadata, original)
+		await writeFile(paths.output, "shell evidence")
+		await controlTaskLifecycle(context(workspace.cwd), paths.taskRef, "discard")
+		const archived = archivedTaskStoragePaths(paths)
+		expect(await readFile(archived.metadata, "utf8")).toBe(original)
+		expect(await readFile(archived.output, "utf8")).toBe("shell evidence")
+		await expect(stat(archived.session)).rejects.toMatchObject({ code: "ENOENT" })
+		await expect(readRetainedOutput(paths)).rejects.toThrow("discarded")
+		await controlTaskLifecycle(context(workspace.cwd), paths.taskRef, "discard")
+		const candidates = [paths.taskRef, "b_22222222"]
+		expect((await reserveTaskStorage(parent, () => candidates.shift() ?? "b_22222222")).taskRef).toBe("b_22222222")
+		await releaseParentLeaseFor(workspace.cwd, "parent")
+	})
+})
+
 test("archives unsupported versions and descendants unchanged, stops residents, and never reuses their IDs", async () => {
 	await withTempWorkspace(async workspace => {
 		const parent = await ensureParentStorage(workspace.cwd, "parent")

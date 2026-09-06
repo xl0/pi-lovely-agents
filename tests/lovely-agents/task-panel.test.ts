@@ -111,6 +111,19 @@ test("passive and focused rows keep creation order across activity and state cha
 	expect(h.lines().join("\n")).toContain("→ a_00000000")
 })
 
+test("Bash rows and footer use their own kind and capacity without an invented model", async () => {
+	const h = harness()
+	const task: TaskListRow = { ...row(0), id: "b_00000000", kind: "bash", inputPreview: "printf hello" }
+	delete task.model
+	h.result.tasks = [task]
+	h.result.bashCapacity = { active: 1, limit: 2 }
+	await h.panel.refresh()
+	expect(h.status).toBe("bash:1 slots:1/2")
+	h.panel.focus()
+	expect(h.lines().join("\n")).toContain('bash · "printf hello"')
+	expect(h.lines().join("\n")).not.toContain("undefined")
+})
+
 test("shows queue reasons without a heading or distracting internal activity", async () => {
 	const h = harness()
 	const task = h.result.tasks[0]
@@ -241,10 +254,17 @@ function row(index: number): TaskListRow {
 function harness(open: () => Promise<void> = async () => {}) {
 	let component: Component | undefined
 	const h = {
-		result: { tasks: [row(0), row(1)], diagnostics: [], total: 2, capacity: { active: 1, limit: 4 } } as TaskListResult,
+		result: {
+			tasks: [row(0), row(1)],
+			diagnostics: [],
+			total: 2,
+			capacity: { active: 1, limit: 4 },
+			bashCapacity: { active: 0, limit: 4 }
+		} as TaskListResult,
 		load: (): Promise<TaskListResult> => Promise.resolve(h.result),
 		opened: [] as string[],
 		errors: [] as string[],
+		status: undefined as string | undefined,
 		writes: 0
 	}
 	const theme = { fg: (_color: string, text: string) => text }
@@ -252,7 +272,8 @@ function harness(open: () => Promise<void> = async () => {}) {
 		cwd: `/test/task-panel-${crypto.randomUUID()}`,
 		sessionManager: { getSessionId: () => "parent" },
 		ui: {
-			setStatus: () => {
+			setStatus: (_id: string, status: string | undefined) => {
+				h.status = status
 				h.writes++
 			},
 			setWidget: (_id: string, factory: ((_tui: unknown, theme: unknown) => Component) | undefined) => {

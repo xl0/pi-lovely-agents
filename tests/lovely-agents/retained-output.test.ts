@@ -31,7 +31,7 @@ describe("task progress", () => {
 		const coordinator = getAgentCoordinator()
 		const limit = coordinator.maxConcurrency
 		const tuple = { provider: "queue-test", model: "one" }
-		const queued = { state: "queued" as const, model: { provider: tuple.provider, id: tuple.model } }
+		const queued = { kind: "agent" as const, state: "queued" as const, model: { provider: tuple.provider, id: tuple.model } }
 		coordinator.setMaxConcurrency(1)
 		const permit = await coordinator.acquire({ tuple })
 		try {
@@ -115,7 +115,7 @@ describe("retained history", () => {
 				history: ".pi/lovely-agents/parent-session/a_0123abcd/history.md",
 				session: ".pi/lovely-agents/parent-session/a_0123abcd/session.jsonl"
 			})
-			expect((await readdir(paths.taskDirectory)).sort()).toEqual(["history.md", "metadata.json"])
+			expect((await readdir(paths.taskDirectory)).sort()).toEqual(["history.md", "metadata.json", "session.jsonl"])
 			if (process.platform !== "win32") expect((await stat(paths.history)).mode & 0o077).toBe(0)
 			expect((await readRetainedOutput(paths)).text).toBe("") // History is never parsed as the answer.
 		})
@@ -123,6 +123,49 @@ describe("retained history", () => {
 })
 
 describe("latest reply snapshots", () => {
+	test("persists Bash tail truncation through progress and settlement without reformatting the bounded tail", async () => {
+		await withTaskStorage(
+			"running",
+			async paths => {
+				const tail = "remaining 🙂 output\n"
+				await writeTaskProgress(paths, runId, { latestReply: { text: tail, streaming: true, truncated: true } })
+				expect(JSON.parse(await readFile(paths.metadata, "utf8")).latestReply).toEqual({ text: tail, streaming: true, truncated: true })
+				const running = await readRetainedOutput(paths)
+				expect(running).toMatchObject({ truncated: true, streaming: true, totalLines: 1 })
+				expect(running.text).toBe(`${tail}\n\n[Output truncated; showing tail. Full output: ${running.paths.output}]`)
+				await mutateTaskMetadata(paths, metadata => ({ ...metadata, state: "idle", activeRun: null, latestOutcome: "succeeded" }))
+				expect(await readRetainedOutput(paths)).toMatchObject({ truncated: true, streaming: false, text: running.text })
+				for (const latestReply of [
+					{ text: tail, streaming: false },
+					{ text: tail, streaming: false, truncated: false }
+				]) {
+					await mutateTaskMetadata(paths, metadata => ({ ...metadata, latestReply }))
+					const output = await readRetainedOutput(paths)
+					expect(output.truncated).toBe(false)
+					expect(output.text).toBe(`${tail}\n\n[Full output: ${output.paths.output}]`)
+				}
+				await expect(
+					mutateTaskMetadata(
+						paths,
+						metadata =>
+							({
+								...metadata,
+								latestReply: { text: tail, streaming: false, truncated: "true" }
+							}) as unknown as TaskMetadata
+					)
+				).rejects.toThrow()
+			},
+			"bash"
+		)
+		await withTaskStorage("running", async paths => {
+			await expect(
+				writeTaskProgress(paths, runId, {
+					latestReply: { text: "Agent v3 stays strict", streaming: true, truncated: true }
+				})
+			).rejects.toThrow()
+		})
+	})
+
 	test("replaces earlier replies without confusing message completion with run completion", async () => {
 		await withTaskStorage("running", async paths => {
 			await writeLatestReply(paths, runId, "Preamble", false)
@@ -228,28 +271,45 @@ describe("latest reply snapshots", () => {
 	})
 })
 
-async function withTaskStorage(state: "idle" | "running", run: (paths: TaskStoragePaths) => Promise<void>): Promise<void> {
+async function withTaskStorage(
+	state: "idle" | "running",
+	run: (paths: TaskStoragePaths) => Promise<void>,
+	kind: TaskMetadata["kind"] = "agent"
+): Promise<void> {
 	await withTempWorkspace(async workspace => {
-		const paths = await reserveTaskStorage(await ensureParentStorage(workspace.cwd, "parent-session"), () => "a_0123abcd")
+		const paths = await reserveTaskStorage(
+			await ensureParentStorage(workspace.cwd, "parent-session"),
+			() => `${kind === "bash" ? "b" : "a"}_0123abcd`
+		)
 		await initializeRetainedLogs(paths)
 		const metadata: TaskMetadata = {
 			version: TASK_METADATA_VERSION,
-			kind: "agent",
+			...(kind === "bash"
+				? {
+						kind,
+						command: "printf output",
+						cwd: workspace.cwd,
+						exitCode: null,
+						signal: null
+					}
+				: {
+						kind,
+						childSessionId: "child-session",
+						definitionName: "reviewer",
+						model: { provider: "anthropic", id: "sonnet" },
+						thinking: "high" as const,
+						depth: 1,
+						allowAgents: false,
+						sessionConfig: {
+							systemPrompt: "Review work.",
+							tools: null,
+							excludeAgentsMd: false,
+							scopedModels: [{ provider: "anthropic", id: "sonnet" }]
+						}
+					}),
 			taskRef: paths.taskRef,
 			parentSessionId: paths.parentSessionId,
-			childSessionId: "child-session",
-			definitionName: "reviewer",
 			label: "Review change",
-			model: { provider: "anthropic", id: "sonnet" },
-			thinking: "high",
-			depth: 1,
-			allowAgents: false,
-			sessionConfig: {
-				systemPrompt: "Review work.",
-				tools: null,
-				excludeAgentsMd: false,
-				scopedModels: [{ provider: "anthropic", id: "sonnet" }]
-			},
 			state,
 			latestOutcome: null,
 			latestReply: null,

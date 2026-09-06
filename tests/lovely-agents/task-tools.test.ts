@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { stat, writeFile } from "node:fs/promises"
+import { readdir, readFile, stat, writeFile } from "node:fs/promises"
 import type { ExtensionAPI, ExtensionContext, SessionShutdownEvent } from "@earendil-works/pi-coding-agent"
+import { getBashCoordinator } from "../../extensions/lovely-agents/coordinator.js"
 import {
+	appendHistoryLog,
 	ensureParentStorage,
 	initializeRetainedLogs,
 	mutateTaskMetadata,
@@ -22,6 +24,66 @@ import {
 import { withTempWorkspace } from "./test-helpers.js"
 
 describe("read-only task tools", () => {
+	test("lists mixed direct ownership and reads Bash tails, full logs, exit status, and its own capacity", async () => {
+		await withTempWorkspace(async workspace => {
+			await createTask(workspace.cwd, "parent-session", {
+				id: "a_00000001",
+				childSessionId: "child",
+				label: "Agent",
+				state: "idle",
+				updatedAt: 1
+			})
+			const bash = await createTask(workspace.cwd, "parent-session", {
+				id: "b_00000001",
+				label: "Shell",
+				state: "idle",
+				updatedAt: 1,
+				outcome: "failed",
+				output: "last output"
+			})
+			await createTask(workspace.cwd, "child", {
+				id: "b_00000002",
+				label: "Nested shell",
+				state: "running",
+				updatedAt: 1
+			})
+			await writeFile(bash.output, "earlier output\nlast output")
+			await appendHistoryLog(bash, { type: "stdin", content: "literal\n", timestamp: 1, eof: true })
+			await appendHistoryLog(bash, { type: "output", content: "last output" })
+			expect((await readdir(bash.taskDirectory)).sort()).toEqual(["history.md", "metadata.json", "output.log"])
+			expect(await readFile(bash.history, "utf8")).toContain("<stdin>\nliteral\n<stdin EOF>")
+			if (process.platform !== "win32") expect((await stat(bash.output)).mode & 0o077).toBe(0)
+			const pool = getBashCoordinator()
+			const permit = await pool.acquire({ tuple: { provider: "bash", model: "process" } })
+			const captured = captureTaskTools()
+			try {
+				const list = await loadTaskList(workspace.cwd, "parent-session")
+				expect(list.details.tasks.map(task => task.id)).toEqual(["a_00000001", "b_00000001"])
+				expect(list.details.tasks[0]?.descendants.total).toBe(1)
+				const row = list.details.tasks[1]
+				expect(row).toMatchObject({ kind: "bash", exitCode: 7, signal: null, descendants: { total: 0 } })
+				expect(row).not.toHaveProperty("model")
+				expect(row).not.toHaveProperty("thinking")
+				expect(row).not.toHaveProperty("definition")
+				expect(row?.paths).not.toHaveProperty("session")
+				expect(row?.paths.output).toEndWith("/b_00000001/output.log")
+				expect(list.details.bashCapacity).toEqual({ active: 1, limit: pool.maxConcurrency })
+				const result = await captured.tools.get("task_output")?.execute("read", { id: bash.taskRef }, undefined, taskContext(workspace.cwd))
+				expect(result?.details).toMatchObject({ exitCode: 7, signal: null, capacity: { active: 1, limit: pool.maxConcurrency } })
+				expect(result?.content[0]?.text).toContain("last output")
+				expect(result?.content[0]?.text).toContain("output.log")
+				expect(result?.content[0]?.text).not.toContain("earlier output")
+				expect(result?.content[0]?.text).not.toContain("session.jsonl")
+				await expect(
+					captured.tools.get("task_output")?.execute("foreign", { id: "b_00000002" }, undefined, taskContext(workspace.cwd))
+				).rejects.toThrow("Unknown Task Reference")
+			} finally {
+				permit.release()
+				await captured.shutdown?.({ type: "session_shutdown", reason: "quit" }, taskContext(workspace.cwd))
+			}
+		})
+	})
+
 	test("input previews are loaded only for human task views, including settled runs", async () => {
 		await withTempWorkspace(async workspace => {
 			const paths = await createTask(workspace.cwd, "parent-session", {
@@ -259,7 +321,7 @@ describe("read-only task tools", () => {
 
 type TaskFixture = {
 	id: string
-	childSessionId: string
+	childSessionId?: string
 	label: string
 	state: TaskMetadata["state"]
 	updatedAt: number
@@ -288,22 +350,32 @@ function taskMetadata(paths: TaskStoragePaths, fixture: TaskFixture): TaskMetada
 	}))
 	return {
 		version: TASK_METADATA_VERSION,
-		kind: "agent",
+		...(paths.taskRef.startsWith("b_")
+			? {
+					kind: "bash" as const,
+					command: "printf output",
+					cwd: paths.workspace,
+					exitCode: fixture.outcome === "failed" ? 7 : null,
+					signal: null
+				}
+			: {
+					kind: "agent" as const,
+					childSessionId: fixture.childSessionId ?? "child",
+					definitionName: "reviewer",
+					model: { provider: "anthropic", id: "sonnet" },
+					thinking: "high" as const,
+					depth: 1,
+					allowAgents: false,
+					sessionConfig: {
+						systemPrompt: "Review work.",
+						tools: null,
+						excludeAgentsMd: false,
+						scopedModels: [{ provider: "anthropic", id: "sonnet" }]
+					}
+				}),
 		taskRef: paths.taskRef,
 		parentSessionId: paths.parentSessionId,
-		childSessionId: fixture.childSessionId,
-		definitionName: "reviewer",
 		label: fixture.label,
-		model: { provider: "anthropic", id: "sonnet" },
-		thinking: "high",
-		depth: 1,
-		allowAgents: false,
-		sessionConfig: {
-			systemPrompt: "Review work.",
-			tools: null,
-			excludeAgentsMd: false,
-			scopedModels: [{ provider: "anthropic", id: "sonnet" }]
-		},
 		state: fixture.state,
 		latestOutcome: fixture.outcome ?? null,
 		latestReply: fixture.output ? { text: fixture.output, streaming: false } : null,

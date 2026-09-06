@@ -17,8 +17,8 @@ A typical interaction is:
    running agent with a Steer.
 7. Separate task tools list, inspect, configure, stop, or discard the session.
 
-The initial implementation covers agents. A background Bash producer will later
-reuse the same task controls.
+Agents and Background Bash share task controls. Bash tasks are shell processes,
+not Pi SDK sessions.
 
 ### Core identities
 
@@ -142,8 +142,9 @@ task_stop({ id: TaskRef })
 task_discard({ id: TaskRef })
 ```
 
-List, output, input, stop, and discard will also accept future `b_` Background
-Bash references. For Bash, `task_input` writes stdin and rejects `delivery`.
+List, output, input, stop, and discard accept `b_` Background Bash references.
+For Bash, `task_input` writes literal stdin, rejects `delivery`, and supports
+`eof: true` to close stdin. Completed commands cannot restart.
 
 Validation and creation failures are tool errors. Once work is accepted, child
 failures become durable run outcomes and return as structured task state rather
@@ -189,6 +190,8 @@ through the process-global registry.
 partial while streaming. It excludes inputs, tool logs, and earlier replies.
 Starting a new run clears the prior answer, including while queued. Run
 status/outcome is independent of assistant-message completion.
+For Bash, it returns a bounded stdout/stderr tail, exit code/signal, sticky
+truncation status, and a path to the complete `output.log`.
 
 Snapshots are capped at 2,000 lines/50 KiB with UTF-8-safe truncation and a
 reference to `history.md` for full replies. There are no offsets or pages.
@@ -208,15 +211,16 @@ coalesce together; a new run clears the previous run's activity.
 
 ### Capabilities
 
-`capabilities` is an opt-in list, empty by default. `backgroundAgents` enables
+`backgroundAgents` and `backgroundBash` are independent on/off switches, both
+on by default. `backgroundAgents` enables
 detachment and asynchronous Follow-ups. Without it, creation waits for a terminal
 result, Follow-ups require an idle task and wait for their own result, and
 cancellation stops foreground work. Foreground provider-limit failures settle
 without unattended recovery. Accepted runs retain their execution policy across
 config edits.
 
-`backgroundBash` is reserved and explicitly unavailable until implemented.
-Enabling it does not advertise tools. Context forks have no setting or tool
+`backgroundBash` exposes `bash_bg`; normal Pi `bash` stays unchanged.
+Context forks have no setting or tool
 until the required Pi SDK changes land.
 Creation tools follow depth and delegation permission; task controls remain
 available when there is an enabled producer or owned work/diagnostics.
@@ -402,12 +406,14 @@ Use `@xl0/pi-lovely-config` with the standard user/workspace precedence:
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| `capabilities` | `[]` | Opt-in `backgroundAgents`; `backgroundBash` is unavailable until implemented. Empty means foreground-only execution. |
+| `backgroundAgents` | `true` | Allow detached agents and asynchronous Follow-ups. Otherwise agents stay foreground. |
+| `backgroundBash` | `true` | Expose `bash_bg` and its stdin/EOF controls. |
 | `models` | `[]` | Additional model IDs. Empty includes the parent; enabled alias targets are always included. |
 | `fastModel` / `fastThinking` | `disabled` / `low` | Cheap, low-latency preset for straightforward work. |
 | `smartModel` / `smartThinking` | `disabled` / `high` | Most capable preset for difficult reasoning and complex work. |
 | `workhorseModel` / `workhorseThinking` | `disabled` / `medium` | Balanced preset for routine coding and research. |
 | `maxConcurrency` | `4` | Maximum number of agent runs executing in this OS process. |
+| `maxBashConcurrency` | `4` | Independent maximum of background Bash processes. |
 | `maxDepth` | `2` | Maximum delegation depth. |
 | `waitMs` | `30000` | Default wait for an initial result. Zero detaches immediately. |
 | `expandPromptTemplates` | `false` | Send child input literally when false. When true, Pi interprets skill commands, prompt templates, and extension commands before delivery. |
@@ -427,7 +433,7 @@ identities and effective thinking even after an alias changes or is disabled.
 
 One process-global FIFO semaphore enforces `maxConcurrency`. All parent and
 child extension runtimes share it. Local saturation queues work instead of
-failing. Future Background Bash uses a separate semaphore.
+failing. Background Bash uses a separate semaphore.
 
 Permits are cooperative: a managed agent holds one only while its own run can
 advance. When it synchronously waits for a newly accepted descendant, it first
@@ -496,7 +502,8 @@ Lovely Config.
     .lease
     <task-ref>/
       metadata.json
-      session.jsonl
+      session.jsonl        # agents only
+      output.log           # Bash only
       history.md
   archive/
     <parent-session-uuid>/
@@ -568,7 +575,7 @@ A completion notification includes:
 
 - Task Reference and label
 - state and latest outcome
-- effective model and thinking level
+- effective model/thinking for agents, command/exit status for Bash
 - up to 2 KiB of the latest assistant reply, never echoed inputs or earlier replies
 - retained history/session paths
 - compact descendant summary
@@ -600,7 +607,6 @@ There is no parallel slash-command syntax for every model tool.
 
 ## Deferred scope
 
-- Background Bash producer
 - passive mailboxes and direct child-to-child communication
 - model-visible hierarchical addressing
 - built-in sandboxing and hard capability enforcement
@@ -611,6 +617,21 @@ There is no parallel slash-command syntax for every model tool.
 - switching the main TUI into a running child, which needs a new Pi host API
 
 ## Implementation plan
+
+### [x] Background Bash
+
+`bash_bg` creates an exact-parent `b_` task, without replacing normal Bash.
+Independent boolean switches gate background agents and Bash; Bash permits are
+separate from agent execution and provider gates. Task controls and stdin/EOF
+schemas remain available for retained work after disabling creation.
+
+Typed Bash metadata stores command/cwd/exit status, bounded live tails with
+sticky truncation, and full `output.log` plus command/stdin/outcome history.
+No fabricated model/session recipe. POSIX process groups, pre-detach cancellation,
+serialized backpressured stdin, cleanup-before-archival, and reload-safe
+residents are covered by real-process tests. Restart never signals a stored PID
+or replays a command. SIGKILL/power loss and deliberate process-group escapes
+need OS supervision. Windows is explicitly unsupported.
 
 Work in order. A section is complete only when its focused tests, typecheck, and
 targeted Biome check pass. Keep `CODE.md` synchronized with implemented state.
@@ -849,7 +870,7 @@ an idle turn.
 
 #### [x] Capability gates
 
-Opt-in execution settings, foreground lifecycle/cancellation/provider-limit
+Independent execution settings, foreground lifecycle/cancellation/provider-limit
 handling, and dynamically filtered tools. Preserve controls for retained work
 and accepted-run policy across config edits. Focused/full suites cover execution
 and UI gating. Coordinator v3 requires a process restart.
@@ -865,7 +886,7 @@ identities across alias edits and cold Follow-ups.
 #### [ ] 6.2 Documentation and package verification
 
 Update README examples, Agent Definition format, tool reference, storage/privacy
-notes, lifecycle semantics, and deferred Background Bash scope. Update
+notes and lifecycle semantics. Update
 CHANGELOG and `CODE.md` to actual implementation state.
 
 Run:

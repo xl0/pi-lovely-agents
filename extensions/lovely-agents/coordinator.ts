@@ -4,6 +4,7 @@ import { publishSchedulerUpdate } from "./updates.js"
 
 export const AGENT_COORDINATOR_VERSION = 3
 const AGENT_COORDINATOR_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/coordinator")
+const BASH_COORDINATOR_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/bash-coordinator")
 
 export type ModelTuple = Readonly<{ provider: string; model: string }>
 
@@ -31,14 +32,14 @@ export type AgentReservation = {
 export type ResidentAgent = {
 	stop(): void | Promise<void>
 	dispose(): void | Promise<void>
-	input?(content: string, delivery: "followup" | "steer", options?: ResidentInputOptions): Promise<ResidentInputResult>
+	input?(content: string, delivery: "followup" | "steer" | "stdin", options?: ResidentInputOptions): Promise<ResidentInputResult>
 	recover?(): boolean | Promise<boolean>
 }
 
-export type ResidentInputOptions = { background?: boolean; signal?: AbortSignal }
+export type ResidentInputOptions = { background?: boolean; signal?: AbortSignal; eof?: boolean }
 
 export type ResidentInputResult = {
-	delivery: "followup" | "steer"
+	delivery: "followup" | "steer" | "stdin"
 	queuePosition: number | null
 	queuedFollowUps: number
 	completed?: TaskMetadata
@@ -448,6 +449,19 @@ export function getAgentCoordinator(maxConcurrency = 4): AgentCoordinator {
 	}
 	const coordinator = createAgentCoordinator(maxConcurrency)
 	globals[AGENT_COORDINATOR_SYMBOL] = coordinator
+	return coordinator
+}
+
+/** Independent process permits; Bash residents still bind in the main coordinator. */
+export function getBashCoordinator(maxConcurrency = 4): AgentCoordinator {
+	const globals = globalThis as unknown as Record<symbol, unknown>
+	const existing = globals[BASH_COORDINATOR_SYMBOL]
+	if (existing !== undefined) {
+		if (!isAgentCoordinator(existing)) throw new Error("Incompatible process-global Lovely Bash coordinator")
+		return existing
+	}
+	const coordinator = createAgentCoordinator(maxConcurrency)
+	globals[BASH_COORDINATOR_SYMBOL] = coordinator
 	return coordinator
 }
 

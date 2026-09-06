@@ -38,13 +38,13 @@ function createConfigSchema(ctx?: ModelConfigContext) {
 			visibleWhen: ctx => ctx.get(`${name}Model`) !== DISABLED_MODEL
 		})
 	return {
-		capabilities: field.multiEnum(["backgroundAgents", "backgroundBash"], [], {
-			label: "Capabilities",
-			description: "Optional execution capabilities. Without Background agents, runs stay in the foreground.",
-			valueDescriptions: {
-				backgroundAgents: "Allow detached agents and asynchronous Follow-ups",
-				backgroundBash: "Background Bash (producer not implemented yet)"
-			}
+		backgroundAgents: field.boolean(true, {
+			label: "Background agents",
+			description: "Allow detached agents and asynchronous Follow-ups. Off keeps agents in the foreground."
+		}),
+		backgroundBash: field.boolean(true, {
+			label: "Background Bash",
+			description: "Run Bash commands as managed background tasks."
 		}),
 		models: field.multiEnum(modelValues, [], {
 			label: "Models",
@@ -63,6 +63,13 @@ function createConfigSchema(ctx?: ModelConfigContext) {
 			min: 1,
 			step: 1
 		}),
+		maxBashConcurrency: field.number(4, {
+			label: "Bash concurrency",
+			description: "Maximum background Bash processes, separate from agent permits.",
+			min: 1,
+			step: 1,
+			visibleWhen: ctx => ctx.get("backgroundBash") === true
+		}),
 		maxDepth: field.number(2, {
 			label: "Max depth",
 			description: "Maximum agent delegation depth. The root session is depth 0.",
@@ -74,10 +81,7 @@ function createConfigSchema(ctx?: ModelConfigContext) {
 			description: "How long agent creation waits before detaching.",
 			min: 0,
 			step: 1000,
-			visibleWhen: ctx => {
-				const capabilities = ctx.get("capabilities")
-				return Array.isArray(capabilities) && capabilities.includes("backgroundAgents")
-			}
+			visibleWhen: ctx => ctx.get("backgroundAgents") === true
 		}),
 		expandPromptTemplates: field.boolean(false, {
 			label: "Expand prompt templates",
@@ -130,7 +134,7 @@ export function resolveAgentsConfig(config: ScopedConfig<RawAgentsConfig>): {
 	const warnings: AgentsConfigWarning[] = [...config.warnings]
 
 	for (const scope of config.scopes) {
-		for (const key of ["maxConcurrency", "maxDepth", "waitMs"] as const) {
+		for (const key of ["maxConcurrency", "maxBashConcurrency", "maxDepth", "waitMs"] as const) {
 			const value = scoped[scope][key]
 			if (typeof value !== "number" || Number.isInteger(value)) continue
 			delete scoped[scope][key]

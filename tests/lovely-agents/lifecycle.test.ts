@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { readFile, stat, writeFile } from "node:fs/promises"
+import { readdir, readFile, stat, writeFile } from "node:fs/promises"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
-import { reconcileParentTasks, recoverOwnedTaskTree, stopOwnedTaskTree } from "../../extensions/lovely-agents/lifecycle.js"
+import { discardTask, reconcileParentTasks, recoverOwnedTaskTree, stopOwnedTaskTree } from "../../extensions/lovely-agents/lifecycle.js"
 import {
+	archivedTaskStoragePaths,
 	ensureParentStorage,
 	initializeRetainedLogs,
 	mutateTaskMetadata,
@@ -17,6 +18,82 @@ import {
 import { withTempWorkspace } from "./test-helpers.js"
 
 describe("task lifecycle recovery", () => {
+	test("interrupts stale Bash once without reviving processes, and skips resident Bash across reload", async () => {
+		await withTempWorkspace(async workspace => {
+			const stale = await createTask(workspace.cwd, "parent", "b_00000001", "", "running")
+			const live = await createTask(workspace.cwd, "parent", "b_00000002", "", "running")
+			const stable = await createTask(workspace.cwd, "parent", "b_00000003", "", "idle")
+			const unbind = getAgentCoordinator().bindResident(live.taskDirectory, {
+				stop() {
+					throw new Error("Reconciliation must not stop residents")
+				},
+				dispose() {},
+				recover() {
+					throw new Error("Bash cannot recover")
+				}
+			})
+			try {
+				expect(await reconcileParentTasks(workspace.cwd, "parent")).toEqual({ interrupted: 1, diagnostics: [] })
+				expect(await readTaskMetadata(stale)).toMatchObject({
+					metadata: {
+						kind: "bash",
+						state: "interrupted",
+						latestOutcome: "interrupted",
+						activeRun: null,
+						exitCode: null,
+						signal: null,
+						notifications: [{ type: "interruption" }]
+					}
+				})
+				expect(await readTaskMetadata(live)).toMatchObject({ metadata: { state: "running" } })
+				expect(await readTaskMetadata(stable)).toMatchObject({ metadata: { state: "idle", notifications: [] } })
+				expect(await reconcileParentTasks(workspace.cwd, "parent")).toEqual({ interrupted: 0, diagnostics: [] })
+				expect(await recoverOwnedTaskTree(workspace.cwd, "parent")).toEqual({ resumed: 0, diagnostics: [] })
+				expect((await readdir(stale.root)).sort()).toEqual([".gitignore", "parent"])
+			} finally {
+				unbind()
+				await releaseParentLeaseFor(workspace.cwd, "parent")
+			}
+		})
+	})
+
+	test("stops mixed descendants through the main resident registry and archives Bash output without session files", async () => {
+		await withTempWorkspace(async workspace => {
+			const agent = await createTask(workspace.cwd, "parent", "a_00000001", "child", "running")
+			const bash = await createTask(workspace.cwd, "child", "b_00000001", "", "running")
+			const foreign = await createTask(workspace.cwd, "foreign", "b_00000002", "", "running")
+			await writeFile(bash.output, "retained output")
+			let stops = 0
+			const unbind = getAgentCoordinator().bindResident(bash.taskDirectory, {
+				async stop() {
+					stops++
+					await mutateTaskMetadata(bash, metadata => ({
+						...metadata,
+						state: "idle",
+						activeRun: null,
+						latestOutcome: "stopped",
+						updatedAt: Date.now()
+					}))
+				},
+				dispose() {}
+			})
+			try {
+				await stopOwnedTaskTree(workspace.cwd, "parent")
+				expect(stops).toBe(1)
+				expect(await readTaskMetadata(bash)).toMatchObject({ metadata: { state: "idle", latestOutcome: "stopped" } })
+				expect(await readTaskMetadata(foreign)).toMatchObject({ metadata: { state: "running" } })
+			} finally {
+				unbind()
+			}
+			await discardTask(agent)
+			await discardTask(agent)
+			const archived = archivedTaskStoragePaths(bash)
+			expect(await readFile(archived.output, "utf8")).toBe("retained output")
+			expect((await readdir(archived.taskDirectory)).sort()).toEqual(["history.md", "metadata.json", "output.log"])
+			expect(await readTaskMetadata(bash)).toMatchObject({ status: "invalid" })
+		})
+	})
+
 	test("interrupts foreground or unspecified-policy work without notices or recovery", async () => {
 		await withTempWorkspace(async workspace => {
 			const paths = await createTask(workspace.cwd, "parent", "a_70000005", "child", "suspended")
@@ -186,11 +263,25 @@ async function createTask(
 	await initializeRetainedLogs(paths)
 	await writeTaskMetadata(paths, {
 		version: TASK_METADATA_VERSION,
-		kind: "agent",
+		...(id.startsWith("b_")
+			? { kind: "bash" as const, command: "sleep 60", cwd, exitCode: null, signal: null }
+			: {
+					kind: "agent" as const,
+					childSessionId,
+					definitionName: "reviewer",
+					model: { provider: "provider", id: "model" },
+					thinking: "medium" as const,
+					allowAgents: false,
+					sessionConfig: {
+						systemPrompt: "Review work.",
+						tools: null,
+						excludeAgentsMd: false,
+						scopedModels: [{ provider: "provider", id: "model" }]
+					},
+					depth: 1
+				}),
 		taskRef: id,
 		parentSessionId,
-		childSessionId,
-		definitionName: "reviewer",
 		label: id,
 		createdAt: 1,
 		updatedAt: 1,
@@ -209,19 +300,9 @@ async function createTask(
 						acceptedAt: 1,
 						...(state === "queued" ? {} : { startedAt: 2 })
 					},
-		lastRunSequence: 2,
+		lastRunSequence: id.startsWith("b_") ? 1 : 2,
 		latestReply: null,
-		model: { provider: "provider", id: "model" },
-		thinking: "medium",
-		allowAgents: false,
-		sessionConfig: {
-			systemPrompt: "Review work.",
-			tools: null,
-			excludeAgentsMd: false,
-			scopedModels: [{ provider: "provider", id: "model" }]
-		},
-		depth: 1,
-		queuedFollowUps: [{ id: "r_2222222222222222", sequence: 2, content: "later", acceptedAt: 2 }],
+		queuedFollowUps: id.startsWith("b_") ? [] : [{ id: "r_2222222222222222", sequence: 2, content: "later", acceptedAt: 2 }],
 		notifications: [],
 		discardedAt: null
 	} satisfies TaskMetadata)

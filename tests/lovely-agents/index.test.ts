@@ -17,6 +17,7 @@ import { withTempWorkspace } from "./test-helpers.js"
 
 test("capability schemas and tool visibility follow config without hiding controls for retained tasks", async () => {
 	await withTempWorkspace(async workspace => {
+		await workspace.write("workspace/.pi/xl0-pi-lovely-agents.json", JSON.stringify({ backgroundAgents: false, backgroundBash: false }))
 		const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>()
 		const tools = new Map<string, ToolDefinition>()
 		let active = ["read"]
@@ -76,6 +77,8 @@ test("capability schemas and tool visibility follow config without hiding contro
 			await emit("session_start", "reload")
 			expect(active).toContain("agent")
 			expect(active).toContain("task_input")
+			expect(active).not.toContain("bash_bg")
+			expect(tools.get("task_input")).not.toHaveProperty("parameters.properties.eof")
 			expect(tools.get("agent")).not.toHaveProperty("parameters.properties.waitMs")
 			expect(tools.get("agent")?.description).toContain("terminal result")
 			active = active.filter(name => name !== "task_stop")
@@ -83,12 +86,17 @@ test("capability schemas and tool visibility follow config without hiding contro
 			await workspace.write(
 				"workspace/.pi/xl0-pi-lovely-agents.json",
 				JSON.stringify({
-					capabilities: ["backgroundAgents", "backgroundBash"],
+					backgroundAgents: true,
+					backgroundBash: true,
 					maxDepth: 0
 				})
 			)
 			await emit("session_start", "reload")
-			expect(active).toEqual(["read"])
+			expect(active).toContain("bash_bg")
+			expect(active).toContain("task_input")
+			expect(active).not.toContain("agent")
+			expect(tools.get("task_input")).toHaveProperty("parameters.properties.eof")
+			expect(tools.get("task_input")).not.toHaveProperty("parameters.properties.delivery")
 			expect(tools.get("agent")).toHaveProperty("parameters.properties.waitMs")
 			expect(tools.get("agent")).not.toHaveProperty("parameters.properties.allowAgents")
 			expect(tools.get("agent")).not.toHaveProperty("parameters.properties.fork")
@@ -99,7 +107,21 @@ test("capability schemas and tool visibility follow config without hiding contro
 			expect(active).not.toContain("task_stop")
 			expect(active).not.toContain("agent")
 			expect(active).not.toContain("agent_roster")
+			expect(tools.get("task_input")).toHaveProperty("parameters.properties.delivery")
 			expect(errors).toEqual([])
+
+			const bash = tools.get("bash_bg")
+			if (!bash) throw new Error("Missing Bash tool")
+			await bash.execute("retained-bash", { command: "printf kept", label: "Retained Bash", waitMs: 1000 }, undefined, undefined, ctx)
+			await emit("session_shutdown", "reload")
+			await workspace.write(
+				"workspace/.pi/xl0-pi-lovely-agents.json",
+				JSON.stringify({ backgroundAgents: false, backgroundBash: false, maxDepth: 0 })
+			)
+			await emit("session_start", "reload")
+			expect(active).not.toContain("bash_bg")
+			expect(active).toContain("task_input")
+			expect(tools.get("task_input")).toHaveProperty("parameters.properties.eof")
 
 			// SDK idle disposal has no session_shutdown: cancel pending reads and queued callbacks.
 			const reads = toolReads
@@ -129,6 +151,7 @@ test("capability schemas and tool visibility follow config without hiding contro
 test("manual controls cancel foreground input and notify only successful discard", async () => {
 	initTheme("dark")
 	await withTempWorkspace(async workspace => {
+		await workspace.write("workspace/.pi/xl0-pi-lovely-agents.json", JSON.stringify({ backgroundAgents: false }))
 		const ids = await seedFixtureTasks(workspace.cwd, "parent")
 		const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>()
 		const messages: Array<{ content: string; options: unknown }> = []

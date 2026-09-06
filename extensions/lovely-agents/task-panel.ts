@@ -13,6 +13,7 @@ export function createTaskPanel(
 	let tasks: TaskListResult["tasks"] = []
 	let items: SelectItem[] = []
 	let capacity = { active: 0, limit: 0 }
+	let bashCapacity = { active: 0, limit: 0 }
 	let selected: string | undefined
 	let focused = false
 	let opening = false
@@ -23,7 +24,17 @@ export function createTaskPanel(
 	function draw() {
 		if (disposed) return
 		const active = tasks.filter(task => task.state === "queued" || task.state === "running" || task.state === "suspended")
-		ctx.ui.setStatus(PANEL_ID, active.length > 0 ? `agents:${active.length} slots:${capacity.active}/${capacity.limit}` : undefined)
+		const bashCount = active.filter(task => task.kind === "bash").length
+		const agentCount = active.length - bashCount
+		ctx.ui.setStatus(
+			PANEL_ID,
+			active.length > 0
+				? [
+						...(agentCount ? [`agents:${agentCount} slots:${capacity.active}/${capacity.limit}`] : []),
+						...(bashCount ? [`bash:${bashCount} slots:${bashCapacity.active}/${bashCapacity.limit}`] : [])
+					].join(" ")
+				: undefined
+		)
 		if (opening || (!focused && active.length === 0)) {
 			ctx.ui.setWidget(PANEL_ID, undefined)
 			return
@@ -68,13 +79,14 @@ export function createTaskPanel(
 				const oldIndex = items.findIndex(item => item.value === selected)
 				tasks = [...result.tasks].sort((left, right) => right.createdAt - left.createdAt || left.id.localeCompare(right.id))
 				capacity = result.capacity
+				bashCapacity = result.bashCapacity
 				items = [
 					...tasks.map(task => ({
 						value: `task:${task.id}`,
 						// One full-width row, not SelectList's fixed-width label/description columns.
 						label: (
 							`${task.id} ${task.state}${task.latestOutcome ? `/${task.latestOutcome}` : ""} ${task.label} · ` +
-							`${task.queueReason ? `waiting: ${task.queueReason} · ` : ""}${task.model}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}` +
+							`${task.queueReason ? `waiting: ${task.queueReason} · ` : ""}${task.kind === "bash" ? "bash" : task.model}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}` +
 							(task.inputPreview ? ` · ${JSON.stringify(task.inputPreview)}` : "")
 						).replace(/[\r\n]+/g, " ")
 					})),

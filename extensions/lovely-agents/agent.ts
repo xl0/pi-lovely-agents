@@ -26,6 +26,7 @@ import { appendTaskNotification, deliverTaskNotifications, prepareTaskNotificati
 import { isProviderLimitError } from "./provider-limits.js"
 import { renderExpandableResult } from "./rendering.js"
 import {
+	type AgentTaskMetadata,
 	acquireParentLease,
 	appendHistoryLog,
 	archivedTaskStoragePaths,
@@ -86,7 +87,7 @@ export type AgentCreationResult = {
 	state: TaskMetadata["state"]
 	latestOutcome: TaskMetadata["latestOutcome"]
 	model: string
-	thinking: TaskMetadata["thinking"]
+	thinking: AgentTaskMetadata["thinking"]
 	depth: number
 	allowAgents: boolean
 	detached: boolean
@@ -97,8 +98,8 @@ export type AgentCreationResult = {
 
 export type TaskInputResult = {
 	id: string
-	requestedDelivery: "followup" | "steer"
-	effectiveDelivery: "followup" | "steer"
+	requestedDelivery: "followup" | "steer" | undefined
+	effectiveDelivery: "followup" | "steer" | "stdin"
 	queuePosition: number | null
 	state: TaskMetadata["state"]
 	latestOutcome: TaskMetadata["latestOutcome"]
@@ -111,10 +112,13 @@ export type AgentToolOptions = {
 	createChild?: typeof createChildSession
 	getAgentDir?: () => string
 	canDelegate?: () => boolean
+	/** Input-schema visibility from allowed producers plus retained owned kinds; not execution gates. */
+	agentInputEnabled?: () => boolean
+	bashInputEnabled?: () => boolean
 }
 
 export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): void {
-	const background = options.getConfig().capabilities.includes("backgroundAgents")
+	const background = options.getConfig().backgroundAgents
 	pi.registerTool({
 		name: "agent",
 		label: "Agent",
@@ -175,8 +179,8 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (signal?.aborted) throw abortError(signal)
 			const config = options.getConfig()
-			const background = config.capabilities.includes("backgroundAgents")
-			if (!background && "waitMs" in params) throw new Error("waitMs requires the backgroundAgents capability")
+			const background = config.backgroundAgents
+			if (!background && "waitMs" in params) throw new Error("waitMs requires backgroundAgents")
 			if (
 				"waitMs" in params &&
 				(typeof params.waitMs !== "number" || !Number.isInteger(params.waitMs) || params.waitMs < 0 || params.waitMs > 600_000)
@@ -312,25 +316,44 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 }
 
 export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOptions): void {
-	const background = options.getConfig().capabilities.includes("backgroundAgents")
+	const background = options.getConfig().backgroundAgents
+	// Foreground agents remain a producer by default; the parent knows allowed producers and owned kinds.
+	const agentInput = options.agentInputEnabled?.() ?? true
+	const bashInput = options.bashInputEnabled?.() ?? options.getConfig().backgroundBash
 	pi.registerTool({
 		name: "task_input",
 		label: "Task Input",
-		description: background
-			? "Send a durable Follow-up or live Steer to an owned Lovely Agent task."
-			: "Run a Follow-up on an idle owned task and wait for its terminal reply, or send a run-scoped live Steer. Busy tasks reject Follow-ups.",
-		promptSnippet: "Send Follow-up work or a live Steer to a durable task",
-		promptGuidelines: ["Use Follow-up for later work; use Steer only to redirect a currently running agent."],
+		description:
+			[
+				...(agentInput
+					? [
+							background
+								? "Send a durable Follow-up or live Steer to an owned Lovely Agent task."
+								: "Run a Follow-up on an idle owned task and wait for its terminal reply, or send a run-scoped live Steer. Busy tasks reject Follow-ups."
+						]
+					: []),
+				...(bashInput ? ["Write literal stdin to a running owned Bash task; eof closes stdin. Empty content requires eof:true."] : [])
+			].join(" ") || "Send input to an owned task.",
+		promptSnippet: agentInput
+			? `Send Follow-up work or a live Steer${bashInput ? ", or literal Bash stdin" : ""} to a durable task`
+			: bashInput
+				? "Write literal stdin to a running Bash task"
+				: "Send input to an owned task",
+		promptGuidelines: [
+			...(agentInput ? ["Use Follow-up for later work; use Steer only to redirect a currently running agent."] : []),
+			...(bashInput ? ["For Bash, omit delivery and write literal stdin; eof closes stdin without restarting the command."] : [])
+		],
 		parameters: Type.Object(
 			{
 				id: Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" }),
-				content: Type.String({ minLength: 1, description: "Input text" }),
-				delivery: Type.Optional(Type.Union([Type.Literal("followup"), Type.Literal("steer")]))
+				content: Type.String({ minLength: bashInput ? 0 : 1, description: "Input text" }),
+				...(agentInput ? { delivery: Type.Optional(Type.Union([Type.Literal("followup"), Type.Literal("steer")])) } : {}),
+				...(bashInput ? { eof: Type.Optional(Type.Boolean({ description: "Close Bash stdin after writing content" })) } : {})
 			},
 			{ additionalProperties: false }
 		),
 		renderCall(args, theme) {
-			const delivery = args.delivery ?? "followup"
+			const delivery = args.delivery ?? (args.id?.startsWith("b_") ? "stdin" : "followup")
 			const content = args.content ?? ""
 			const preview = content.length > 60 ? `${content.slice(0, 57)}...` : content
 			return new Text(
@@ -341,18 +364,31 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 		},
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if ("waitMs" in params) throw new Error("task_input does not accept waitMs")
-			const requestedDelivery = params.delivery ?? "followup"
-			const result = await sendTaskInput(ctx, options, params.id, params.content, requestedDelivery, signal)
+			if (params.delivery !== undefined && params.delivery !== "followup" && params.delivery !== "steer") {
+				throw new Error("delivery must be followup or steer")
+			}
+			if (params.eof !== undefined && typeof params.eof !== "boolean") throw new Error("eof must be boolean")
+			const result = await sendTaskInput(
+				ctx,
+				options,
+				params.id,
+				params.content,
+				params.delivery,
+				signal,
+				params.eof !== undefined ? { eof: params.eof } : {}
+			)
 			return {
 				content: [
 					{
 						type: "text",
 						text:
-							result.effectiveDelivery === "steer"
-								? `${result.id}: steer delivered (${result.state}; ${result.queuedFollowUps} Follow-ups queued)`
-								: result.output
-									? `${result.id}: followup ${result.latestOutcome}\n${result.output.text}`
-									: `${result.id}: followup accepted (position ${result.queuePosition}; ${result.state}; ${result.queuedFollowUps} queued)`
+							result.effectiveDelivery === "stdin"
+								? `${result.id}: stdin delivered${params.eof ? " (EOF)" : ""}`
+								: result.effectiveDelivery === "steer"
+									? `${result.id}: steer delivered (${result.state}; ${result.queuedFollowUps} Follow-ups queued)`
+									: result.output
+										? `${result.id}: followup ${result.latestOutcome}\n${result.output.text}`
+										: `${result.id}: followup accepted (position ${result.queuePosition}; ${result.state}; ${result.queuedFollowUps} queued)`
 					}
 				],
 				details: result
@@ -366,8 +402,8 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 			label: action === "stop" ? "Task Stop" : "Task Discard",
 			description:
 				action === "stop"
-					? "Stop active or queued work for an owned Lovely Agent task while preserving its session."
-					: "Stop and permanently discard an owned Lovely Agent subtree, archiving its files. Unsupported metadata versions can also be archived.",
+					? "Stop active or queued work for an owned Agent or Bash task while preserving its files."
+					: "Stop and permanently discard an owned task subtree, archiving its files. Unsupported metadata versions can also be archived.",
 			promptSnippet: action === "stop" ? "Stop work for a durable task" : "Discard a durable task",
 			promptGuidelines:
 				action === "discard"
@@ -406,24 +442,53 @@ export async function sendTaskInput(
 	options: AgentToolOptions,
 	id: string,
 	content: string,
-	requestedDelivery: "followup" | "steer",
-	signal?: AbortSignal
+	requestedDelivery: "followup" | "steer" | undefined = undefined,
+	signal?: AbortSignal,
+	inputOptions: { eof?: boolean } = {}
 ): Promise<TaskInputResult> {
 	if (signal?.aborted) throw abortError(signal)
-	validateInput(content, "content", MAX_AGENT_INPUT_BYTES)
+	if (typeof content !== "string") throw new Error("content must be a string")
+	if (inputOptions.eof !== undefined && typeof inputOptions.eof !== "boolean") throw new Error("eof must be boolean")
+	if (requestedDelivery !== undefined && requestedDelivery !== "followup" && requestedDelivery !== "steer") {
+		throw new Error("delivery must be followup or steer")
+	}
+	if (!id.startsWith("b_")) validateInput(content, "content", MAX_AGENT_INPUT_BYTES)
 	const lease = await acquireParentLease(ctx.cwd, ctx.sessionManager.getSessionId())
 	const paths = taskStoragePaths(lease.paths, id)
 	const loaded = await readTaskMetadata(paths)
 	if (loaded.status === "missing") throw new Error(`Unknown Task Reference: ${id}`)
 	if (loaded.status === "invalid") throw new Error(loaded.diagnostic.message)
 	if (loaded.metadata.discardedAt !== null) throw new Error(`Task ${id} has been discarded`)
+	if (loaded.metadata.kind === "bash") {
+		if (requestedDelivery !== undefined) throw new Error("Bash input does not accept delivery; omit it to write stdin")
+		if (Buffer.byteLength(content, "utf8") > MAX_AGENT_INPUT_BYTES)
+			throw new Error(`content must be at most ${MAX_AGENT_INPUT_BYTES} UTF-8 bytes`)
+		if (content.length === 0 && !inputOptions.eof) throw new Error("Empty Bash input requires eof")
+		const resident = getAgentCoordinator().getResident(paths.taskDirectory)
+		if (loaded.metadata.state !== "running" || !resident?.input)
+			throw new Error(`Bash task ${id} requires a live running resident for stdin`)
+		const accepted = await resident.input(content, "stdin", { ...inputOptions, ...(signal ? { signal } : {}) })
+		const current = await readTaskMetadata(paths)
+		if (current.status !== "ok") throw new Error(`Could not read accepted task ${id}`)
+		return {
+			id,
+			requestedDelivery,
+			effectiveDelivery: accepted.delivery,
+			queuePosition: accepted.queuePosition,
+			state: current.metadata.state,
+			latestOutcome: current.metadata.latestOutcome,
+			queuedFollowUps: accepted.queuedFollowUps
+		}
+	}
+	if (inputOptions.eof !== undefined) throw new Error("eof is only supported for Bash stdin")
+	const delivery = requestedDelivery ?? "followup"
 	let accepted: ResidentInputResult | undefined
 	while (!accepted) {
 		if (signal?.aborted) throw abortError(signal)
 		const runtime = await controllableRuntime(ctx, paths, options)
 		try {
-			accepted = await runtime.input(content, requestedDelivery, {
-				background: options.getConfig().capabilities.includes("backgroundAgents"),
+			accepted = await runtime.input(content, delivery, {
+				background: options.getConfig().backgroundAgents,
 				...(signal ? { signal } : {})
 			})
 		} catch (error) {
@@ -435,7 +500,7 @@ export async function sendTaskInput(
 	if (current.status !== "ok") throw new Error(`Could not read accepted task ${id}`)
 	return {
 		id,
-		requestedDelivery,
+		requestedDelivery: delivery,
 		effectiveDelivery: accepted.delivery,
 		queuePosition: accepted.queuePosition,
 		state: accepted.completed?.state ?? current.metadata.state,
@@ -466,7 +531,7 @@ export async function controlTaskLifecycle(ctx: ExtensionContext, id: string, ac
 	if (loaded.status === "invalid") throw new Error(loaded.diagnostic.message)
 	if (loaded.metadata.discardedAt !== null) throw new Error(`Task ${id} has been discarded`)
 	await stopTask(paths)
-	await stopOwnedTaskTree(ctx.cwd, loaded.metadata.childSessionId)
+	if (loaded.metadata.kind === "agent") await stopOwnedTaskTree(ctx.cwd, loaded.metadata.childSessionId)
 	loaded = await readTaskMetadata(paths)
 	if (loaded.status !== "ok") throw new Error(`Could not read task ${id}`)
 	const metadata = loaded.metadata
@@ -514,7 +579,7 @@ class AgentRuntime implements ResidentAgent {
 	#recoveryWait: (ReturnType<typeof deferred<RecoveryMode>> & { mode: RecoveryMode | undefined }) | undefined
 	#recoveryMode: Exclude<RecoveryMode, "stop"> | undefined
 
-	constructor(paths: TaskStoragePaths, child: ChildSessionHandle, metadata: TaskMetadata, expandPromptTemplates: boolean) {
+	constructor(paths: TaskStoragePaths, child: ChildSessionHandle, metadata: AgentTaskMetadata, expandPromptTemplates: boolean) {
 		this.#paths = paths
 		this.#child = child
 		this.#initialRunId = metadata.activeRun?.kind === "initial" ? metadata.activeRun.id : undefined
@@ -629,7 +694,8 @@ class AgentRuntime implements ResidentAgent {
 		this.#child.dispose()
 	}
 
-	async input(content: string, delivery: "followup" | "steer", options: ResidentInputOptions = {}): Promise<ResidentInputResult> {
+	async input(content: string, delivery: "followup" | "steer" | "stdin", options: ResidentInputOptions = {}): Promise<ResidentInputResult> {
+		if (delivery === "stdin" || options.eof !== undefined) throw new Error("Agent tasks do not accept stdin or eof")
 		if (!this.#accepting || this.#disposed) throw new RuntimeClosingError()
 		let result: ResidentInputResult | undefined
 		let acceptedRun: NonNullable<TaskMetadata["activeRun"]> | undefined
@@ -1163,6 +1229,7 @@ async function openColdRuntime(ctx: ExtensionContext, paths: TaskStoragePaths, o
 	const loaded = await readTaskMetadata(paths)
 	if (loaded.status !== "ok") throw new Error(`Could not load task ${paths.taskRef}`)
 	const metadata = loaded.metadata
+	if (metadata.kind !== "agent") throw new Error("Bash tasks cannot be cold reopened")
 	if (metadata.discardedAt !== null) throw new Error(`Task ${paths.taskRef} has been discarded`)
 	if (metadata.state !== "idle" && metadata.state !== "interrupted") {
 		throw new Error(`Task ${paths.taskRef} has active state ${metadata.state} but no resident runtime`)
@@ -1215,6 +1282,7 @@ function buildAgentCreationToolResult(
 	output: Awaited<ReturnType<typeof readRetainedOutput>>,
 	tasks: Awaited<ReturnType<typeof loadTaskList>>["details"]
 ): { content: [{ type: "text"; text: string }]; details: AgentCreationResult } {
+	if (metadata.kind !== "agent") throw new Error("Expected an Agent task")
 	const result: AgentCreationResult = {
 		id: metadata.taskRef,
 		label: metadata.label,

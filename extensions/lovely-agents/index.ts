@@ -1,8 +1,9 @@
 import { BorderedLoader, CustomEditor, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent"
 import { ScopedConfigEditor } from "@xl0/pi-lovely-config"
 import { controlTaskLifecycle, recoverProviderTuple, registerAgentTool, registerTaskInputTool, sendTaskInput } from "./agent.js"
+import { registerBashTool } from "./bash.js"
 import { type AgentsConfig, type AgentsConfigWarning, createAgentsConfigSpec, defaultAgentsConfig, resolveAgentsConfig } from "./config.js"
-import { getAgentCoordinator } from "./coordinator.js"
+import { getAgentCoordinator, getBashCoordinator } from "./coordinator.js"
 import { discoverAgentDefinitions } from "./definitions.js"
 import { reconcileParentTasks, recoverOwnedTaskTree, stopOwnedTaskTree } from "./lifecycle.js"
 import { type ManagementUiOptions, openManagementUi, openTaskManagementUi, stopFixtureTimersFor } from "./management.js"
@@ -35,6 +36,8 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	let unbindDisposal: (() => void) | undefined
 	let toolRevision = 0
 	let toolSession = 0
+	let agentInputEnabled = true
+	let bashInputEnabled = false
 	const hiddenTools = new Set<string>()
 
 	pi.registerMessageRenderer(NOTIFICATION_CUSTOM_TYPE, renderAgentNotification)
@@ -54,16 +57,32 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		const revision = ++toolRevision
 		const session = getAgentCoordinator().getSessionContext(ctx.sessionManager.getSessionId())
 		const active = pi.getActiveTools()
-		const canCreate =
+		const canCreateAgent =
 			session?.allowAgents !== false &&
 			(session?.depth ?? 0) < configValue.maxDepth &&
 			(active.includes("agent") || hiddenTools.has("agent"))
-		// Background Bash is not a task producer until implemented.
-		const owned = canCreate ? undefined : (await loadTaskList(ctx.cwd, ctx.sessionManager.getSessionId())).details
+		const canCreateBash = configValue.backgroundBash && (active.includes("bash_bg") || hiddenTools.has("bash_bg"))
+		const owned = (await loadTaskList(ctx.cwd, ctx.sessionManager.getSessionId())).details
 		if (revision !== toolRevision) return
-		const canControl = canCreate || (!!owned && (owned.total > 0 || owned.diagnostics.length > 0))
+		const agentInput = canCreateAgent || owned.tasks.some(task => task.kind === "agent")
+		const bashInput = canCreateBash || owned.tasks.some(task => task.kind === "bash")
+		if (agentInput !== agentInputEnabled || bashInput !== bashInputEnabled) {
+			agentInputEnabled = agentInput
+			bashInputEnabled = bashInput
+			registerInputs()
+		}
+		const canControl = canCreateAgent || canCreateBash || owned.total > 0 || owned.diagnostics.length > 0
 		const current = pi.getActiveTools()
-		const allowed = (name: string) => (CREATION_TOOLS.has(name) ? canCreate : TASK_TOOLS.has(name) ? canControl : true)
+		const allowed = (name: string) =>
+			CREATION_TOOLS.has(name)
+				? canCreateAgent
+				: name === "bash_bg"
+					? canCreateBash
+					: name === "task_input"
+						? agentInput || bashInput
+						: TASK_TOOLS.has(name)
+							? canControl
+							: true
 		const next = current.filter(name => {
 			if (allowed(name)) return true
 			hiddenTools.add(name)
@@ -83,14 +102,21 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			if (revision === toolRevision) ctx.ui.notify(`Lovely Agents tool visibility: ${errorMessage(error)}`, "error")
 		})
 	}
+	const registerInputs = () =>
+		registerTaskInputTool(pi, {
+			getConfig: () => configValue,
+			agentInputEnabled: () => agentInputEnabled,
+			bashInputEnabled: () => bashInputEnabled
+		})
 
 	const applyConfig = (value: AgentsConfig, warnings: AgentsConfigWarning[], ctx: ExtensionContext) => {
 		configValue = value
 		configWarnings = warnings
 		getAgentCoordinator(value.maxConcurrency).setMaxConcurrency(value.maxConcurrency)
+		getBashCoordinator(value.maxBashConcurrency).setMaxConcurrency(value.maxBashConcurrency)
 		notifyConfigWarnings(ctx, warnings)
 		registerAgentTool(pi, { getConfig: () => configValue, canDelegate: () => currentDepth + 1 < configValue.maxDepth })
-		registerTaskInputTool(pi, { getConfig: () => configValue })
+		registerInputs()
 		updateTools(ctx)
 	}
 	const loadConfig = (ctx: ExtensionContext) => {
@@ -112,16 +138,18 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			await taskPanel?.refresh()
 			taskPanel?.focus()
 		},
-		inputTask: async (id, content, delivery) => {
+		inputTask: async (id, content, delivery, eof) => {
 			const options = { getConfig: () => configValue }
-			if (configValue.capabilities.includes("backgroundAgents")) {
-				await sendTaskInput(ctx, options, id, content, delivery)
+			const send = (signal?: AbortSignal) =>
+				sendTaskInput(ctx, options, id, content, delivery === "stdin" ? undefined : delivery, signal, eof === undefined ? {} : { eof })
+			if (configValue.backgroundAgents && delivery !== "stdin") {
+				await send()
 				return
 			}
 			const failed = await ctx.ui.custom<{ error: unknown; cancelled: boolean } | undefined>((tui, theme, _keys, done) => {
-				const loader = new BorderedLoader(tui, theme, `Running ${delivery} for ${id}…`)
-				// Esc aborts the run; keep the dialog until its owned work has stopped.
-				void sendTaskInput(ctx, options, id, content, delivery, loader.signal).then(
+				const loader = new BorderedLoader(tui, theme, `${delivery === "stdin" ? "Sending" : "Running"} ${delivery} for ${id}…`)
+				// Cancel the pending operation; already-written stdin cannot be undone.
+				void send(loader.signal).then(
 					() => done(undefined),
 					error => done({ error, cancelled: loader.signal.aborted })
 				)
@@ -328,7 +356,8 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		getDepth: () => currentDepth
 	})
 	registerAgentTool(pi, { getConfig: () => configValue, canDelegate: () => currentDepth + 1 < configValue.maxDepth })
-	registerTaskInputTool(pi, { getConfig: () => configValue })
+	registerBashTool(pi, { getConfig: () => configValue })
+	registerInputs()
 	registerTaskTools(pi, {
 		beforeParentLeaseRelease: async (cwd, parentSessionId) => {
 			try {

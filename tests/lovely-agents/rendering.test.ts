@@ -40,9 +40,12 @@ test("notifications use a distinct header and hide even short bodies until expan
 		'Task a_12345678 "Review 界🙂" completed: succeeded',
 		'Task a_12345678 "Review 界🙂" completed: failed',
 		'Task a_12345678 "Review 界🙂" suspended by a provider limit',
-		'Task a_12345678 "Review 界🙂" interrupted'
+		'Task a_12345678 "Review 界🙂" interrupted',
+		'Task b_12345678 "Build 界🙂" completed: succeeded',
+		'Task b_12345678 "Build 界🙂" interrupted'
 	]) {
-		const content = `[Lovely Agent a_12345678:r_0000000000000001:completion]\n${summary}\nOutput:\nShort reply`
+		const id = summary.slice(5, 15)
+		const content = `[Lovely ${id.startsWith("b_") ? "Bash" : "Agent"} ${id}:r_0000000000000001:completion]\n${summary}\nOutput:\nShort reply`
 		const message = { role: "custom" as const, timestamp: 0, customType: "lovely-agents:notification", content, display: true }
 		for (const outputPad of [0, 2]) {
 			const collapsed = renderAgentNotification(message, { expanded: false, outputPad }, notificationTheme)

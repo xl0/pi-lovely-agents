@@ -3,6 +3,7 @@ import { chmod, mkdir, readdir, readFile, stat, symlink, unlink, writeFile } fro
 import { join } from "node:path"
 import {
 	acquireParentLease,
+	type BashTaskMetadata,
 	createTaskReference,
 	ensureParentStorage,
 	mutateTaskMetadata,
@@ -167,6 +168,69 @@ describe("parent partition leases", () => {
 })
 
 describe("task metadata", () => {
+	test("validates real Bash records, kind/reference matching, and initial-only execution", async () => {
+		await withTempWorkspace(async workspace => {
+			const parent = await ensureParentStorage(workspace.cwd, "parent")
+			expect(createTaskReference("bash")).toMatch(/^b_[0-9a-f]{8}$/)
+			const paths = await reserveTaskStorage(parent, () => "b_0123abcd")
+			const bash: BashTaskMetadata = {
+				version: TASK_METADATA_VERSION,
+				kind: "bash",
+				taskRef: paths.taskRef,
+				parentSessionId: "parent",
+				label: "Shell",
+				command: "printf hello",
+				cwd: workspace.cwd,
+				exitCode: null,
+				signal: null,
+				state: "queued",
+				latestOutcome: null,
+				latestReply: null,
+				lastRunSequence: 1,
+				activeRun: {
+					id: "r_0000000000000001",
+					sequence: 1,
+					kind: "initial",
+					state: "queued",
+					input: "printf hello",
+					acceptedAt: 1,
+					background: true
+				},
+				queuedFollowUps: [],
+				notifications: [],
+				discardedAt: null,
+				createdAt: 1,
+				updatedAt: 1
+			}
+			await writeTaskMetadata(paths, bash)
+			expect(await readTaskMetadata(paths)).toMatchObject({ status: "ok", metadata: bash })
+			const before = await readFile(paths.metadata, "utf8")
+			for (const patch of [
+				{ taskRef: "a_0123abcd" },
+				{ kind: "agent" },
+				{ cwd: "../relative" },
+				{ command: "  " },
+				{ command: "x".repeat(65537) },
+				{ childSessionId: "child" },
+				{ model: { provider: "bash", id: "process" } },
+				{ sessionConfig: {} },
+				{ thinking: "off" },
+				{ definitionName: "bash" },
+				{ depth: 1 },
+				{ allowAgents: false },
+				{ effectiveSystemPrompt: "" },
+				{ lastRunSequence: 2 },
+				{ activeRun: { ...bash.activeRun, kind: "followup" } },
+				{ state: "suspended", activeRun: { ...bash.activeRun, state: "suspended", startedAt: 1 } },
+				{ queuedFollowUps: [{ id: "r_0000000000000002", sequence: 2, content: "again", acceptedAt: 1 }] }
+			]) {
+				await expect(writeTaskMetadata(paths, { ...bash, ...patch } as TaskMetadata)).rejects.toThrow()
+				expect(await readFile(paths.metadata, "utf8")).toBe(before)
+			}
+			await expect(writeTaskMetadata(paths, metadata(paths))).rejects.toThrow()
+		})
+	})
+
 	test("retains boolean per-run policy and rejects malformed active or queued policy", async () => {
 		await withTaskStorage(async paths => {
 			const value: TaskMetadata = {

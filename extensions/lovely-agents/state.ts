@@ -4,11 +4,11 @@ import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, unlink } f
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { type Static, Type } from "typebox"
 import { Value } from "typebox/value"
-import { getAgentCoordinator } from "./coordinator.js"
+import { getAgentCoordinator, getBashCoordinator } from "./coordinator.js"
 import { bindTaskUpdateRoute, publishTaskUpdate } from "./updates.js"
 
 export const TASK_METADATA_VERSION = 3
-export const TASK_REFERENCE_PATTERN = /^a_[0-9a-f]{8}$/
+export const TASK_REFERENCE_PATTERN = /^[ab]_[0-9a-f]{8}$/
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
 export const STORAGE_GITIGNORE = "*\n"
 export const MAX_AGENT_INPUT_BYTES = 64 * 1024
@@ -97,11 +97,11 @@ const ParentLeaseFileSchema = Type.Object(
 )
 
 /** Durable current snapshot for one agent session. */
-export const TaskMetadataSchema = Type.Object(
+export const AgentTaskMetadataSchema = Type.Object(
 	{
 		version: Type.Literal(TASK_METADATA_VERSION),
 		kind: Type.Literal("agent"),
-		taskRef: Type.String({ pattern: TASK_REFERENCE_PATTERN.source }),
+		taskRef: Type.String({ pattern: "^a_[0-9a-f]{8}$" }),
 		parentSessionId: Type.String({ pattern: SESSION_ID_PATTERN.source }),
 		childSessionId: Type.String({ pattern: SESSION_ID_PATTERN.source }),
 		definitionName: Type.String({ pattern: DEFINITION_NAME_PATTERN }),
@@ -164,7 +164,46 @@ export const TaskMetadataSchema = Type.Object(
 	{ additionalProperties: false }
 )
 
-export type TaskMetadata = Static<typeof TaskMetadataSchema>
+/** One shell invocation, without a Pi session or a reusable agent recipe. */
+export const BashTaskMetadataSchema = Type.Object(
+	{
+		...Type.Pick(AgentTaskMetadataSchema, [
+			"version",
+			"parentSessionId",
+			"label",
+			"inputPreview",
+			"state",
+			"latestOutcome",
+			"latestReply",
+			"lastActivity",
+			"lastRunSequence",
+			"activeRun",
+			"queuedFollowUps",
+			"notifications",
+			"discardedAt",
+			"createdAt",
+			"updatedAt"
+		]).properties,
+		kind: Type.Literal("bash"),
+		latestReply: Type.Union([
+			Type.Object(
+				{ text: Type.String(), streaming: Type.Boolean(), truncated: Type.Optional(Type.Boolean()) },
+				{ additionalProperties: false }
+			),
+			Type.Null()
+		]),
+		taskRef: Type.String({ pattern: "^b_[0-9a-f]{8}$" }),
+		command: Type.String({ minLength: 1 }),
+		cwd: Type.String({ minLength: 1 }),
+		exitCode: Type.Union([Type.Integer(), Type.Null()]),
+		signal: Type.Union([Type.String({ minLength: 1 }), Type.Null()])
+	},
+	{ additionalProperties: false }
+)
+export const TaskMetadataSchema = Type.Union([AgentTaskMetadataSchema, BashTaskMetadataSchema])
+export type AgentTaskMetadata = Static<typeof AgentTaskMetadataSchema>
+export type BashTaskMetadata = Static<typeof BashTaskMetadataSchema>
+export type TaskMetadata = AgentTaskMetadata | BashTaskMetadata
 type ParentLeaseFile = Static<typeof ParentLeaseFileSchema>
 
 /** Filesystem locations owned by one parent Pi session. */
@@ -183,6 +222,7 @@ export type TaskStoragePaths = ParentStoragePaths & {
 	metadata: string
 	session: string
 	history: string
+	output: string
 }
 
 /** Process-global ownership proof for one parent partition. */
@@ -191,14 +231,17 @@ export type ParentLease = Readonly<ParentLeaseFile & { paths: Readonly<ParentSto
 /** Stable model-visible paths for retained task artifacts. */
 export type RetainedPaths = {
 	history: string
-	session: string
+	session?: string
+	output?: string
 }
 
 /** Chronological inputs, replies, compact tool summaries, and run outcomes. */
 export type HistoryEntry =
 	| { type: "run-start"; sequence: number; kind: "initial" | "followup"; timestamp: number }
-	| { type: "input"; delivery: "initial" | "followup" | "steer"; timestamp: number; content: string }
+	| { type: "input"; delivery: "initial" | "followup" | "steer" | "stdin"; timestamp: number; content: string }
 	| { type: "assistant"; content: string }
+	| { type: "output"; content: string }
+	| { type: "stdin"; content: string; timestamp: number; eof?: boolean }
 	| { type: "run-end"; sequence: number; outcome: Static<typeof RunOutcome>; timestamp: number; summary?: string }
 	| { type: "tool"; tool: string; arguments: string; result: string; isError: boolean }
 
@@ -207,7 +250,7 @@ export type RetainedOutputReadOptions = {
 	signal?: AbortSignal
 }
 
-/** Latest assistant reply only; run status is independent of reply streaming. */
+/** Latest agent reply or Bash output tail; run status is independent of streaming. */
 export type RetainedOutputRead = {
 	text: string
 	totalLines: number
@@ -221,6 +264,8 @@ export type RetainedOutputRead = {
 	queueReason: "capacity" | "provider-limit" | "starting" | null
 	/** Held process-wide execution permits, not the number of tasks in running state. */
 	capacity: { active: number; limit: number }
+	exitCode?: number | null
+	signal?: string | null
 	paths: RetainedPaths
 }
 
@@ -293,7 +338,8 @@ export function taskStoragePaths(parent: ParentStoragePaths, taskRef: string): T
 		taskDirectory,
 		metadata: join(taskDirectory, "metadata.json"),
 		session: join(taskDirectory, "session.jsonl"),
-		history: join(taskDirectory, "history.md")
+		history: join(taskDirectory, "history.md"),
+		output: join(taskDirectory, "output.log")
 	}
 }
 
@@ -302,7 +348,9 @@ export function archivedTaskStoragePaths(paths: TaskStoragePaths): TaskStoragePa
 }
 
 /** Only ownership is decoded across versions. Unsupported execution recipes stay unreadable. */
-export async function readTaskIdentity(paths: TaskStoragePaths): Promise<{ childSessionId: string } | undefined> {
+export async function readTaskIdentity(
+	paths: TaskStoragePaths
+): Promise<{ kind: "agent"; childSessionId: string } | { kind: "bash" } | undefined> {
 	try {
 		await assertRegularDirectory(dirname(paths.parentDirectory))
 		await assertRegularDirectory(paths.parentDirectory)
@@ -317,11 +365,20 @@ export async function readTaskIdentity(paths: TaskStoragePaths): Promise<{ child
 	if (!isRecord(value) || property(value, "taskRef") !== paths.taskRef || property(value, "parentSessionId") !== paths.parentSessionId) {
 		throw new Error("Metadata identity does not match its parent/task path")
 	}
+	const kind = property(value, "kind")
+	if (kind === "bash" && paths.taskRef.startsWith("b_")) {
+		if (property(value, "childSessionId") !== undefined) throw new Error("Bash task cannot own a child session")
+		return { kind }
+	}
+	// Older agent identities did not require kind; decode ownership only, never their recipe.
+	const legacyAgent =
+		kind === undefined && typeof property(value, "version") === "number" && property(value, "version") !== TASK_METADATA_VERSION
+	if ((kind !== "agent" && !legacyAgent) || !paths.taskRef.startsWith("a_")) throw new Error("Task kind does not match its reference")
 	const childSessionId = property(value, "childSessionId")
 	if (typeof childSessionId !== "string" || !SESSION_ID_PATTERN.test(childSessionId) || childSessionId === paths.parentSessionId) {
 		throw new Error("Invalid child session identity")
 	}
-	return { childSessionId }
+	return { kind: "agent", childSessionId }
 }
 
 /** Moves stopped work under archive without rewriting its retained metadata. */
@@ -346,8 +403,8 @@ export async function archiveTaskStorage(paths: TaskStoragePaths): Promise<void>
 	})
 }
 
-export function createTaskReference(): string {
-	return `a_${randomBytes(4).toString("hex")}`
+export function createTaskReference(kind: TaskMetadata["kind"] = "agent"): string {
+	return `${kind === "bash" ? "b" : "a"}_${randomBytes(4).toString("hex")}`
 }
 
 /** Creates and verifies the private root and exact parent partition. */
@@ -486,9 +543,10 @@ export async function releaseParentLeaseFor(cwd: string, parentSessionId: string
 	return true
 }
 
-/** Creates empty retained logs without touching Pi's authoritative session. */
+/** Creates missing logs without overwriting retained content. */
 export async function initializeRetainedLogs(paths: TaskStoragePaths): Promise<void> {
 	await ensurePrivateLogFile(paths.history)
+	await ensurePrivateLogFile(paths.taskRef.startsWith("b_") ? paths.output : paths.session)
 	await syncDirectory(paths.taskDirectory)
 }
 
@@ -501,10 +559,13 @@ export async function appendHistoryLog(paths: TaskStoragePaths, entry: HistoryEn
 export async function writeTaskProgress(
 	paths: TaskStoragePaths,
 	runId: string,
-	progress: Partial<Pick<TaskMetadata, "latestReply" | "lastActivity" | "effectiveSystemPrompt">>
+	progress: Partial<Pick<TaskMetadata, "latestReply" | "lastActivity">> & { effectiveSystemPrompt?: string }
 ): Promise<void> {
 	await mutateTaskMetadata(paths, metadata => {
 		if (metadata.discardedAt !== null || metadata.activeRun?.id !== runId || metadata.state !== "running") return metadata
+		if (metadata.kind === "bash" && progress.effectiveSystemPrompt !== undefined) {
+			throw new Error("Bash tasks do not have a system prompt")
+		}
 		return {
 			...metadata,
 			...progress,
@@ -515,14 +576,14 @@ export async function writeTaskProgress(
 
 /** Explain queued work without pretending to know its ETA or FIFO position. */
 export function taskSchedulingStatus(
-	metadata: Pick<TaskMetadata, "state" | "model">
+	metadata: Pick<AgentTaskMetadata, "kind" | "state" | "model"> | Pick<BashTaskMetadata, "kind" | "state">
 ): Pick<RetainedOutputRead, "queueReason" | "capacity"> {
-	const coordinator = getAgentCoordinator()
+	const coordinator = metadata.kind === "bash" ? getBashCoordinator() : getAgentCoordinator()
 	const capacity = { active: coordinator.activeCount, limit: coordinator.maxConcurrency }
 	const queueReason =
 		metadata.state !== "queued"
 			? null
-			: !coordinator.isTupleOpen({ provider: metadata.model.provider, model: metadata.model.id })
+			: metadata.kind === "agent" && !coordinator.isTupleOpen({ provider: metadata.model.provider, model: metadata.model.id })
 				? "provider-limit"
 				: capacity.active >= capacity.limit
 					? "capacity"
@@ -533,7 +594,9 @@ export function taskSchedulingStatus(
 export function retainedPaths(paths: TaskStoragePaths): RetainedPaths {
 	return {
 		history: displayWorkspacePath(paths.workspace, paths.history),
-		session: displayWorkspacePath(paths.workspace, paths.session)
+		...(paths.taskRef.startsWith("b_")
+			? { output: displayWorkspacePath(paths.workspace, paths.output) }
+			: { session: displayWorkspacePath(paths.workspace, paths.session) })
 	}
 }
 
@@ -568,9 +631,15 @@ export function retainedOutputSnapshot(paths: TaskStoragePaths, metadata: TaskMe
 	const fullText = metadata.latestReply?.text ?? ""
 	const lines = splitCompleteLines(fullText)
 	const text = truncateUtf8(lines.slice(0, RETAINED_OUTPUT_MAX_LINES).join("\n"), RETAINED_OUTPUT_MAX_BYTES)
-	const truncated = lines.length > RETAINED_OUTPUT_MAX_LINES || Buffer.byteLength(fullText) > RETAINED_OUTPUT_MAX_BYTES
+	const snapshotTruncated = lines.length > RETAINED_OUTPUT_MAX_LINES || Buffer.byteLength(fullText) > RETAINED_OUTPUT_MAX_BYTES
+	const truncated = snapshotTruncated || (metadata.kind === "bash" && metadata.latestReply?.truncated === true)
 	return {
-		text: truncated ? `${text}\n\n[Reply truncated. Full replies: ${retainedPaths(paths).history}]` : fullText,
+		text:
+			metadata.kind === "bash"
+				? `${snapshotTruncated ? text : fullText}\n\n[${truncated ? "Output truncated; showing tail. " : ""}Full output: ${retainedPaths(paths).output}]`
+				: truncated
+					? `${text}\n\n[Reply truncated. Full replies: ${retainedPaths(paths).history}]`
+					: fullText,
 		totalLines: lines.length,
 		truncated,
 		timedOut,
@@ -579,6 +648,7 @@ export function retainedOutputSnapshot(paths: TaskStoragePaths, metadata: TaskMe
 		streaming: metadata.state === "running" && (metadata.latestReply?.streaming ?? false),
 		queuedFollowUps: metadata.queuedFollowUps.length,
 		lastActivity: metadata.lastActivity ?? null,
+		...(metadata.kind === "bash" ? { exitCode: metadata.exitCode, signal: metadata.signal } : {}),
 		...taskSchedulingStatus(metadata),
 		paths: retainedPaths(paths)
 	}
@@ -673,7 +743,7 @@ export function mutateTaskMetadata(
 			updated.latestReply = null
 			updated.lastActivity = { at: updated.updatedAt, action: updated.state }
 			updated.inputPreview = historyPreview(updated.activeRun.input, 512)
-			delete updated.effectiveSystemPrompt
+			if (updated.kind === "agent") delete updated.effectiveSystemPrompt
 		}
 		if (updated.state !== "running" && updated.latestReply) updated.latestReply.streaming = false
 		assertMetadataForPath(paths, updated)
@@ -698,6 +768,17 @@ function validateTaskMetadata(value: unknown): { ok: true; value: TaskMetadata }
 }
 
 function taskMetadataSemanticError(value: TaskMetadata): string | undefined {
+	if (value.kind === "bash") {
+		const commandError = inputValidationError(value.command, "/command")
+		if (commandError) return commandError
+		if (!isAbsolute(value.cwd)) return "/cwd must be absolute"
+		if (value.state === "suspended") return "Bash tasks cannot be suspended"
+		if (value.queuedFollowUps.length > 0) return "Bash tasks cannot queue Follow-ups"
+		if (value.lastRunSequence > 1 || (value.activeRun && (value.activeRun.kind !== "initial" || value.activeRun.sequence !== 1))) {
+			return "Bash tasks support only an initial run"
+		}
+		if (value.notifications.some(notification => notification.type === "suspension")) return "Bash tasks cannot suspend"
+	}
 	if (!value.label.trim()) return "/label must be nonblank"
 	if (Buffer.byteLength(value.label, "utf8") > MAX_AGENT_LABEL_BYTES) {
 		return `/label must be at most ${MAX_AGENT_LABEL_BYTES} UTF-8 bytes`
@@ -752,9 +833,17 @@ function renderHistoryEntry(entry: HistoryEntry): string {
 		case "run-start":
 			return `<run ${entry.sequence} ${entry.kind}>\n`
 		case "input":
-			return taggedBlockEntry(entry.delivery === "steer" ? "steer" : "user", entry.content)
+			return taggedBlockEntry(
+				entry.delivery === "stdin" ? "stdin" : entry.delivery === "steer" ? "steer" : "user",
+				entry.content,
+				entry.delivery === "stdin"
+			)
 		case "assistant":
 			return taggedBlockEntry("agent", entry.content)
+		case "output":
+			return taggedBlockEntry("output", entry.content)
+		case "stdin":
+			return `${taggedBlockEntry("stdin", entry.content, true)}${entry.eof ? "<stdin EOF>\n" : ""}`
 		case "run-end":
 			return `<outcome ${entry.outcome}>\n${entry.summary ? taggedBlockEntry("summary", entry.summary) : ""}\n`
 		case "tool":
@@ -762,9 +851,9 @@ function renderHistoryEntry(entry: HistoryEntry): string {
 	}
 }
 
-function taggedBlockEntry(tag: string, content: string): string {
-	const normalized = content.replace(/\r\n?/g, "\n").replace(/\n+$/, "")
-	return `<${tag}>\n${normalized}\n`
+function taggedBlockEntry(tag: string, content: string, literal = false): string {
+	const body = literal ? content : content.replace(/\r\n?/g, "\n").replace(/\n+$/, "")
+	return `<${tag}>\n${body}${body.endsWith("\n") ? "" : "\n"}`
 }
 
 function historyPreview(content: string, maximumBytes: number): string {

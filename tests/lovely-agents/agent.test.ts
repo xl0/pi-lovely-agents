@@ -9,20 +9,25 @@ import {
 	recoverProviderTuple,
 	registerAgentTool,
 	registerTaskInputTool,
+	sendTaskInput,
 	type TaskInputResult
 } from "../../extensions/lovely-agents/agent.js"
 import type { ChildSessionHandle, CreateChildSessionOptions } from "../../extensions/lovely-agents/child-session.js"
 import { type AgentsConfig, defaultAgentsConfig } from "../../extensions/lovely-agents/config.js"
-import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
+import { getAgentCoordinator, type ResidentInputOptions } from "../../extensions/lovely-agents/coordinator.js"
 import { recoverOwnedTaskTree } from "../../extensions/lovely-agents/lifecycle.js"
 import {
 	archivedTaskStoragePaths,
+	ensureParentStorage,
+	initializeRetainedLogs,
 	mutateTaskMetadata,
 	parentStoragePaths,
 	readRetainedOutput,
 	readTaskMetadata,
 	releaseParentLeaseFor,
-	taskStoragePaths
+	reserveTaskStorage,
+	taskStoragePaths,
+	writeTaskMetadata
 } from "../../extensions/lovely-agents/state.js"
 import { loadTaskList } from "../../extensions/lovely-agents/tools.js"
 import { definitionSource, withTempWorkspace } from "./test-helpers.js"
@@ -30,7 +35,7 @@ import { definitionSource, withTempWorkspace } from "./test-helpers.js"
 const selectedModel = model("anthropic", "sonnet")
 const config: AgentsConfig = {
 	...defaultAgentsConfig,
-	capabilities: ["backgroundAgents"],
+	backgroundAgents: true,
 	models: [],
 	maxConcurrency: 2,
 	maxDepth: 2,
@@ -68,7 +73,7 @@ describe("agent tool", () => {
 				const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
 				expect(received[0]?.selection).toEqual({ model: selectedModel, thinking: "low" })
 				const saved = await readTaskMetadata(paths)
-				if (saved.status !== "ok") throw new Error("Invalid saved task")
+				if (saved.status !== "ok" || saved.metadata.kind !== "agent") throw new Error("Invalid saved agent")
 				expect(saved.metadata.model).toEqual({ provider: "anthropic", id: "sonnet" })
 				while (!first.disposed) await Bun.sleep(1)
 				currentConfig.fastModel = "unavailable/model"
@@ -125,7 +130,9 @@ describe("agent tool", () => {
 			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
 			const metadata = await readTaskMetadata(paths)
 			expect(metadata.status === "ok" ? metadata.metadata.notifications : null).toEqual([])
-			expect(metadata.status === "ok" ? metadata.metadata.effectiveSystemPrompt : null).toBe("Effective fixture prompt")
+			expect(metadata.status === "ok" && metadata.metadata.kind === "agent" ? metadata.metadata.effectiveSystemPrompt : null).toBe(
+				"Effective fixture prompt"
+			)
 			expect(JSON.stringify(result)).not.toContain("Effective fixture prompt")
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
 		})
@@ -370,7 +377,7 @@ describe("agent tool", () => {
 				const details = created.details as AgentCreationResult
 				const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
 				expect(details.state).toBe("suspended")
-				current.capabilities = []
+				current.backgroundAgents = false
 
 				expect(recoverProviderTuple(tuple)).toBe(1)
 				await waitForSuspension(paths, fake, 2)
@@ -452,6 +459,143 @@ describe("agent tool", () => {
 })
 
 describe("task_input tool", () => {
+	test("advertises only the input modes enabled by producer/owned-kind callbacks", () => {
+		for (const agentInput of [false, true]) {
+			for (const bashInput of [false, true]) {
+				const tools = captureAgentTools(
+					"/unused",
+					async () => {
+						throw new Error("No child should load")
+					},
+					{ ...config, backgroundAgents: false, backgroundBash: !bashInput },
+					undefined,
+					() => bashInput,
+					() => agentInput
+				)
+				const advertised = JSON.stringify({
+					parameters: tools.input.parameters,
+					description: tools.input.description,
+					promptSnippet: tools.input.promptSnippet,
+					promptGuidelines: tools.input.promptGuidelines
+				})
+				expect(Value.Check(tools.input.parameters, { id: "a_12345678", content: "next", delivery: "followup" })).toBe(agentInput)
+				expect(Value.Check(tools.input.parameters, { id: "b_12345678", content: "", eof: true })).toBe(bashInput)
+				if (!agentInput) {
+					expect(tools.input.parameters).not.toHaveProperty("properties.delivery")
+					expect(advertised).not.toMatch(/follow.?up|steer/i)
+				}
+				if (!bashInput) {
+					expect(tools.input.parameters).not.toHaveProperty("properties.eof")
+					expect(advertised).not.toMatch(/stdin|EOF/)
+				}
+			}
+		}
+	})
+
+	test("dispatches omitted delivery to live Bash stdin, preserves literal bytes and EOF after disabling creation", async () => {
+		await withTempWorkspace(async workspace => {
+			const paths = await reserveTaskStorage(await ensureParentStorage(workspace.cwd, "parent-session"), () => "b_12345678")
+			await initializeRetainedLogs(paths)
+			await writeTaskMetadata(paths, {
+				version: 3,
+				kind: "bash",
+				taskRef: paths.taskRef,
+				parentSessionId: "parent-session",
+				label: "Input",
+				command: "cat",
+				cwd: workspace.cwd,
+				exitCode: null,
+				signal: null,
+				state: "running",
+				latestOutcome: null,
+				latestReply: null,
+				lastRunSequence: 1,
+				activeRun: {
+					id: "r_1111111111111111",
+					sequence: 1,
+					kind: "initial",
+					state: "running",
+					input: "cat",
+					acceptedAt: 1,
+					startedAt: 1,
+					background: true
+				},
+				queuedFollowUps: [],
+				notifications: [],
+				discardedAt: null,
+				createdAt: 1,
+				updatedAt: 1
+			})
+			const currentConfig = { ...config, backgroundAgents: false, backgroundBash: false }
+			const noColdLoad = async () => {
+				throw new Error("Must not cold-load Bash")
+			}
+			const tools = captureAgentTools(workspace.agentDir, noColdLoad, currentConfig, undefined, () => true)
+			expect(Value.Check(tools.input.parameters, { id: paths.taskRef, content: "", eof: true })).toBe(true)
+			const hidden = captureAgentTools(workspace.agentDir, noColdLoad, currentConfig)
+			expect(Value.Check(hidden.input.parameters, { id: paths.taskRef, content: "", eof: true })).toBe(false)
+			const enabled = captureAgentTools(workspace.agentDir, noColdLoad, { ...config, backgroundBash: true })
+			expect(Value.Check(enabled.input.parameters, { id: paths.taskRef, content: "", eof: true })).toBe(true)
+			const ctx = taskContext(workspace.cwd)
+			await expect(tools.input.execute("cold", { id: paths.taskRef, content: "x" }, undefined, ctx)).rejects.toThrow(
+				"live running resident"
+			)
+			const delivered: Array<{ content: string; delivery: string; options: ResidentInputOptions | undefined }> = []
+			const unbind = getAgentCoordinator().bindResident(paths.taskDirectory, {
+				stop() {},
+				dispose() {},
+				async input(content, delivery, options) {
+					delivered.push({ content, delivery, options })
+					return { delivery: "stdin", queuePosition: null, queuedFollowUps: 0 }
+				}
+			})
+			try {
+				const literal = `  /template \${HOME}\n`
+				const result = await tools.input.execute("stdin", { id: paths.taskRef, content: literal }, undefined, ctx)
+				expect(result.details).toMatchObject({ effectiveDelivery: "stdin", queuePosition: null, queuedFollowUps: 0 })
+				expect(delivered[0]).toMatchObject({ content: literal, delivery: "stdin" })
+				expect(result.content[0]?.text).toContain("stdin delivered")
+				await tools.input.execute("eof", { id: paths.taskRef, content: "", eof: true }, undefined, ctx)
+				expect(delivered[1]).toMatchObject({ content: "", delivery: "stdin", options: { eof: true } })
+				// The successful runtime write owns history; the shared sender must not duplicate it.
+				expect(await readFile(paths.history, "utf8")).toBe("")
+				await sendTaskInput(ctx, { getConfig: () => currentConfig }, paths.taskRef, "🙂".repeat(16384), undefined)
+				expect(delivered).toHaveLength(3)
+				for (const params of [
+					{ content: "x", delivery: "followup" },
+					{ content: "x", delivery: "steer" },
+					{ content: "", eof: false },
+					{ content: "" },
+					{ content: "x", eof: "yes" },
+					{ content: "🙂".repeat(16385) }
+				]) {
+					await expect(tools.input.execute("invalid", { id: paths.taskRef, ...params }, undefined, ctx)).rejects.toThrow()
+				}
+				await expect(
+					tools.input.execute("foreign", { id: paths.taskRef, content: "x" }, undefined, {
+						...ctx,
+						sessionManager: { getSessionId: () => "foreign" }
+					} as ExtensionContext)
+				).rejects.toThrow("Unknown Task Reference")
+				for (const state of ["queued", "idle", "interrupted"] as const) {
+					await mutateTaskMetadata(paths, metadata => ({
+						...metadata,
+						state,
+						activeRun: state === "queued" && metadata.activeRun ? { ...metadata.activeRun, state } : null
+					}))
+					await expect(tools.input.execute("not-running", { id: paths.taskRef, content: "x" }, undefined, ctx)).rejects.toThrow(
+						"live running resident"
+					)
+				}
+				expect(delivered).toHaveLength(3)
+			} finally {
+				unbind()
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
+				await releaseParentLeaseFor(workspace.cwd, "foreign")
+			}
+		})
+	})
+
 	test("runs accepted Follow-ups sequentially in the same resident session", async () => {
 		await withTempWorkspace(async workspace => {
 			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
@@ -847,6 +991,11 @@ describe("task_input tool", () => {
 			const created = await tools.agent.execute("create", { definition: "reviewer", label: "Review", prompt: "initial" }, undefined, ctx)
 			const id = (created.details as AgentCreationResult).id
 			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
+			for (const eof of [true, false]) {
+				await expect(tools.input.execute("agent-eof", { id, content: "work", eof }, undefined, ctx)).rejects.toThrow(
+					"only supported for Bash"
+				)
+			}
 			await mutateTaskMetadata(paths, metadata => ({ ...metadata, discardedAt: Date.now(), updatedAt: Date.now() }))
 			await expect(tools.input.execute("discarded", { id, content: "work" }, undefined, ctx)).rejects.toThrow("discarded")
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
@@ -972,7 +1121,7 @@ describe("task lifecycle controls", () => {
 describe("foreground agents", () => {
 	test("hides waitMs, validates schemas, and rejects stale hidden arguments at execution", async () => {
 		await withTempWorkspace(async workspace => {
-			const current = { ...config, capabilities: [] as AgentsConfig["capabilities"] }
+			const current = { ...config, backgroundAgents: false }
 			const tools = captureAgentTools(
 				workspace.agentDir,
 				async () => {
@@ -991,7 +1140,7 @@ describe("foreground agents", () => {
 			await expect(
 				tools.input.execute("hidden", { id: "a_11111111", content: "work", waitMs: 0 }, undefined, taskContext(workspace.cwd))
 			).rejects.toThrow("task_input does not accept waitMs")
-			current.capabilities = ["backgroundAgents"]
+			current.backgroundAgents = true
 			const background = captureAgentTools(
 				workspace.agentDir,
 				async () => {
@@ -1000,7 +1149,7 @@ describe("foreground agents", () => {
 				current
 			)
 			expect(Value.Check(background.agent.parameters, { ...args, waitMs: 0 })).toBe(true)
-			current.capabilities = []
+			current.backgroundAgents = false
 			await expect(background.agent.execute("stale", { ...args, waitMs: 0 }, undefined, taskContext(workspace.cwd))).rejects.toThrow(
 				"backgroundAgents"
 			)
@@ -1029,7 +1178,7 @@ describe("foreground agents", () => {
 				started.resolve(undefined)
 				await finish.promise
 			})
-			const tool = captureAgentTool(workspace.agentDir, fake.handle, { ...config, capabilities: [], waitMs: 0 })
+			const tool = captureAgentTool(workspace.agentDir, fake.handle, { ...config, backgroundAgents: false, waitMs: 0 })
 			let returned = false
 			const pending = tool
 				.execute("create", { definition: "reviewer", label: "Foreground", prompt: "work" }, undefined, taskContext(workspace.cwd))
@@ -1069,7 +1218,7 @@ describe("foreground agents", () => {
 					if (!child) throw new Error("Unexpected child")
 					return child
 				},
-				{ ...config, capabilities: [], waitMs: 0 }
+				{ ...config, backgroundAgents: false, waitMs: 0 }
 			)
 			const coordinator = getAgentCoordinator()
 			const limit = coordinator.maxConcurrency
@@ -1133,7 +1282,7 @@ describe("foreground agents", () => {
 			)
 			const { id } = created.details as AgentCreationResult
 			await started.promise
-			current.capabilities = []
+			current.backgroundAgents = false
 			try {
 				await expect(tools.input.execute("follow", { id, content: "unattended queue" }, undefined, ctx)).rejects.toThrow("busy")
 				const steer = await tools.input.execute("steer", { id, content: "redirect", delivery: "steer" }, undefined, ctx)
@@ -1162,7 +1311,7 @@ describe("foreground agents", () => {
 			coordinator.setMaxConcurrency(1)
 			const blocker = await coordinator.acquire({ tuple: { provider: "blocker", model: "model" } })
 			const abort = new AbortController()
-			const tool = captureAgentTool(workspace.agentDir, fake.handle, { ...config, capabilities: [] })
+			const tool = captureAgentTool(workspace.agentDir, fake.handle, { ...config, backgroundAgents: false })
 			const pending = tool.execute(
 				"queued",
 				{ definition: "reviewer", label: "Queued", prompt: "work" },
@@ -1207,7 +1356,7 @@ describe("foreground agents", () => {
 					if (!child) throw new Error("Unexpected child")
 					return child
 				},
-				{ ...config, capabilities: [] }
+				{ ...config, backgroundAgents: false }
 			)
 			const ctx = taskContext(workspace.cwd)
 			const created = await tools.agent.execute(
@@ -1238,7 +1387,7 @@ describe("foreground agents", () => {
 			const fake = fakeChild(async child => child.assistantError("429 rate limit exceeded"))
 			const coordinator = getAgentCoordinator()
 			const tuple = { provider: "anthropic", model: "sonnet" }
-			const tool = captureAgentTool(workspace.agentDir, fake.handle, { ...config, capabilities: [] })
+			const tool = captureAgentTool(workspace.agentDir, fake.handle, { ...config, backgroundAgents: false })
 			try {
 				const result = await tool.execute(
 					"limit",
@@ -1261,7 +1410,7 @@ describe("foreground agents", () => {
 
 	test("enforces parent allowAgents even when the tool is directly invoked", async () => {
 		await withTempWorkspace(async workspace => {
-			const tool = captureAgentTool(workspace.agentDir, fakeChild(async () => {}).handle, { ...config, capabilities: [] })
+			const tool = captureAgentTool(workspace.agentDir, fakeChild(async () => {}).handle, { ...config, backgroundAgents: false })
 			const unbind = getAgentCoordinator().bindSessionContext("parent-session", { depth: 1, allowAgents: false })
 			try {
 				await expect(
@@ -1314,7 +1463,7 @@ describe("foreground agents", () => {
 						}
 					}
 				},
-				{ ...config, capabilities: [] }
+				{ ...config, backgroundAgents: false }
 			)
 			const abort = new AbortController()
 			const pending = tools.agent.execute(
@@ -1354,6 +1503,8 @@ describe("foreground agents", () => {
 type CapturedAgentTool = {
 	parameters: TSchema
 	description: string
+	promptSnippet: string
+	promptGuidelines: string[]
 	execute(
 		toolCallId: string,
 		params: Record<string, unknown>,
@@ -1377,14 +1528,25 @@ function captureAgentTools(
 	agentDir: string,
 	createChild: (options: CreateChildSessionOptions) => Promise<ChildSessionHandle>,
 	toolConfig: AgentsConfig = config,
-	canDelegate?: () => boolean
+	canDelegate?: () => boolean,
+	bashInputEnabled?: () => boolean,
+	agentInputEnabled?: () => boolean
 ): CapturedAgentTools {
 	const captured = new Map<string, CapturedAgentTool>()
 	const api = {
-		registerTool(tool: { name: string; parameters: TSchema; description: string; execute: (...args: unknown[]) => unknown }) {
+		registerTool(tool: {
+			name: string
+			parameters: TSchema
+			description: string
+			promptSnippet: string
+			promptGuidelines: string[]
+			execute: (...args: unknown[]) => unknown
+		}) {
 			captured.set(tool.name, {
 				parameters: tool.parameters,
 				description: tool.description,
+				promptSnippet: tool.promptSnippet,
+				promptGuidelines: tool.promptGuidelines,
 				execute: (toolCallId, params, signal, ctx) =>
 					tool.execute(toolCallId, params, signal, undefined, ctx) as ReturnType<CapturedAgentTool["execute"]>
 			})
@@ -1402,6 +1564,8 @@ function captureAgentTools(
 	registerTaskInputTool(api, {
 		getConfig: () => toolConfig,
 		getAgentDir: () => agentDir,
+		...(bashInputEnabled ? { bashInputEnabled } : {}),
+		...(agentInputEnabled ? { agentInputEnabled } : {}),
 		createChild
 	})
 	const agent = captured.get("agent")
