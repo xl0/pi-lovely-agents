@@ -898,13 +898,25 @@ Registry-only installation with Lovely Config `0.1.3` and Pi `0.85.1` passes
 include both skills and the bundled published dependency, without tests,
 runtime storage, or editor settings.
 
-#### [ ] 6.3 First release
+#### [x] 6.3 First release
 
-Bootstrap `0.1.0` manually on npm, then configure trusted publishing for later
-CI releases. Commit the dependency update and release version/changelog, and
-tag the released revision. Publishing/pushing needs explicit approval.
+`0.1.0` is published on npm; its public integrity matches the verified tarball.
+Master and `v0.1.0` are pushed, and CI created the GitHub Release.
+
+#### [ ] 6.4 Future CI publishing
+
+Stage-only trust is configured for `xl0/pi-lovely-agents`, `publish.yml`, and
+environment `npm`. Verify it with the `0.1.1` release; the first tag's CI run
+skipped the already-published version and did not exercise OIDC.
+Publishing/pushing needs explicit approval.
 The local release checks still include unrelated `.vscode/settings.json`;
 format or exclude it before using the local release command.
+
+#### [ ] Intermittent Bash test failure
+
+Investigate `ENOENT` opening a temporary metadata file in the output-wait test.
+One clean run failed; five isolated reruns and the full suite passed. Cause
+unconfirmed; do not hide it with automatic retries.
 
 ### [ ] 7. Cache-preserving context forks
 

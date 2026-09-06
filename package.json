@@ -1,6 +1,6 @@
 {
 	"name": "@xl0/pi-lovely-agents",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Agent orchestration for Pi",
 	"keywords": [
 		"pi-package",

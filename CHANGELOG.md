@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-06
+
+- Publish through GitHub Actions with npm provenance.
+
 ## [0.1.0] - 2026-09-06
 
 - Reusable Markdown agent definitions with model, thinking, tool, and context settings.
