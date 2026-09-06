@@ -45,8 +45,8 @@ Background Bash shares the durable task controls without creating a Pi session.
 
 The package is ESM. Pi discovers `./extensions` and `./skills` through the
 package manifest; both directories are included in npm distributions.
-Pi runtime packages stay peer dependencies. Development uses `bun link` for
-Lovely Config's unreleased `multiEnum`; publish that dependency before release.
+Pi runtime packages stay peer dependencies. Lovely Config requires published
+version `^0.1.3` for `multiEnum` and is bundled; no local link is needed.
 
 `xl0-pi-lovely-agents.json` merges user then workspace values through Lovely
 Config. `models` is a searchable multi-select built from authenticated Pi
@@ -345,8 +345,8 @@ suite; Biome handles formatting and linting. `bun run check` runs all three.
 Tests prioritize lifecycle/ownership safety and reported regressions. Avoid
 duplicating dependency tests, UI descriptor checks, and exact presentation text.
 
-The unreleased package starts at `0.0.0`; the first minor release becomes
-`0.1.0`. `bun run release` verifies and bumps locally, then pushes a `v*` tag.
-CI verifies the tag, stages the package on npm with OIDC provenance, and creates
-a GitHub Release. The local release driver asks for 2FA to approve the staged
-npm version.
+The initial `0.1.0` release uses manual npm publishing, before configuring
+trusted publishing for CI. Later, `bun run release` verifies
+and bumps locally, then pushes a `v*` tag. CI verifies the tag, stages the package
+on npm with OIDC provenance, and creates a GitHub Release. The local release
+driver asks for 2FA to approve the staged npm version.

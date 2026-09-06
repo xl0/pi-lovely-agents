@@ -715,7 +715,7 @@ editor. Fixture creation/cleanup helpers remain internal for tests; the command
 has no developer menu. Cleanup removes only marked fixture directories,
 including nested fixture partitions.
 
-### [ ] 3. In-process Agent execution
+### [x] 3. In-process Agent execution
 
 #### [x] 3.1 Process-global coordinator
 
@@ -776,7 +776,7 @@ already-interrupted tasks remain reusable; stale queued/running/suspended work
 becomes interrupted with one deterministic notification record. Malformed and
 orphaned storage remains untouched and is reported nonfatally.
 
-### [ ] 4. Agent controls
+### [x] 4. Agent controls
 
 #### [x] 4.1 Follow-up and Steer
 
@@ -887,29 +887,24 @@ Targets join model choices automatically; explicit thinking overrides presets.
 Unavailable aliases fail rather than reroute. Existing sessions retain concrete
 identities across alias edits and cold Follow-ups.
 
-#### [ ] 6.2 Documentation and package verification
+#### [x] 6.2 Documentation and package verification
 
 README covers human setup and usage, all definition fields, task controls,
 settings, and storage/privacy limits. The packaged `agent-creator` skill guides
-definition authoring and validation. Package verification remains; confirm
-installation instructions against the published dependencies before release.
+definition authoring and validation.
 
-Run:
+Registry-only installation with Lovely Config `0.1.3` and Pi `0.85.1` passes
+`bun run check`, without local links or test shims. Bun and npm pack dry runs
+include both skills and the bundled published dependency, without tests,
+runtime storage, or editor settings.
 
-```sh
-bun test
-bun run typecheck
-bun run biome:check
-bun pm pack --dry-run
-npm pack --dry-run
-```
+#### [ ] 6.3 First release
 
-Full Biome remains contingent on the unrelated `.vscode/settings.json` being
-formatted or excluded; targeted project checks must pass regardless. Verify the
-packed archive contains runtime dependencies, the `agent` and `agent-creator` skills,
-and only intended package files.
-Publish the Lovely Config release containing `multiEnum` before package
-verification; development uses `bun link`.
+Bootstrap `0.1.0` manually on npm, then configure trusted publishing for later
+CI releases. Commit the dependency update and release version/changelog, and
+tag the released revision. Publishing/pushing needs explicit approval.
+The local release checks still include unrelated `.vscode/settings.json`;
+format or exclude it before using the local release command.
 
 ### [ ] 7. Cache-preserving context forks
 

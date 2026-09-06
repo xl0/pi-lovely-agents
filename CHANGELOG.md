@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-06
+
 - Reusable Markdown agent definitions with model, thinking, tool, and context settings.
 - Persistent Pi agents with background or foreground execution, Follow-ups, and live Steers.
 - Background Bash with separate concurrency limits, stdin/EOF, and retained output.

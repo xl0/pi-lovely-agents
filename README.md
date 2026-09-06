@@ -14,14 +14,11 @@ is worth the overhead.
 
 ## Install
 
-For published releases:
-
 ```bash
 pi install npm:@xl0/pi-lovely-agents
 ```
 
-The package is still in development; see [Development](#development) to run a
-local checkout.
+See [Development](#development) to run a local checkout.
 
 ## Create your first agent
 
@@ -180,9 +177,6 @@ there is no automatic deletion.
 bun install
 pi -e .
 ```
-
-Development currently requires a linked checkout of `@xl0/pi-lovely-config`
-with its unreleased `multiEnum` support.
 
 Run checks with `bun run check`.
 
