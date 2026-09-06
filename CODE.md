@@ -49,8 +49,9 @@ Numeric runtime limits are also checked as integers because Lovely Config's rang
 number fields accept fractions.
 
 `capabilities` defaults to `[]`: foreground-only agents. `backgroundAgents`
-enables timed detachment and asynchronous Follow-ups; reserved `contextForks`
-and `backgroundBash` are explicitly unavailable until implemented.
+enables timed detachment and asynchronous Follow-ups; reserved `backgroundBash`
+is explicitly unavailable until implemented. Context forks are deferred until
+the required Pi SDK changes land; no fork setting or tool is exposed.
 Tool schemas refresh with config: no foreground `waitMs`, and `allowAgents`
 requires remaining descendant depth. Creation tools follow parent permission,
 depth, and active SDK tools; inspection/control tools remain for owned tasks
@@ -273,6 +274,7 @@ than opening another selector. Task rows use the full available width for labels
 model/status, and prompt previews, avoiding SelectList's fixed primary column.
 UI rows sort by creation time, newest first, with task ID breaking ties—not
 status or last activity. Selection follows task identity across updates.
+The focused list has no heading; capacity stays in the footer and inspection.
 Enter opens actions; Esc or Up past the first row returns to the editor, and
 other input passes through unchanged. Action/output views hide the panel until
 they close. The editor wrapper preserves and restores the prior factory.

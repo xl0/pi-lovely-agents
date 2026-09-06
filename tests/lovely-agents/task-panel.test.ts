@@ -24,16 +24,16 @@ test("one panel switches from active rows to all tasks; keys return to the edito
 	expect(h.lines().join("\n")).toContain("→ a_00000000")
 	expect(h.lines().join("\n")).toContain("idle")
 	expect(h.panel.handleInput(up, true)).toBe(true)
-	expect(h.lines().join("\n")).not.toContain("Tasks")
+	expect(h.lines().join("\n")).not.toContain("navigate")
 
 	for (const data of ["hello", "界", "\x1b[200~pasted\ntext\x1b[201~", "\x0f"]) {
 		h.panel.focus()
 		expect(h.panel.handleInput(data, true)).toBe(false)
-		expect(h.lines().join("\n")).not.toContain("Tasks")
+		expect(h.lines().join("\n")).not.toContain("navigate")
 	}
 	h.panel.focus()
 	expect(h.panel.handleInput(esc, true)).toBe(true)
-	expect(h.lines().join("\n")).not.toContain("Tasks")
+	expect(h.lines().join("\n")).not.toContain("navigate")
 })
 
 test("navigation scrolls five rows, bounds width, and preserves selection across live reorder/removal", async () => {
@@ -43,7 +43,7 @@ test("navigation scrolls five rows, bounds width, and preserves selection across
 	h.panel.focus()
 	for (let index = 0; index < 8; index++) h.panel.handleInput(down, true)
 	expect(h.lines().join("\n")).toContain("→ a_00000008")
-	expect(h.lines()).toHaveLength(8) // heading, five rows, position, help
+	expect(h.lines()).toHaveLength(7) // five rows, position, help
 	for (const width of [1, 20, 40, 120]) {
 		expect(h.lines(width).every(line => visibleWidth(line) <= width)).toBe(true)
 	}
@@ -111,7 +111,7 @@ test("passive and focused rows keep creation order across activity and state cha
 	expect(h.lines().join("\n")).toContain("→ a_00000000")
 })
 
-test("shows queue reasons and capacity without distracting internal activity", async () => {
+test("shows queue reasons without a heading or distracting internal activity", async () => {
 	const h = harness()
 	const task = h.result.tasks[0]
 	if (!task) throw new Error("Missing fixture task")
@@ -121,13 +121,13 @@ test("shows queue reasons and capacity without distracting internal activity", a
 	await h.panel.refresh()
 	expect(h.lines().join("\n")).toContain("waiting: capacity")
 	h.panel.focus()
-	expect(h.lines().join("\n")).toContain("capacity 4/4")
+	expect(h.lines()[0]).toStartWith("→ a_00000000")
 	task.queueReason = "provider-limit"
 	h.result.capacity = { active: 0, limit: 4 }
 	publishSchedulerUpdate()
 	await Bun.sleep(0)
 	expect(h.lines().join("\n")).toContain("waiting: provider-limit")
-	expect(h.lines().join("\n")).toContain("capacity 0/4")
+	expect(h.lines()[0]).toStartWith("→ a_00000000")
 	task.state = "running"
 	task.queueReason = null
 	task.lastActivity = { at: Date.now() - 20_000, action: "thinking" }
@@ -223,7 +223,7 @@ test("failed action restores the panel and reports the error", async () => {
 	h.panel.handleInput("\r", true)
 	await Bun.sleep(0)
 	expect(h.errors).toEqual(["Lovely Agents task panel: Task has been discarded"])
-	expect(h.lines().join("\n")).toContain("Tasks")
+	expect(h.lines().join("\n")).toContain("→ a_00000000")
 })
 
 function row(index: number): TaskListRow {

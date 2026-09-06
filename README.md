@@ -60,8 +60,8 @@ Enable `backgroundAgents` for timed detachment (`agent.waitMs`) and queued,
 asynchronous Follow-ups. Existing accepted runs keep their execution policy
 when settings change.
 
-`contextForks` and `backgroundBash` are reserved settings, explicitly marked
-unavailable until implemented. Enabling them does not expose nonexistent tools.
+`backgroundBash` is a reserved setting, explicitly marked unavailable until
+implemented. Enabling it does not expose nonexistent tools.
 Creation tools follow delegation permission/depth. Task controls remain visible
 for existing owned work, even when creation is disabled; Definition allowlists
 still apply. Tool schemas/descriptions update with the settings.

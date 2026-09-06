@@ -58,7 +58,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			session?.allowAgents !== false &&
 			(session?.depth ?? 0) < configValue.maxDepth &&
 			(active.includes("agent") || hiddenTools.has("agent"))
-		// Unimplemented fork/Bash capabilities are not task producers yet.
+		// Background Bash is not a task producer until implemented.
 		const owned = canCreate ? undefined : (await loadTaskList(ctx.cwd, ctx.sessionManager.getSessionId())).details
 		if (revision !== toolRevision) return
 		const canControl = canCreate || (!!owned && (owned.total > 0 || owned.diagnostics.length > 0))

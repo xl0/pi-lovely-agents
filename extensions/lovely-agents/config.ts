@@ -38,11 +38,10 @@ function createConfigSchema(ctx?: ModelConfigContext) {
 			visibleWhen: ctx => ctx.get(`${name}Model`) !== DISABLED_MODEL
 		})
 	return {
-		capabilities: field.multiEnum(["contextForks", "backgroundAgents", "backgroundBash"], [], {
+		capabilities: field.multiEnum(["backgroundAgents", "backgroundBash"], [], {
 			label: "Capabilities",
 			description: "Optional execution capabilities. Without Background agents, runs stay in the foreground.",
 			valueDescriptions: {
-				contextForks: "Context forks (unavailable until SDK support is integrated)",
 				backgroundAgents: "Allow detached agents and asynchronous Follow-ups",
 				backgroundBash: "Background Bash (producer not implemented yet)"
 			}

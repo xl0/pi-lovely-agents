@@ -47,7 +47,6 @@ export function createTaskPanel(
 					)
 					list.setSelectedIndex(items.findIndex(item => item.value === selected))
 					return [
-						theme.fg("accent", `Tasks · capacity ${capacity.active}/${capacity.limit}`),
 						...(items.length > 0 ? list.render(width) : ["No durable tasks for this session."]),
 						theme.fg("dim", "↑↓ navigate · Enter actions · Esc/↑ at top editor · type to edit")
 					].map(line => truncateToWidth(line, width))

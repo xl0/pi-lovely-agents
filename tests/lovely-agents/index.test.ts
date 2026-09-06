@@ -83,7 +83,7 @@ test("capability schemas and tool visibility follow config without hiding contro
 			await workspace.write(
 				"workspace/.pi/xl0-pi-lovely-agents.json",
 				JSON.stringify({
-					capabilities: ["backgroundAgents", "contextForks", "backgroundBash"],
+					capabilities: ["backgroundAgents", "backgroundBash"],
 					maxDepth: 0
 				})
 			)

@@ -30,6 +30,9 @@ describe("Lovely Agents config", () => {
 			environment.PI_CODING_AGENT_DIR = workspace.agentDir
 			let config = createAgentsConfigSpec(configContext).load(workspace.cwd)
 			expect(config.value.capabilities).toEqual([])
+			expect(config.fields.find(field => field.key === "capabilities")).toMatchObject({
+				values: ["backgroundAgents", "backgroundBash"]
+			})
 			const wait = config.fields.find(field => field.key === "waitMs")
 			const visible = () =>
 				wait?.visibleWhen?.({

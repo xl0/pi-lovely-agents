@@ -215,8 +215,9 @@ cancellation stops foreground work. Foreground provider-limit failures settle
 without unattended recovery. Accepted runs retain their execution policy across
 config edits.
 
-`contextForks` and `backgroundBash` are reserved, explicitly unavailable settings
-until their producers are implemented. Enabling them does not advertise tools.
+`backgroundBash` is reserved and explicitly unavailable until implemented.
+Enabling it does not advertise tools. Context forks have no setting or tool
+until the required Pi SDK changes land.
 Creation tools follow depth and delegation permission; task controls remain
 available when there is an enabled producer or owned work/diagnostics.
 Original SDK/Definition tool allowlists are never bypassed.
@@ -401,7 +402,7 @@ Use `@xl0/pi-lovely-config` with the standard user/workspace precedence:
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| `capabilities` | `[]` | Opt-in `backgroundAgents`; `contextForks` and `backgroundBash` are unavailable until implemented. Empty means foreground-only execution. |
+| `capabilities` | `[]` | Opt-in `backgroundAgents`; `backgroundBash` is unavailable until implemented. Empty means foreground-only execution. |
 | `models` | `[]` | Additional model IDs. Empty includes the parent; enabled alias targets are always included. |
 | `fastModel` / `fastThinking` | `disabled` / `low` | Cheap, low-latency preset for straightforward work. |
 | `smartModel` / `smartThinking` | `disabled` / `high` | Most capable preset for difficult reasoning and complex work. |
@@ -838,8 +839,8 @@ Focused task rows use full terminal width for label, status/model, and prompt.
 Bounded prompt previews are captured for new runs and retained after completion;
 human-only list loading keeps them out of task-tool results.
 Panel rows sort newest-created first with stable ID ties, independent of status
-and activity. Thinking/responding labels are omitted. Call truncation preserves
-the surrounding tool background.
+and activity. Thinking/responding labels and the list heading are omitted.
+Call truncation preserves the surrounding tool background.
 Managed child disposal removes subscriptions and fences pending refreshes before
 SDK context invalidation, without treating idle unload as semantic shutdown.
 Confirmed
@@ -885,6 +886,9 @@ verification; development uses `bun link`.
 
 ### [ ] 7. Cache-preserving context forks
 
+Deferred until the required changes land in Pi. Do not expose a fork setting or
+tool before SDK support is available and integrated.
+
 Create an independently owned child from the parent's model/thinking, effective
 prompt, ordered tools, and completed conversation prefix. Cut before the entire
 spawning assistant tool batch; never replay pending calls. No Definition prompt
@@ -897,6 +901,6 @@ provider WebSocket state and breaks cleanup ownership.
 SDK investigation is complete. Public APIs can copy durable entries and Pi's
 prompt string, and recreate tools with matching observable schemas. They cannot
 snapshot actual parent tool bindings/extension state or the final transformed
-provider request. Choose SDK support versus explicitly constrained best-effort
-forks before implementation. Cold-open must retain the chosen recipe without
+provider request. Wait for SDK support rather than implementing best-effort
+forks. Cold-open must retain the chosen recipe without
 silently substituting tools or models.
