@@ -47,6 +47,27 @@ describe("process-global Agent coordinator", () => {
 })
 
 describe("Agent scheduling", () => {
+	test("rejects foreground reservations at closed gates and when a gate closes while queued", async () => {
+		const coordinator = createAgentCoordinator(1)
+		const blocker = await coordinator.acquire({ tuple: beta })
+		const foreground = coordinator.reserve({ tuple: alpha, rejectOnClosedTuple: true })
+		const run = foreground.run(async () => {
+			throw new Error("Must not run")
+		})
+		void run.catch(() => {})
+		const background = coordinator.reserve({ tuple: alpha })
+		coordinator.closeTuple(alpha)
+		await expect(run).rejects.toThrow("foreground work cannot wait for recovery")
+		expect(coordinator.queuedCount).toBe(1)
+		expect(() => coordinator.reserve({ tuple: alpha, rejectOnClosedTuple: true })).toThrow("provider limit")
+		await expect(coordinator.acquire({ tuple: alpha, rejectOnClosedTuple: true })).rejects.toThrow("provider limit")
+		blocker.release()
+		expect(coordinator.activeCount).toBe(0)
+		coordinator.openTuple(alpha)
+		await background.run(async () => {})
+		expect(coordinator.queuedCount).toBe(0)
+	})
+
 	test("starts eligible work in FIFO acceptance order", async () => {
 		const coordinator = createAgentCoordinator(1)
 		const first = await coordinator.acquire({ tuple: alpha })

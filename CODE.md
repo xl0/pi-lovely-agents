@@ -45,9 +45,17 @@ models; an empty selection includes the current parent model. Optional `fast`,
 level. Their targets join explicit choices automatically, without duplicate IDs.
 Aliases default to disabled; unavailable targets warn and fail on selection,
 never reroute. The roster describes enabled presets; the parent chooses freely.
-Numeric
-runtime limits are also checked as integers because Lovely Config's ranged
+Numeric runtime limits are also checked as integers because Lovely Config's ranged
 number fields accept fractions.
+
+`capabilities` defaults to `[]`: foreground-only agents. `backgroundAgents`
+enables timed detachment and asynchronous Follow-ups; reserved `contextForks`
+and `backgroundBash` are explicitly unavailable until implemented.
+Tool schemas refresh with config: no foreground `waitMs`, and `allowAgents`
+requires remaining descendant depth. Creation tools follow parent permission,
+depth, and active SDK tools; inspection/control tools remain for owned tasks
+or diagnostics even without a producer. Event-driven visibility restores only
+tools this extension hid, not tools excluded by a Definition/SDK allowlist.
 
 Definitions are scanned on each roster call. The nearest trusted project
 `.pi/agents` directory shadows user definitions by declared name, even when the
@@ -127,13 +135,17 @@ row: Definition, `label=`, quoted `prompt=`, then `-> task ID`. Rendering reserv
 the ID suffix before truncating the preview to the available terminal columns;
 Pi's width helpers handle ANSI and Unicode. Shared render state supplies the ID
 at paint time, after the result renderer runs.
+Collapsed call truncation resets only foreground/bold styling, preserving the
+surrounding tool background through the ellipsis and task ID.
 Ctrl+O expands the full prompt and a separate Result section; successful
 tool results are otherwise hidden, while tool errors stay visible.
 This is display-only and does not change model-visible input/output.
 Other long roster, list, and output tool results show a ten-line head/tail preview;
 the configured `app.tools.expand` binding (Ctrl+O by default) reveals the full
-fetched result. Durable notifications use the same collapsed rendering and
-expansion binding.
+fetched result. Notifications use a distinct message background and a bold,
+single-line task/status header. Their entire body, even when short, stays hidden
+until expanded via the same binding. Rendering does not change notification
+payloads or delivery acknowledgement.
 
 One versioned coordinator is shared through a package-owned `globalThis`
 symbol. Its acceptance-ordered semaphore skips closed provider/model tuples,
@@ -149,7 +161,7 @@ Coordinator implementation changes require a process restart; reload retains
 the existing coordinator object.
 
 Terminal quota, billing, budget, usage-limit, rate-limit/429, and
-`ResourceExhausted` assistant errors suspend the active run and close its exact
+`ResourceExhausted` assistant errors suspend background runs and close their exact
 provider/model tuple gate. Overload, 5xx, network, and timeout failures remain
 ordinary failed runs. Closing a gate blocks queued and newly accepted work on
 that tuple without aborting running siblings or delaying other tuples.
@@ -157,8 +169,10 @@ Successful turns reopen their exact tuple globally. Eligible `/continue` calls
 also admit only suspended tasks in the caller's owned descendant tree, even
 while their tuple gate remains closed. Recovery sends literal `Continue.` in
 the existing logical run; another provider limit suspends it again.
+Foreground runs fail rather than park behind a closed provider gate or restart
+unattended. Each accepted run retains its background policy across config edits.
 
-Detached initial runs and Follow-ups persist bounded completion notifications;
+Detached initial runs and background Follow-ups persist bounded completion notifications;
 detached suspensions persist status notifications, and startup reconciliation
 persists interruption notifications. Exact parent routes inject them as custom
 Steers and wake idle parents. Delivery is marked only after the parent's
@@ -166,6 +180,9 @@ Steers and wake idle parents. Delivery is marked only after the parent's
 reconciles IDs in the transcript and resends only absent notices; semantic
 parent shutdown clears process-local in-flight suppression. Synchronous initial
 results and explicit stops do not notify.
+Confirmed manual discards send a parent-context notice after archival succeeds.
+It uses Pi's normal Steer delivery, without starting an idle turn or using the
+discarded task's completion outbox.
 
 Notification previews come from the run's latest reply, not transcript tails:
 inputs and older replies never enter the preview. History/session paths link
@@ -184,18 +201,26 @@ remaining depth permit it. A hidden first extension composes the Definition
 body with active tool metadata, Pi guidelines, append resources, optional
 AGENTS/CLAUDE context, skills, and cwd before ordinary extension hooks.
 Session-scoped depth is registered before extension startup and removed on
-disposal.
+disposal. A managed lifetime signal aborts before SDK disposal, which does not
+emit `session_shutdown`. It removes task/notification subscriptions and fences
+pending visibility refreshes before extension contexts become invalid, without
+stopping detached descendants during idle unload.
 
 `agent` validates Definition, depth, model, label, and prompt before reserving
 storage. Durable acceptance records queued metadata plus run/input log
 boundaries before global scheduling. The resident runtime moves queued work to
 running, writes assistant/tool events serially, and commits one terminal
 outcome across completion/stop races. Synchronous waits lend managed parent
-permits; zero or expired waits only stamp detachment and never restart work.
+permits. Foreground calls wait for their own terminal metadata; cancellation
+stops accepted work and descendants. With background execution enabled, zero
+or expired waits only stamp detachment and never restart work.
+Run-specific completion snapshots cannot be replaced by a later Follow-up.
 Accepted child failures are task outcomes, not failed tool calls. Idle child
 runtimes dispose while their private Pi session file remains cold-loadable.
 
-`task_input` defaults to durable Follow-up. Active work retains up to 32 ordered
+`task_input` defaults to durable Follow-up. Foreground Follow-ups require an
+idle task and wait for their own result; busy tasks reject them explicitly.
+Background work retains up to 32 ordered
 Follow-ups; settlement atomically promotes the queue head, and each run gets a
 separate Pi prompt/outcome in the same session. Running Steers use Pi's queue
 with the configured literal/template behavior. The runtime records Steers only
@@ -238,19 +263,23 @@ duplicated Definition body). Missing captures produce a separate notification,
 never substituted content or reconstruction from today's context files.
 Static text views wrap and scroll with arrows, PgUp/PgDn, and Home/End.
 Task views also provide event-driven live output, Follow-up/Steer entry, stop,
-and discard. Active counts appear in
+and discard. Foreground UI inputs use an Esc-cancellable loader, kept open until
+owned work has stopped. Cancelled inputs do not show an acceptance notice.
+Active counts appear in
 the footer and up to five active rows appear below the editor. Down on an empty
 editor focuses that same panel, exposing all direct tasks and diagnostics in a
 five-row scrolling list. `/lovely-agents` → Tasks hands off to the panel rather
 than opening another selector. Task rows use the full available width for labels,
 model/status, and prompt previews, avoiding SelectList's fixed primary column.
-Selection follows task identity across updates.
+UI rows sort by creation time, newest first, with task ID breaking ties—not
+status or last activity. Selection follows task identity across updates.
 Enter opens actions; Esc or Up past the first row returns to the editor, and
 other input passes through unchanged. Action/output views hide the panel until
 they close. The editor wrapper preserves and restores the prior factory.
 Process-global update routes refresh these surfaces on durable metadata/output
-writes and shared capacity/gate changes without polling. Last-action ages are
-computed when rendered; panel disposal fences in-flight refreshes. Snapshot
+writes and shared capacity/gate changes without polling. Panels omit internal
+thinking/responding activity; inspection tools retain detailed progress and
+timestamps. Panel disposal fences in-flight refreshes. Snapshot
 waits subscribe to scheduler updates as well as filesystem changes.
 Live fixture timers use a process-global registry so
 reload preserves them and semantic shutdown stops them before releasing the

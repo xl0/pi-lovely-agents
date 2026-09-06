@@ -53,6 +53,8 @@ const ActiveRun = Type.Object(
 		id: RunId,
 		sequence: Type.Integer({ minimum: 1 }),
 		acceptanceOrder: Type.Optional(Type.Integer({ minimum: 1 })),
+		// Acceptance policy, not current config. Missing means foreground.
+		background: Type.Optional(Type.Boolean()),
 		kind: Type.Union([Type.Literal("initial"), Type.Literal("followup")]),
 		state: Type.Union([Type.Literal("queued"), Type.Literal("running"), Type.Literal("suspended")]),
 		input: Type.String(),
@@ -67,6 +69,7 @@ const QueuedFollowUp = Type.Object(
 		id: RunId,
 		sequence: Type.Integer({ minimum: 1 }),
 		acceptanceOrder: Type.Optional(Type.Integer({ minimum: 1 })),
+		background: Type.Optional(Type.Boolean()),
 		content: Type.String(),
 		acceptedAt: Timestamp
 	},
@@ -557,6 +560,11 @@ export async function readRetainedOutput(paths: TaskStoragePaths, options: Retai
 		metadata = await requireTaskMetadata(paths)
 	}
 
+	return retainedOutputSnapshot(paths, metadata, timedOut)
+}
+
+/** Formats an immutable run result before a later run can replace its reply. */
+export function retainedOutputSnapshot(paths: TaskStoragePaths, metadata: TaskMetadata, timedOut = false): RetainedOutputRead {
 	const fullText = metadata.latestReply?.text ?? ""
 	const lines = splitCompleteLines(fullText)
 	const text = truncateUtf8(lines.slice(0, RETAINED_OUTPUT_MAX_LINES).join("\n"), RETAINED_OUTPUT_MAX_BYTES)

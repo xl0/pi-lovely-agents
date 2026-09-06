@@ -83,7 +83,35 @@ test("task rows use the full width for labels and prompt previews", async () => 
 	expect(h.lines(80).join("\n")).toContain("System prompt inspection")
 })
 
-test("shows queue reasons, capacity, and activity through event-driven updates", async () => {
+test("passive and focused rows keep creation order across activity and state changes", async () => {
+	const h = harness()
+	h.result.tasks = [
+		{ ...row(2), state: "running" },
+		{ ...row(1), state: "running", createdAt: 100 },
+		{ ...row(0), state: "running" }
+	]
+	const ids = () => h.lines().flatMap(line => line.match(/a_\d{8}/g) ?? [])
+	const expected = ["a_00000000", "a_00000001", "a_00000002"]
+	await h.panel.refresh()
+	expect(ids()).toEqual(expected)
+	expect(h.result.tasks.map(task => task.id)).toEqual(["a_00000002", "a_00000001", "a_00000000"])
+
+	for (const task of h.result.tasks) {
+		task.updatedAt = 1000 - task.createdAt
+		task.lastActivity = { at: task.updatedAt, action: "thinking" }
+	}
+	h.result.tasks.reverse()
+	await h.panel.refresh()
+	expect(ids()).toEqual(expected)
+	h.panel.focus()
+	expect(ids()).toEqual(expected)
+	for (const task of h.result.tasks) task.state = task.id === "a_00000000" ? "idle" : "queued"
+	await h.panel.refresh()
+	expect(ids()).toEqual(expected)
+	expect(h.lines().join("\n")).toContain("→ a_00000000")
+})
+
+test("shows queue reasons and capacity without distracting internal activity", async () => {
 	const h = harness()
 	const task = h.result.tasks[0]
 	if (!task) throw new Error("Missing fixture task")
@@ -105,9 +133,11 @@ test("shows queue reasons, capacity, and activity through event-driven updates",
 	task.lastActivity = { at: Date.now() - 20_000, action: "thinking" }
 	publishTaskUpdate(h.ctx.cwd, "parent")
 	await Bun.sleep(0)
-	expect(h.lines().join("\n")).toContain("thinking")
+	expect(h.lines().join("\n")).not.toContain("thinking")
+	expect(h.lines().join("\n")).not.toContain("ago")
 	h.panel.handleInput(esc, true)
-	expect(h.lines().join("\n")).toMatch(/thinking \(\d+s ago\)/)
+	expect(h.lines().join("\n")).not.toContain("thinking")
+	expect(h.lines().join("\n")).not.toContain("ago")
 })
 
 test("Enter opens the selected task once, hides duplicate rows, then returns to its selection", async () => {
@@ -202,6 +232,8 @@ function row(index: number): TaskListRow {
 		label: `Task ${index}`,
 		state: index % 2 ? "idle" : "running",
 		model: "provider/model",
+		createdAt: 100 - index,
+		updatedAt: 100 - index,
 		queuedFollowUps: 0
 	} as TaskListRow
 }

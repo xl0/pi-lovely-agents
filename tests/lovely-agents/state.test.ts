@@ -167,6 +167,40 @@ describe("parent partition leases", () => {
 })
 
 describe("task metadata", () => {
+	test("retains boolean per-run policy and rejects malformed active or queued policy", async () => {
+		await withTaskStorage(async paths => {
+			const value: TaskMetadata = {
+				...metadata(paths),
+				state: "queued",
+				lastRunSequence: 2,
+				activeRun: {
+					id: "r_0000000000000001",
+					sequence: 1,
+					kind: "initial",
+					state: "queued",
+					input: "initial",
+					acceptedAt: 1,
+					background: false
+				},
+				queuedFollowUps: [{ id: "r_0000000000000002", sequence: 2, content: "later", acceptedAt: 2, background: true }]
+			}
+			await writeTaskMetadata(paths, value)
+			const loaded = await readTaskMetadata(paths)
+			expect(loaded.status === "ok" ? loaded.metadata.activeRun?.background : null).toBe(false)
+			expect(loaded.status === "ok" ? loaded.metadata.queuedFollowUps[0]?.background : null).toBe(true)
+			for (const invalid of [
+				{ ...value, activeRun: { ...value.activeRun, background: "background" } },
+				{ ...value, queuedFollowUps: [{ ...value.queuedFollowUps[0], background: 1 }] }
+			]) {
+				await expect(writeTaskMetadata(paths, invalid as unknown as TaskMetadata)).rejects.toThrow()
+			}
+			const { background: _background, ...activeRun } = value.activeRun as NonNullable<TaskMetadata["activeRun"]>
+			await writeTaskMetadata(paths, { ...value, activeRun })
+			const missing = await readTaskMetadata(paths)
+			expect(missing.status === "ok" ? missing.metadata.activeRun?.background : null).toBeUndefined()
+		})
+	})
+
 	test("atomically writes and strictly reads a versioned snapshot", async () => {
 		await withTaskStorage(async paths => {
 			const value = metadata(paths)

@@ -12,7 +12,14 @@ import {
 } from "./child-session.js"
 import type { AgentsConfig } from "./config.js"
 import { resolveConfiguredModels } from "./config.js"
-import { type AgentReservation, getAgentCoordinator, type ModelTuple, type ResidentAgent, type ResidentInputResult } from "./coordinator.js"
+import {
+	type AgentReservation,
+	getAgentCoordinator,
+	type ModelTuple,
+	type ResidentAgent,
+	type ResidentInputOptions,
+	type ResidentInputResult
+} from "./coordinator.js"
 import { type AgentDefinition, discoverAgentDefinitions } from "./definitions.js"
 import { discardTask, stopOwnedTaskTree, stopTask } from "./lifecycle.js"
 import { appendTaskNotification, deliverTaskNotifications, prepareTaskNotification } from "./notifications.js"
@@ -32,6 +39,7 @@ import {
 	readRetainedOutput,
 	readTaskMetadata,
 	reserveTaskStorage,
+	retainedOutputSnapshot,
 	retainedPaths,
 	TASK_METADATA_VERSION,
 	TASK_REFERENCE_PATTERN,
@@ -95,19 +103,24 @@ export type TaskInputResult = {
 	state: TaskMetadata["state"]
 	latestOutcome: TaskMetadata["latestOutcome"]
 	queuedFollowUps: number
+	output?: Awaited<ReturnType<typeof readRetainedOutput>>
 }
 
 export type AgentToolOptions = {
 	getConfig: () => AgentsConfig
 	createChild?: typeof createChildSession
 	getAgentDir?: () => string
+	canDelegate?: () => boolean
 }
 
 export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): void {
+	const background = options.getConfig().capabilities.includes("backgroundAgents")
 	pi.registerTool({
 		name: "agent",
 		label: "Agent",
-		description: "Create a durable Lovely Agent session and start its initial run.",
+		description: background
+			? "Create a durable Lovely Agent session and start its initial run. waitMs permits background detachment."
+			: "Create a durable Lovely Agent session and wait for its terminal result. Cancellation stops the accepted work.",
 		promptSnippet: "Create or delegate work to a durable agent",
 		promptGuidelines: ["Call agent_roster before creating an agent and use task tools for existing work."],
 		parameters: Type.Object(
@@ -115,10 +128,14 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 				definition: Type.String({ minLength: 1, description: "Agent Definition name" }),
 				label: Type.String({ minLength: 1, description: "Short task label" }),
 				prompt: Type.String({ minLength: 1, description: "Initial task prompt" }),
-				waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 600_000 })),
-				model: Type.Optional(Type.String({ minLength: 1, description: "Configured provider/model ID or fast, smart, workhorse alias" })),
+				...(background ? { waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 600_000 })) } : {}),
+				model: Type.Optional(
+					Type.String({ minLength: 1, description: "Configured provider/model ID or an enabled alias from agent_roster" })
+				),
 				thinking: Type.Optional(ThinkingLevel),
-				allowAgents: Type.Optional(Type.Boolean({ description: "Allow this child to create descendants" }))
+				...(options.canDelegate?.() === false
+					? {}
+					: { allowAgents: Type.Optional(Type.Boolean({ description: "Allow this child to create descendants" })) })
 			},
 			{ additionalProperties: false }
 		),
@@ -139,7 +156,8 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 						args.prompt && promptWidth > 0
 							? `${header}${theme.fg("muted", ' prompt="')}${truncateToWidth(JSON.stringify(args.prompt.replace(/\s+/g, " ").trim()).slice(1, -1), promptWidth)}${theme.fg("muted", '"')}`
 							: truncateToWidth(header, available)
-					return [truncateToWidth(preview + suffix, width)]
+					// Pi's truncation emits full resets; preserve the surrounding tool background.
+					return [truncateToWidth(preview + suffix, width).replaceAll("\x1b[0m", "\x1b[22;39m")]
 				},
 				invalidate() {}
 			}
@@ -157,15 +175,28 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (signal?.aborted) throw abortError(signal)
 			const config = options.getConfig()
+			const background = config.capabilities.includes("backgroundAgents")
+			if (!background && "waitMs" in params) throw new Error("waitMs requires the backgroundAgents capability")
+			if (
+				"waitMs" in params &&
+				(typeof params.waitMs !== "number" || !Number.isInteger(params.waitMs) || params.waitMs < 0 || params.waitMs > 600_000)
+			) {
+				throw new Error("waitMs must be an integer from 0 to 600000")
+			}
+			if ("allowAgents" in params && typeof params.allowAgents !== "boolean") throw new Error("allowAgents must be boolean")
+			const allowAgents = params.allowAgents === true
+			if (allowAgents && options.canDelegate?.() === false) throw new Error("This child cannot delegate at the current maximum depth")
 			validateInput(params.label, "label", MAX_AGENT_LABEL_BYTES)
 			validateInput(params.prompt, "prompt", MAX_AGENT_INPUT_BYTES)
 			const parentSessionId = ctx.sessionManager.getSessionId()
 			const coordinator = getAgentCoordinator(config.maxConcurrency)
-			const parentDepth = coordinator.getSessionContext(parentSessionId)?.depth ?? 0
+			const parentContext = coordinator.getSessionContext(parentSessionId)
+			if (parentContext && !parentContext.allowAgents) throw new Error("This parent agent is not allowed to delegate")
+			const parentDepth = parentContext?.depth ?? 0
 			resolveChildToolPolicy({
 				parentDepth,
 				maximumDepth: config.maxDepth,
-				allowAgents: params.allowAgents ?? false
+				allowAgents
 			})
 			const discovered = discoverAgentDefinitions({
 				cwd: ctx.cwd,
@@ -201,9 +232,10 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 					scopedModels: configuredModels.models,
 					parentDepth,
 					maximumDepth: config.maxDepth,
-					allowAgents: params.allowAgents ?? false,
+					allowAgents,
 					projectTrusted: ctx.isProjectTrusted()
 				})
+				if (signal?.aborted) throw abortError(signal)
 				const acceptedAt = Date.now()
 				const runId = createRunId()
 				const acceptanceOrder = coordinator.nextAcceptanceOrder()
@@ -238,6 +270,7 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 						id: runId,
 						sequence: 1,
 						acceptanceOrder,
+						background,
 						kind: "initial",
 						state: "queued",
 						input: params.prompt,
@@ -257,7 +290,12 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 				const runtime = new AgentRuntime(paths, child, metadata, config.expandPromptTemplates)
 				child = undefined
 				runtime.start()
-				const waitMs = params.waitMs ?? config.waitMs
+				if (!background) {
+					const completed = await runtime.waitForRun(runId, signal)
+					const tasks = (await loadTaskList(ctx.cwd, parentSessionId)).details
+					return buildAgentCreationToolResult(completed, false, retainedOutputSnapshot(paths, completed), tasks)
+				}
+				const waitMs = (params.waitMs as number | undefined) ?? config.waitMs
 				const wait = () => runtime.wait(waitMs, signal)
 				const detached = waitMs === 0 ? await wait() : await coordinator.withLentPermit(wait, signal)
 				const loaded = await readTaskMetadata(paths)
@@ -274,10 +312,13 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 }
 
 export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOptions): void {
+	const background = options.getConfig().capabilities.includes("backgroundAgents")
 	pi.registerTool({
 		name: "task_input",
 		label: "Task Input",
-		description: "Send a durable Follow-up or live Steer to an owned Lovely Agent task.",
+		description: background
+			? "Send a durable Follow-up or live Steer to an owned Lovely Agent task."
+			: "Run a Follow-up on an idle owned task and wait for its terminal reply, or send a run-scoped live Steer. Busy tasks reject Follow-ups.",
 		promptSnippet: "Send Follow-up work or a live Steer to a durable task",
 		promptGuidelines: ["Use Follow-up for later work; use Steer only to redirect a currently running agent."],
 		parameters: Type.Object(
@@ -299,6 +340,7 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 			)
 		},
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			if ("waitMs" in params) throw new Error("task_input does not accept waitMs")
 			const requestedDelivery = params.delivery ?? "followup"
 			const result = await sendTaskInput(ctx, options, params.id, params.content, requestedDelivery, signal)
 			return {
@@ -308,7 +350,9 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 						text:
 							result.effectiveDelivery === "steer"
 								? `${result.id}: steer delivered (${result.state}; ${result.queuedFollowUps} Follow-ups queued)`
-								: `${result.id}: followup accepted (position ${result.queuePosition}; ${result.state}; ${result.queuedFollowUps} queued)`
+								: result.output
+									? `${result.id}: followup ${result.latestOutcome}\n${result.output.text}`
+									: `${result.id}: followup accepted (position ${result.queuePosition}; ${result.state}; ${result.queuedFollowUps} queued)`
 					}
 				],
 				details: result
@@ -378,7 +422,10 @@ export async function sendTaskInput(
 		if (signal?.aborted) throw abortError(signal)
 		const runtime = await controllableRuntime(ctx, paths, options)
 		try {
-			accepted = await runtime.input(content, requestedDelivery)
+			accepted = await runtime.input(content, requestedDelivery, {
+				background: options.getConfig().capabilities.includes("backgroundAgents"),
+				...(signal ? { signal } : {})
+			})
 		} catch (error) {
 			if (!isRuntimeClosingError(error)) throw error
 			await new Promise(resolve => setTimeout(resolve, 0))
@@ -391,9 +438,10 @@ export async function sendTaskInput(
 		requestedDelivery,
 		effectiveDelivery: accepted.delivery,
 		queuePosition: accepted.queuePosition,
-		state: current.metadata.state,
-		latestOutcome: current.metadata.latestOutcome,
-		queuedFollowUps: current.metadata.queuedFollowUps.length
+		state: accepted.completed?.state ?? current.metadata.state,
+		latestOutcome: accepted.completed?.latestOutcome ?? current.metadata.latestOutcome,
+		queuedFollowUps: accepted.completed?.queuedFollowUps.length ?? current.metadata.queuedFollowUps.length,
+		...(accepted.completed ? { output: retainedOutputSnapshot(paths, accepted.completed) } : {})
 	}
 }
 
@@ -446,6 +494,7 @@ class AgentRuntime implements ResidentAgent {
 	readonly #toolArguments = new Map<string, { name: string; arguments: string }>()
 	readonly #pendingSteers: Array<{ content: string }> = []
 	readonly #reservations = new Map<string, AgentReservation>()
+	readonly #completions = new Map<string, ReturnType<typeof deferred<TaskMetadata | undefined>>>()
 	#unbindResident: (() => void) | undefined
 	#unbindSuspended: (() => void) | undefined
 	#unsubscribe: (() => void) | undefined
@@ -471,7 +520,7 @@ class AgentRuntime implements ResidentAgent {
 		this.#initialRunId = metadata.activeRun?.kind === "initial" ? metadata.activeRun.id : undefined
 		this.#expandPromptTemplates = expandPromptTemplates
 		this.#tuple = { provider: metadata.model.provider, model: metadata.model.id }
-		if (metadata.activeRun) this.reserveRun(metadata.activeRun)
+		if (metadata.activeRun && !metadata.activeRun.background) this.#completions.set(metadata.activeRun.id, deferred())
 		this.#unbindResident = getAgentCoordinator().bindResident(paths.taskDirectory, this)
 		this.#unsubscribe = child.session.subscribe(event => this.recordEvent(event))
 	}
@@ -480,6 +529,31 @@ class AgentRuntime implements ResidentAgent {
 		if (this.#started) return
 		this.#started = true
 		void this.run().catch(() => {})
+	}
+
+	/** Run-specific synchronous wait; cancellation owns the accepted run and its descendants. */
+	async waitForRun(runId: string, signal?: AbortSignal): Promise<TaskMetadata> {
+		const completion = this.#completions.get(runId)
+		if (!completion) throw new Error(`Missing completion for run ${runId}`)
+		return getAgentCoordinator().withLentPermit(async () => {
+			const aborted = deferred<void>()
+			const onAbort = () => aborted.resolve(undefined)
+			signal?.addEventListener("abort", onAbort, { once: true })
+			if (signal?.aborted) onAbort()
+			try {
+				const result = await Promise.race([completion.promise, aborted.promise.then(() => undefined)])
+				if (signal?.aborted) {
+					await this.stop()
+					await stopOwnedTaskTree(this.#paths.workspace, this.#child.session.sessionId)
+					throw abortError(signal)
+				}
+				if (!result) throw new Error(`Agent run ${runId} ended without a retained terminal result`)
+				return result
+			} finally {
+				signal?.removeEventListener("abort", onAbort)
+				this.#completions.delete(runId)
+			}
+		}, signal)
 	}
 
 	async wait(waitMs: number, signal?: AbortSignal): Promise<boolean> {
@@ -555,22 +629,22 @@ class AgentRuntime implements ResidentAgent {
 		this.#child.dispose()
 	}
 
-	async input(content: string, delivery: "followup" | "steer"): Promise<ResidentInputResult> {
+	async input(content: string, delivery: "followup" | "steer", options: ResidentInputOptions = {}): Promise<ResidentInputResult> {
 		if (!this.#accepting || this.#disposed) throw new RuntimeClosingError()
 		let result: ResidentInputResult | undefined
 		let acceptedRun: NonNullable<TaskMetadata["activeRun"]> | undefined
 		try {
 			await mutateTaskMetadata(this.#paths, async metadata => {
+				if (options.signal?.aborted) throw abortError(options.signal)
 				if (!this.#accepting || this.#disposed) throw new RuntimeClosingError()
 				if (metadata.discardedAt !== null) throw new Error(`Task ${metadata.taskRef} has been discarded`)
 				if (delivery === "steer" && metadata.state === "running" && metadata.activeRun && this.#child.session.isStreaming) {
 					const pending = { content }
 					this.#pendingSteers.push(pending)
 					try {
-						await this.#child.session.prompt(content, {
-							...childPromptOptions(this.#expandPromptTemplates),
-							streamingBehavior: "steer"
-						})
+						// prompt() can yield in input hooks and start a new run after streaming ends.
+						if (this.#expandPromptTemplates) await this.#child.session.steer(content)
+						else this.#child.session.agent.steer({ role: "user", content, timestamp: Date.now() })
 					} catch (error) {
 						const index = this.#pendingSteers.indexOf(pending)
 						if (index >= 0) this.#pendingSteers.splice(index, 1)
@@ -578,6 +652,12 @@ class AgentRuntime implements ResidentAgent {
 					}
 					result = { delivery: "steer", queuePosition: null, queuedFollowUps: metadata.queuedFollowUps.length }
 					return metadata
+				}
+				if (
+					(!options.background && (metadata.activeRun || metadata.queuedFollowUps.length)) ||
+					(metadata.activeRun && !metadata.activeRun.background)
+				) {
+					throw new Error(`Task ${metadata.taskRef} is busy; foreground Follow-ups require an idle task`)
 				}
 				if (metadata.queuedFollowUps.length >= MAX_QUEUED_FOLLOWUPS) {
 					throw new Error(`Task ${metadata.taskRef} already has ${MAX_QUEUED_FOLLOWUPS} queued Follow-ups`)
@@ -592,6 +672,7 @@ class AgentRuntime implements ResidentAgent {
 					id: runId,
 					sequence,
 					acceptanceOrder,
+					background: options.background ?? false,
 					kind: "followup",
 					state: "queued",
 					input: content,
@@ -610,7 +691,10 @@ class AgentRuntime implements ResidentAgent {
 				return {
 					...metadata,
 					lastRunSequence: sequence,
-					queuedFollowUps: [...metadata.queuedFollowUps, { id: runId, sequence, acceptanceOrder, content, acceptedAt }],
+					queuedFollowUps: [
+						...metadata.queuedFollowUps,
+						{ id: runId, sequence, acceptanceOrder, background: options.background ?? false, content, acceptedAt }
+					],
 					updatedAt: acceptedAt
 				}
 			})
@@ -624,8 +708,13 @@ class AgentRuntime implements ResidentAgent {
 			throw error
 		}
 		if (!result) throw new Error("Task input was not accepted")
-		if (acceptedRun) this.reserveRun(acceptedRun)
+		if (acceptedRun) {
+			if (!acceptedRun.background) this.#completions.set(acceptedRun.id, deferred())
+			// Inactive background reservations preserve acceptance order across promotion.
+			if (acceptedRun.background) this.reserveRun(acceptedRun)
+		}
 		this.start()
+		if (acceptedRun && !acceptedRun.background) result.completed = await this.waitForRun(acceptedRun.id, options.signal)
 		return result
 	}
 
@@ -659,6 +748,7 @@ class AgentRuntime implements ResidentAgent {
 			}
 		} finally {
 			this.dispose()
+			for (const completion of this.#completions.values()) completion.resolve(undefined)
 			this.#initialCompletion.resolve(undefined)
 			this.#runtimeCompletion.resolve(undefined)
 		}
@@ -680,6 +770,7 @@ class AgentRuntime implements ResidentAgent {
 				id: next.id,
 				sequence: next.sequence,
 				...(next.acceptanceOrder ? { acceptanceOrder: next.acceptanceOrder } : {}),
+				background: next.background ?? false,
 				kind: "followup",
 				state: "queued",
 				input: next.content,
@@ -687,7 +778,6 @@ class AgentRuntime implements ResidentAgent {
 			}
 			return { ...metadata, state: "queued", activeRun: selected.run, queuedFollowUps: remaining, updatedAt: Date.now() }
 		})
-		if (selected.run) this.reserveRun(selected.run)
 		return selected.run
 	}
 
@@ -757,10 +847,23 @@ class AgentRuntime implements ResidentAgent {
 				settled = true
 				if (promoted) this.reserveRun(promoted).activate()
 			})
-		} catch {
+		} catch (error) {
 			await this.#eventWrites
 			outcome = this.#stopRequested ? "stopped" : "failed"
+			if (!run.background && !this.#stopRequested) {
+				await mutateTaskMetadata(this.#paths, metadata =>
+					metadata.activeRun?.id === run.id
+						? {
+								...metadata,
+								latestReply: { text: error instanceof Error ? error.message : String(error), streaming: false },
+								updatedAt: Date.now()
+							}
+						: metadata
+				)
+			}
 		}
+		this.#child.session.clearQueue()
+		this.#pendingSteers.length = 0
 		this.#reservations.delete(run.id)
 		if (!settled && !suspended) {
 			const promoted = await this.settle(run, outcome, this.#stopRequested)
@@ -772,6 +875,12 @@ class AgentRuntime implements ResidentAgent {
 	private async suspend(run: NonNullable<TaskMetadata["activeRun"]>): Promise<boolean> {
 		// Provider evidence is tuple-global even if another task mutation wins.
 		getAgentCoordinator().closeTuple(this.#tuple)
+		if (!run.background) {
+			await writeTaskProgress(this.#paths, run.id, {
+				latestReply: { text: "Provider limit reached; foreground run failed and will not restart automatically.", streaming: false }
+			})
+			return false
+		}
 		const wait = Object.assign(deferred<RecoveryMode>(), { mode: undefined as RecoveryMode | undefined })
 		const unbind = bindSuspendedRuntime(this.#tuple, this)
 		this.#recoveryWait = wait
@@ -809,7 +918,7 @@ class AgentRuntime implements ResidentAgent {
 		const detachedAt = Date.now()
 		await mutateTaskMetadata(this.#paths, metadata => {
 			const activeRun = metadata.activeRun
-			if (!activeRun || activeRun.id !== this.#initialRunId || activeRun.detachedAt !== undefined) return metadata
+			if (!activeRun?.background || activeRun.id !== this.#initialRunId || activeRun.detachedAt !== undefined) return metadata
 			return { ...metadata, activeRun: { ...activeRun, detachedAt }, updatedAt: detachedAt }
 		})
 	}
@@ -822,12 +931,18 @@ class AgentRuntime implements ResidentAgent {
 		let won = false
 		const promoted: { run: NonNullable<TaskMetadata["activeRun"]> | null } = { run: null }
 		let notification: TaskMetadata["notifications"][number] | undefined
+		let completed: TaskMetadata | undefined
 		const timestamp = Date.now()
 		await mutateTaskMetadata(this.#paths, async metadata => {
 			const activeRun = metadata.activeRun
 			if (activeRun?.id !== run.id) return clearFollowUps ? { ...metadata, queuedFollowUps: [], updatedAt: timestamp } : metadata
 			won = true
-			if ((outcome === "succeeded" || outcome === "failed") && (run.kind === "followup" || activeRun.detachedAt !== undefined)) {
+			completed = { ...metadata, state: "idle", latestOutcome: outcome, activeRun: null, queuedFollowUps: [], updatedAt: timestamp }
+			if (
+				activeRun.background &&
+				(outcome === "succeeded" || outcome === "failed") &&
+				(run.kind === "followup" || activeRun.detachedAt !== undefined)
+			) {
 				notification = await prepareTaskNotification(this.#paths, metadata, activeRun, "completion", outcome)
 			}
 			const [next, ...remaining] = clearFollowUps ? [] : metadata.queuedFollowUps
@@ -836,6 +951,7 @@ class AgentRuntime implements ResidentAgent {
 					id: next.id,
 					sequence: next.sequence,
 					...(next.acceptanceOrder ? { acceptanceOrder: next.acceptanceOrder } : {}),
+					background: next.background ?? false,
 					kind: "followup",
 					state: "queued",
 					input: next.content,
@@ -863,6 +979,7 @@ class AgentRuntime implements ResidentAgent {
 		})
 		if (won) await appendHistoryLog(this.#paths, { type: "run-end", sequence: run.sequence, outcome, timestamp })
 		if (won && notification) await deliverTaskNotifications(this.#paths).catch(() => {})
+		if (won) this.#completions.get(run.id)?.resolve(completed)
 		if (run.id === this.#initialRunId) this.#initialCompletion.resolve(undefined)
 		return promoted.run
 	}
@@ -877,6 +994,7 @@ class AgentRuntime implements ResidentAgent {
 		const reservation = getAgentCoordinator().reserve({
 			tuple,
 			signal: this.#scheduleAbort.signal,
+			rejectOnClosedTuple: !run.background,
 			...(run.acceptanceOrder ? { acceptanceOrder: run.acceptanceOrder } : {})
 		})
 		this.#reservations.set(run.id, reservation)
@@ -1014,7 +1132,7 @@ function isRuntimeClosingError(error: unknown): boolean {
 }
 
 type ControllableResident = ResidentAgent & {
-	input(content: string, delivery: "followup" | "steer"): Promise<ResidentInputResult>
+	input(content: string, delivery: "followup" | "steer", options?: ResidentInputOptions): Promise<ResidentInputResult>
 }
 
 const COLD_RUNTIME_LOADS = Symbol.for("@xl0/pi-lovely-agents/cold-runtime-loads/v1")

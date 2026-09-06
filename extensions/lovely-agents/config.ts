@@ -38,6 +38,15 @@ function createConfigSchema(ctx?: ModelConfigContext) {
 			visibleWhen: ctx => ctx.get(`${name}Model`) !== DISABLED_MODEL
 		})
 	return {
+		capabilities: field.multiEnum(["contextForks", "backgroundAgents", "backgroundBash"], [], {
+			label: "Capabilities",
+			description: "Optional execution capabilities. Without Background agents, runs stay in the foreground.",
+			valueDescriptions: {
+				contextForks: "Context forks (unavailable until SDK support is integrated)",
+				backgroundAgents: "Allow detached agents and asynchronous Follow-ups",
+				backgroundBash: "Background Bash (producer not implemented yet)"
+			}
+		}),
 		models: field.multiEnum(modelValues, [], {
 			label: "Models",
 			description: "Additional model IDs available for agent selection. Empty includes the parent. Alias targets are always included.",
@@ -65,7 +74,11 @@ function createConfigSchema(ctx?: ModelConfigContext) {
 			label: "Initial wait (ms)",
 			description: "How long agent creation waits before detaching.",
 			min: 0,
-			step: 1000
+			step: 1000,
+			visibleWhen: ctx => {
+				const capabilities = ctx.get("capabilities")
+				return Array.isArray(capabilities) && capabilities.includes("backgroundAgents")
+			}
 		}),
 		expandPromptTemplates: field.boolean(false, {
 			label: "Expand prompt templates",

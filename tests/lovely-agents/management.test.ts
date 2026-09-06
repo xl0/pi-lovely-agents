@@ -53,6 +53,45 @@ test("management Tasks hands off to the existing panel instead of opening anothe
 })
 
 describe("management fixtures", () => {
+	test("cancelled foreground input does not show an acceptance notice", async () => {
+		await withTempWorkspace(async workspace => {
+			const [id] = await seedFixtureTasks(workspace.cwd, "parent")
+			const notices: string[] = []
+			let selected = false
+			let inputs = 0
+			await openTaskManagementUi(
+				{
+					cwd: workspace.cwd,
+					sessionManager: { getSessionId: () => "parent" },
+					ui: {
+						custom: async () => {
+							if (selected) return
+							selected = true
+							return "followup"
+						},
+						editor: async () => "More work",
+						notify: (text: string) => notices.push(text)
+					}
+				} as unknown as ExtensionContext,
+				{
+					discoverDefinitions: () => ({ definitions: [], diagnostics: [], projectAgentsDir: undefined }),
+					loadTasks: async () => (await loadTaskList(workspace.cwd, "parent")).details,
+					focusTasks: async () => {},
+					openConfig: async () => {},
+					controlTask: async () => {},
+					inputTask: async () => {
+						inputs++
+						return false
+					}
+				},
+				`task:${id}`
+			)
+			expect(inputs).toBe(1)
+			expect(notices).toEqual([])
+			await releaseParentLeaseFor(workspace.cwd, "parent")
+		})
+	})
+
 	test("task context shows retained inputs and prompts in a bounded, scrollable read-only view", async () => {
 		await withTempWorkspace(async workspace => {
 			const [id] = await seedFixtureTasks(workspace.cwd, "parent-session")
@@ -100,6 +139,7 @@ describe("management fixtures", () => {
 						}
 						const first = component.render(100).join("\n")
 						if (current === 1) {
+							expect(first).not.toContain("History: initial/Follow-up")
 							expect(first).toContain("Current run 2")
 							expect(first).toContain("Future Follow-up")
 							expect(first).toContain("Exercise the Lovely Agents development UI.")

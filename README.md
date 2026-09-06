@@ -45,15 +45,39 @@ alias edits; unavailable aliases fail explicitly rather than choosing a substitu
 - `task_list` — list every durable direct task owned by this Pi session
 - `task_output({ id, waitMs? })` — latest assistant reply and run/streaming status;
   no inputs, older replies, or pagination
-- `task_input` — queue a Follow-up or Steer a running agent
+- `task_input` — run a Follow-up or Steer a running agent
 - `task_stop` / `task_discard` — stop work or permanently archive the owned subtree
+
+## Capabilities
+
+**Configuration → Capabilities** defaults to none: all new runs stay in the
+foreground. Creation waits for completion; Follow-ups require an idle task and
+wait for their own result. Cancellation stops the work, including descendants.
+Foreground provider-limit failures do not restart automatically. UI inputs
+show a cancellable progress dialog.
+
+Enable `backgroundAgents` for timed detachment (`agent.waitMs`) and queued,
+asynchronous Follow-ups. Existing accepted runs keep their execution policy
+when settings change.
+
+`contextForks` and `backgroundBash` are reserved settings, explicitly marked
+unavailable until implemented. Enabling them does not expose nonexistent tools.
+Creation tools follow delegation permission/depth. Task controls remain visible
+for existing owned work, even when creation is disabled; Definition allowlists
+still apply. Tool schemas/descriptions update with the settings.
+
+## Inspection
 
 Agent tool calls fit the Definition, `label=`, quoted `prompt=` preview, and
 `-> task ID` on one line. Ctrl+O expands the full prompt and result.
 Tool errors stay visible without expansion.
+Notifications have a distinct message background and bold header; Ctrl+O
+reveals their body.
 
 The below-editor task list uses full-width rows with prompt previews captured
 for new runs. Previews remain after completion; older completed runs are not backfilled.
+Rows stay in creation order, newest first; activity/status changes do not reorder
+them. Thinking/responding labels are hidden from the list.
 
 Task inspection reports last observed activity and shared held/max execution
 permits. Queued work shows `capacity`, `provider-limit`, or transitional

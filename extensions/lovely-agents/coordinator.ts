@@ -1,7 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks"
+import type { TaskMetadata } from "./state.js"
 import { publishSchedulerUpdate } from "./updates.js"
 
-export const AGENT_COORDINATOR_VERSION = 2
+export const AGENT_COORDINATOR_VERSION = 3
 const AGENT_COORDINATOR_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/coordinator")
 
 export type ModelTuple = Readonly<{ provider: string; model: string }>
@@ -10,6 +11,8 @@ export type AgentScheduleRequest = {
 	tuple: ModelTuple
 	acceptanceOrder?: number
 	signal?: AbortSignal
+	/** Foreground callers cannot leave work parked behind a provider gate. */
+	rejectOnClosedTuple?: boolean
 }
 
 export type AgentPermit = {
@@ -28,19 +31,27 @@ export type AgentReservation = {
 export type ResidentAgent = {
 	stop(): void | Promise<void>
 	dispose(): void | Promise<void>
-	input?(content: string, delivery: "followup" | "steer"): Promise<ResidentInputResult>
+	input?(content: string, delivery: "followup" | "steer", options?: ResidentInputOptions): Promise<ResidentInputResult>
 	recover?(): boolean | Promise<boolean>
 }
+
+export type ResidentInputOptions = { background?: boolean; signal?: AbortSignal }
 
 export type ResidentInputResult = {
 	delivery: "followup" | "steer"
 	queuePosition: number | null
 	queuedFollowUps: number
+	completed?: TaskMetadata
 }
 
 export type ParentNotification = Readonly<{ id: string; taskRef: string; content: string }>
 export type ParentNotificationRoute = (notification: ParentNotification) => void | Promise<void>
-export type ManagedSessionContext = Readonly<{ depth: number; allowAgents: boolean }>
+export type ManagedSessionContext = Readonly<{
+	depth: number
+	allowAgents: boolean
+	/** Aborted before SDK disposal, which does not emit session_shutdown. */
+	disposeSignal?: AbortSignal
+}>
 
 export type AgentCoordinator = {
 	readonly version: typeof AGENT_COORDINATOR_VERSION
@@ -75,6 +86,7 @@ type Waiter = {
 	reject: (error: unknown) => void
 	signal?: AbortSignal
 	onAbort?: () => void
+	rejectOnClosedTuple: boolean
 }
 
 class ProcessAgentCoordinator implements AgentCoordinator {
@@ -124,6 +136,11 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 	closeTuple(tuple: ModelTuple): void {
 		assertTuple(tuple)
 		this.#closedTuples.add(tupleKey(tuple))
+		for (const waiter of [...this.#waiters]) {
+			if (waiter.tuple === tupleKey(tuple) && waiter.rejectOnClosedTuple) {
+				this.cancel(waiter, new Error("Provider/model is suspended by a provider limit; foreground work cannot wait for recovery"))
+			}
+		}
 		publishSchedulerUpdate()
 	}
 
@@ -241,6 +258,9 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 		bypassTupleGate: boolean,
 		eligible: boolean
 	): { waiter: Waiter; promise: Promise<void> } {
+		if (request.rejectOnClosedTuple && !this.isTupleOpen(request.tuple)) {
+			throw new Error("Provider/model is suspended by a provider limit; foreground work cannot wait for recovery")
+		}
 		let waiter!: Waiter
 		const promise = new Promise<void>((resolve, reject) => {
 			waiter = {
@@ -249,6 +269,7 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 				queueOrder: ++this.#queueOrder,
 				bypassTupleGate,
 				eligible,
+				rejectOnClosedTuple: request.rejectOnClosedTuple ?? false,
 				resolve,
 				reject,
 				...(request.signal ? { signal: request.signal } : {})

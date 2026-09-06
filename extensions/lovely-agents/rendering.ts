@@ -1,5 +1,5 @@
-import { keyHint, type Theme } from "@earendil-works/pi-coding-agent"
-import { Text } from "@earendil-works/pi-tui"
+import { keyHint, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent"
+import { Box, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui"
 
 const COLLAPSED_LINES = 10
 const COLLAPSED_HEAD_LINES = 6
@@ -9,6 +9,36 @@ const PREVIEW_LINE_CHARACTERS = 240
 
 type TextToolResult = {
 	content: Array<{ type: string; text?: string }>
+}
+
+/** Notifications have a distinct message shell; only the header is visible when collapsed. */
+export const renderAgentNotification: MessageRenderer = (message, { expanded, outputPad }, theme) => {
+	const content =
+		typeof message.content === "string"
+			? message.content
+			: message.content
+					.filter(part => part.type === "text")
+					.map(part => part.text)
+					.join("\n")
+	const lines = content.split("\n")
+	const summary = (lines[0]?.startsWith("[Lovely Agent ") ? lines[1] : lines[0]) || "Notification"
+	return {
+		render(width) {
+			const box = new Box(outputPad, 0, text => theme.bg("customMessageBg", text))
+			box.addChild({
+				render: available => [
+					truncateToWidth(theme.fg("customMessageLabel", theme.bold(`${expanded ? "▾" : "▸"} Lovely Agents · ${summary}`)), available)
+				],
+				invalidate() {}
+			})
+			if (expanded && content) {
+				box.addChild(new Spacer(1))
+				box.addChild(new Text(theme.fg("customMessageText", content), 0, 0))
+			}
+			return box.render(width).map(line => truncateToWidth(line, width))
+		},
+		invalidate() {}
+	}
 }
 
 /** Renders short results whole and long results as a head/tail preview toggled by Ctrl+O. */

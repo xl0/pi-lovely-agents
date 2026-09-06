@@ -176,7 +176,7 @@ describe("child tools and prompt", () => {
 describe("persistent child session construction", () => {
 	test("uses the retained session path, explicit tools, context policy, and managed depth", async () => {
 		await withTempWorkspace(async workspace => {
-			const testGlobals = globalThis as typeof globalThis & { __lovelyChildHookStarted?: boolean }
+			const testGlobals = globalThis as typeof globalThis & { __lovelyChildHookStarted?: boolean; __lovelyChildReadUi?: () => unknown }
 			await workspace.write("workspace/AGENTS.md", "INCLUDED PROJECT POLICY")
 			await workspace.write(
 				"agent/extensions/child-hook.ts",
@@ -189,7 +189,10 @@ describe("persistent child session construction", () => {
 \t\tparameters: { type: "object", properties: {}, additionalProperties: false },
 \t\texecute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} })
 \t})
-\tpi.on("session_start", () => { globalThis.__lovelyChildHookStarted = true })
+\tpi.on("session_start", (_event, ctx) => {
+\t\tglobalThis.__lovelyChildHookStarted = true
+\t\tglobalThis.__lovelyChildReadUi = () => ctx.ui
+\t})
 }`
 			)
 			const paths = await reserveTaskStorage(await ensureParentStorage(workspace.cwd, "parent-session"), () => "a_12345678")
@@ -213,6 +216,9 @@ describe("persistent child session construction", () => {
 				agentDir: workspace.agentDir
 			})
 			const childSessionId = handle.session.sessionId
+			const context = getAgentCoordinator().getSessionContext(childSessionId)
+			const readUi = testGlobals.__lovelyChildReadUi
+			let disposalEvents = 0
 			try {
 				expect(handle.session.sessionFile).toBe(paths.session)
 				expect((await stat(paths.session)).mode & 0o777).toBe(0o600)
@@ -224,11 +230,21 @@ describe("persistent child session construction", () => {
 				expect(handle.extensionsResult.extensions[0]?.path).toBe("<inline:lovely-agent-prompt>")
 				expect(handle.extensionsResult.extensions.some(extension => extension.path.endsWith("child-hook.ts"))).toBe(true)
 				expect(testGlobals.__lovelyChildHookStarted).toBe(true)
-				expect(getAgentCoordinator().getSessionContext(handle.session.sessionId)).toEqual({ depth: 1, allowAgents: false })
+				expect(context).toMatchObject({ depth: 1, allowAgents: false })
+				expect(context?.disposeSignal?.aborted).toBe(false)
+				context?.disposeSignal?.addEventListener("abort", () => {
+					disposalEvents++
+					expect(readUi?.()).toBeDefined()
+				})
 			} finally {
 				handle.dispose()
 				delete testGlobals.__lovelyChildHookStarted
+				delete testGlobals.__lovelyChildReadUi
 			}
+			handle.dispose()
+			expect(disposalEvents).toBe(1)
+			expect(context?.disposeSignal?.aborted).toBe(true)
+			expect(() => readUi?.()).toThrow("stale")
 			expect(getAgentCoordinator().getSessionContext(handle.session.sessionId)).toBeUndefined()
 			expect(await Bun.file(paths.session).text()).toContain(childSessionId)
 			const reopened = await createChildSession({
@@ -247,6 +263,7 @@ describe("persistent child session construction", () => {
 			expect(reopened.session.sessionId).toBe(childSessionId)
 			reopened.dispose()
 			delete testGlobals.__lovelyChildHookStarted
+			delete testGlobals.__lovelyChildReadUi
 
 			const excludedPaths = await reserveTaskStorage(await ensureParentStorage(workspace.cwd, "parent-session"), () => "a_87654321")
 			await initializeRetainedLogs(excludedPaths)
@@ -267,6 +284,8 @@ describe("persistent child session construction", () => {
 				expect(excluded.session.agent.state.tools.map(tool => tool.name)).toContain("child_hook")
 			} finally {
 				excluded.dispose()
+				delete testGlobals.__lovelyChildHookStarted
+				delete testGlobals.__lovelyChildReadUi
 			}
 		})
 	})

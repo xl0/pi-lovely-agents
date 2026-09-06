@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Key, matchesKey, type SelectItem, SelectList, truncateToWidth } from "@earendil-works/pi-tui"
-import { relativeTime, type TaskListResult, type TaskListRow } from "./tools.js"
+import type { TaskListResult, TaskListRow } from "./tools.js"
 import { bindTaskUpdateRoute } from "./updates.js"
 
 const PANEL_ID = "lovely-agents"
@@ -46,11 +46,9 @@ export function createTaskPanel(
 						{ truncatePrimary: ({ text, maxWidth }) => truncateToWidth(text, maxWidth) }
 					)
 					list.setSelectedIndex(items.findIndex(item => item.value === selected))
-					const activity = tasks.find(task => `task:${task.id}` === selected)?.lastActivity
 					return [
 						theme.fg("accent", `Tasks · capacity ${capacity.active}/${capacity.limit}`),
 						...(items.length > 0 ? list.render(width) : ["No durable tasks for this session."]),
-						...(activity ? [theme.fg("muted", `${activity.action} · ${relativeTime(activity.at, Date.now())}`)] : []),
 						theme.fg("dim", "↑↓ navigate · Enter actions · Esc/↑ at top editor · type to edit")
 					].map(line => truncateToWidth(line, width))
 				},
@@ -69,7 +67,7 @@ export function createTaskPanel(
 				const result = await options.loadTasks()
 				if (disposed) return
 				const oldIndex = items.findIndex(item => item.value === selected)
-				tasks = result.tasks
+				tasks = [...result.tasks].sort((left, right) => right.createdAt - left.createdAt || left.id.localeCompare(right.id))
 				capacity = result.capacity
 				items = [
 					...tasks.map(task => ({
@@ -168,18 +166,14 @@ export function renderActiveTaskRows(
 		label: string
 		state: string
 		queuedFollowUps: number
-	} & Partial<Pick<TaskListRow, "queueReason" | "lastActivity" | "inputPreview">>)[]
+	} & Partial<Pick<TaskListRow, "queueReason" | "inputPreview">>)[]
 ): string[] {
 	const rows = tasks
 		.slice(0, 5)
 		.map(
 			task =>
 				`↳ ${task.id} ${task.state} ${task.label.replace(/[\r\n]+/g, " ")}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}` +
-				(task.queueReason
-					? ` · waiting: ${task.queueReason}`
-					: task.lastActivity
-						? ` · ${task.lastActivity.action} (${relativeTime(task.lastActivity.at, Date.now())})`
-						: "") +
+				(task.queueReason ? ` · waiting: ${task.queueReason}` : "") +
 				(task.inputPreview ? ` · ${JSON.stringify(task.inputPreview)}` : "")
 		)
 	if (tasks.length > rows.length) rows.push(`  … ${tasks.length - rows.length} more active`)

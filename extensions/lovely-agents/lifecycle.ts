@@ -96,7 +96,7 @@ export async function reconcileParentTasks(cwd: string, parentSessionId: string)
 			continue
 		}
 		let notification: TaskMetadata["notifications"][number] | undefined
-		if (loaded.metadata.activeRun) {
+		if (loaded.metadata.activeRun?.background) {
 			try {
 				notification = await prepareTaskNotification(paths, loaded.metadata, loaded.metadata.activeRun, "interruption", "interrupted")
 			} catch (error) {
@@ -190,7 +190,7 @@ async function recoverPartition(cwd: string, parentSessionId: string, visited: S
 			if (loaded.status === "invalid") result.diagnostics.push(`${paths.taskDirectory}: ${loaded.diagnostic.message}`)
 			continue
 		}
-		if (loaded.metadata.discardedAt === null && loaded.metadata.state === "suspended") {
+		if (loaded.metadata.discardedAt === null && loaded.metadata.state === "suspended" && loaded.metadata.activeRun?.background) {
 			const resident = getAgentCoordinator().getResident(paths.taskDirectory)
 			if (!resident?.recover) result.diagnostics.push(`${paths.taskDirectory}: suspended task has no recoverable resident`)
 			else if (await resident.recover()) result.resumed++

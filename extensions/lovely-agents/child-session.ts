@@ -173,13 +173,16 @@ export async function createChildSession(options: CreateChildSessionOptions): Pr
 		throw new Error(`Child session identity mismatch: expected ${options.expectedSessionId}, found ${result.session.sessionId}`)
 	}
 
+	const lifetime = new AbortController()
 	const unbindContext = getAgentCoordinator().bindSessionContext(result.session.sessionId, {
 		depth: policy.depth,
-		allowAgents: policy.allowAgents
+		allowAgents: policy.allowAgents,
+		disposeSignal: lifetime.signal
 	})
 	try {
 		await result.session.bindExtensions({ mode: "print" })
 	} catch (error) {
+		lifetime.abort()
 		unbindContext()
 		result.session.dispose()
 		throw error
@@ -193,6 +196,7 @@ export async function createChildSession(options: CreateChildSessionOptions): Pr
 		dispose() {
 			if (disposed) return
 			disposed = true
+			lifetime.abort()
 			unbindContext()
 			result.session.dispose()
 		}

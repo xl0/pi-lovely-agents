@@ -25,6 +25,28 @@ afterEach(() => {
 })
 
 describe("Lovely Agents config", () => {
+	test("capabilities default to foreground-only and workspace values replace user capabilities", async () => {
+		await withTempWorkspace(async workspace => {
+			environment.PI_CODING_AGENT_DIR = workspace.agentDir
+			let config = createAgentsConfigSpec(configContext).load(workspace.cwd)
+			expect(config.value.capabilities).toEqual([])
+			const wait = config.fields.find(field => field.key === "waitMs")
+			const visible = () =>
+				wait?.visibleWhen?.({
+					scope: "workspace",
+					get: key => (key === "capabilities" ? config.value.capabilities : undefined),
+					getScoped: () => undefined
+				})
+			expect(visible()).toBe(false)
+			config = config.update("user", "capabilities", ["backgroundAgents"])
+			expect(config.value.capabilities).toEqual(["backgroundAgents"])
+			expect(visible()).toBe(true)
+			config = config.update("workspace", "capabilities", [])
+			expect(config.value.capabilities).toEqual([])
+			expect(visible()).toBe(false)
+		})
+	})
+
 	test("loads defaults, merges scopes, and isolates invalid values", async () => {
 		await withTempWorkspace(async workspace => {
 			environment.PI_CODING_AGENT_DIR = workspace.agentDir

@@ -37,7 +37,8 @@ export type ManagementUiOptions = {
 	loadTasks: () => Promise<TaskListResult>
 	focusTasks: () => Promise<void>
 	openConfig: () => Promise<void>
-	inputTask: (id: string, content: string, delivery: "followup" | "steer") => Promise<void>
+	/** False means the foreground input was cancelled and must not be reported accepted. */
+	inputTask: (id: string, content: string, delivery: "followup" | "steer") => Promise<undefined | false>
 	controlTask: (id: string, action: "stop" | "discard") => Promise<void>
 }
 
@@ -259,7 +260,7 @@ async function manageTask(ctx: ExtensionContext, id: string, options: Management
 			{ value: "output", label: "Live output", description: "Latest assistant reply and run status" },
 			{ value: "history", label: "Inputs / history", description: "Current and queued inputs, past runs, and delivered Steers" },
 			{ value: "prompt", label: "System prompt", description: "Captured Pi system prompt" },
-			{ value: "followup", label: "Follow-up", description: "Queue durable work after the current run" },
+			{ value: "followup", label: "Follow-up", description: "Run more work in this retained session" },
 			{ value: "steer", label: "Steer", description: "Redirect running work; otherwise becomes a Follow-up" },
 			{ value: "stop", label: "Stop", description: "Stop work and preserve the session" },
 			{ value: "discard", label: "Discard", description: "Stop and archive this task and its descendants" }
@@ -271,8 +272,9 @@ async function manageTask(ctx: ExtensionContext, id: string, options: Management
 		else if (choice === "followup" || choice === "steer") {
 			const content = await ctx.ui.editor(`${title(choice)} ${task.id}`)
 			if (content?.trim()) {
-				await options.inputTask(task.id, content, choice)
-				ctx.ui.notify(`${title(choice)} accepted for ${task.id}`, "info")
+				if ((await options.inputTask(task.id, content, choice)) !== false) {
+					ctx.ui.notify(`${title(choice)} accepted for ${task.id}`, "info")
+				}
 			}
 		} else if (choice === "stop") {
 			if (await ctx.ui.confirm(`Stop ${task.id}?`, "The retained session remains reusable.")) {
@@ -306,8 +308,6 @@ async function showTaskContext(ctx: ExtensionContext, task: TaskListRow, view: "
 			[
 				...(metadata.activeRun ? [`Current run ${metadata.activeRun.sequence} (${metadata.state}):`, metadata.activeRun.input, ""] : []),
 				...metadata.queuedFollowUps.flatMap(input => [`Queued Follow-up ${input.sequence} (not started):`, input.content, ""]),
-				"History: initial/Follow-up inputs, delivered Steers, replies, and tool summaries.",
-				"",
 				await readFile(paths.history, "utf8")
 			].join("\n")
 		)

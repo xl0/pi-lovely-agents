@@ -206,9 +206,26 @@ coalesce together; a new run clears the previous run's activity.
 
 ## Runs and input
 
+### Capabilities
+
+`capabilities` is an opt-in list, empty by default. `backgroundAgents` enables
+detachment and asynchronous Follow-ups. Without it, creation waits for a terminal
+result, Follow-ups require an idle task and wait for their own result, and
+cancellation stops foreground work. Foreground provider-limit failures settle
+without unattended recovery. Accepted runs retain their execution policy across
+config edits.
+
+`contextForks` and `backgroundBash` are reserved, explicitly unavailable settings
+until their producers are implemented. Enabling them does not advertise tools.
+Creation tools follow depth and delegation permission; task controls remain
+available when there is an enabled producer or owned work/diagnostics.
+Original SDK/Definition tool allowlists are never bypassed.
+Tool schemas/descriptions refresh on configuration changes: `waitMs` appears
+only with background agents; nested-delegation options require remaining depth.
+
 ### Initial run
 
-Creation waits for the first result by default:
+With `backgroundAgents`, creation waits briefly for the first result:
 
 - `waitMs` overrides the configured default
 - the wait begins when work is accepted, including capacity queue time
@@ -234,7 +251,7 @@ A Follow-up means “do this after the work already accepted.” A Steer means
 | `steer` while running | `running` | no | Enters the active run through Pi's steering queue at its next safe boundary. |
 | `steer` otherwise | every non-discarded state | yes | Falls back to a Follow-up because there is no active run to steer. |
 
-`task_input` defaults to `followup`. Follow-ups always return asynchronously and
+`task_input` defaults to `followup`. Background Follow-ups return asynchronously and
 each produces its own completion notification. A session may hold at most 32
 queued Follow-ups. Every task summary includes `queuedFollowUps`.
 `task_input` also returns the effective delivery and, for a Follow-up, its queue
@@ -384,6 +401,7 @@ Use `@xl0/pi-lovely-config` with the standard user/workspace precedence:
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
+| `capabilities` | `[]` | Opt-in `backgroundAgents`; `contextForks` and `backgroundBash` are unavailable until implemented. Empty means foreground-only execution. |
 | `models` | `[]` | Additional model IDs. Empty includes the parent; enabled alias targets are always included. |
 | `fastModel` / `fastThinking` | `disabled` / `low` | Cheap, low-latency preset for straightforward work. |
 | `smartModel` / `smartThinking` | `disabled` / `high` | Most capable preset for difficult reasoning and complex work. |
@@ -436,14 +454,14 @@ failed runs after Pi's retry policy. They do not close a tuple gate.
 
 When a provider limit is detected:
 
-- the failed run becomes `suspended`
+- background runs become `suspended`; foreground runs fail without unattended recovery
 - queued and newly accepted work on that tuple cannot start
 - already-running siblings drain rather than being aborted
 - a sibling suspends only if it independently reaches a provider-limit error
 - other tuples continue
 
-A synchronous `agent` call returns as soon as its run suspends; waiting for the
-remaining deadline cannot help. Detached suspension produces a
+With background execution enabled, an `agent` call returns as soon as its run
+suspends; waiting for the remaining deadline cannot help. Detached suspension produces a
 bounded status notification so the task cannot remain silently stuck.
 
 A successful parent turn on the same tuple proves recovery and globally requeues
@@ -537,10 +555,10 @@ discard, orphaning, or metadata corruption.
 
 ## Notifications
 
-A synchronous initial completion returns only through `agent`; it is not also
-sent as a notification.
+A synchronous completion returns only through its calling tool, not also as a
+notification.
 
-Detached initial runs and Follow-ups produce one completion notification when
+Detached initial runs and background Follow-ups produce one completion notification when
 they succeed or fail. Explicit stop does not notify because the tool result or
 management UI already reports it. Quota Suspension may produce one nonterminal
 status notification.
@@ -582,9 +600,6 @@ There is no parallel slash-command syntax for every model tool.
 ## Deferred scope
 
 - Background Bash producer
-- cache-preserving parent-context forks: inherit model/thinking, prompt, tools,
-  and completed conversation prefix; preserve provider cache routing where
-  supported. No alias-driven model changes or unfinished tool-batch replay.
 - passive mailboxes and direct child-to-child communication
 - model-visible hierarchical addressing
 - built-in sandboxing and hard capability enforcement
@@ -792,7 +807,7 @@ are marked delivered only when the parent observes the custom message.
 Process-local in-flight suppression avoids live duplicates; startup transcript
 reconciliation marks observed IDs and resends only absent notices. Payloads
 include bounded latest-reply previews, retained paths, and descendant summaries while
-excluding synchronous initial results and explicit stops.
+excluding synchronous results and explicit stops.
 
 ### [ ] 6. Live controls and release readiness
 
@@ -816,11 +831,27 @@ No polling is used. Print/JSON behavior remains
 noninteractive and plain. Agent calls fit Definition, label, quoted prompt
 preview, and `-> task ID` on one line, reserving suffix width before truncation.
 Ctrl+O expands full input and the otherwise-hidden
-Result section; tool errors remain visible. Notifications share expansion with tool
-results; Pi custom-message rendering does not provide tool-style click toggles.
+Result section; tool errors remain visible. Notifications use a distinct message
+background, a bold task/status header, and an otherwise-hidden body. Ctrl+O
+expands them; the installed Pi custom-message renderer lacks click toggles.
 Focused task rows use full terminal width for label, status/model, and prompt.
 Bounded prompt previews are captured for new runs and retained after completion;
 human-only list loading keeps them out of task-tool results.
+Panel rows sort newest-created first with stable ID ties, independent of status
+and activity. Thinking/responding labels are omitted. Call truncation preserves
+the surrounding tool background.
+Managed child disposal removes subscriptions and fences pending refreshes before
+SDK context invalidation, without treating idle unload as semantic shutdown.
+Confirmed
+manual discard sends a parent-context notice after success; it does not start
+an idle turn.
+
+#### [x] Capability gates
+
+Opt-in execution settings, foreground lifecycle/cancellation/provider-limit
+handling, and dynamically filtered tools. Preserve controls for retained work
+and accepted-run policy across config edits. Focused/full suites cover execution
+and UI gating. Coordinator v3 requires a process restart.
 
 #### [x] Model aliases
 
@@ -851,3 +882,21 @@ formatted or excluded; targeted project checks must pass regardless. Verify the
 packed archive contains runtime dependencies and only intended package files.
 Publish the Lovely Config release containing `multiEnum` before package
 verification; development uses `bun link`.
+
+### [ ] 7. Cache-preserving context forks
+
+Create an independently owned child from the parent's model/thinking, effective
+prompt, ordered tools, and completed conversation prefix. Cut before the entire
+spawning assistant tool batch; never replay pending calls. No Definition prompt
+replacement or alias-driven model switch.
+
+Keep child session/transport identities independent. Reuse only observed,
+supported provider cache-routing hints; sharing Agent.sessionId also shares
+provider WebSocket state and breaks cleanup ownership.
+
+SDK investigation is complete. Public APIs can copy durable entries and Pi's
+prompt string, and recreate tools with matching observable schemas. They cannot
+snapshot actual parent tool bindings/extension state or the final transformed
+provider request. Choose SDK support versus explicitly constrained best-effort
+forks before implementation. Cold-open must retain the chosen recipe without
+silently substituting tools or models.

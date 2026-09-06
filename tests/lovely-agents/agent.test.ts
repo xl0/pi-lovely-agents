@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { readFile, unlink } from "node:fs/promises"
 import { resolve } from "node:path"
 import type { AgentSessionEvent, ExtensionAPI, ExtensionContext, ScopedModel } from "@earendil-works/pi-coding-agent"
+import type { TSchema } from "typebox"
+import { Value } from "typebox/value"
 import {
 	type AgentCreationResult,
 	recoverProviderTuple,
@@ -28,6 +30,7 @@ import { definitionSource, withTempWorkspace } from "./test-helpers.js"
 const selectedModel = model("anthropic", "sonnet")
 const config: AgentsConfig = {
 	...defaultAgentsConfig,
+	capabilities: ["backgroundAgents"],
 	models: [],
 	maxConcurrency: 2,
 	maxDepth: 2,
@@ -352,7 +355,8 @@ describe("agent tool", () => {
 				if (child.prompts.length < 3) child.assistantError("ResourceExhausted")
 				else child.assistant("Recovered")
 			})
-			const tools = captureAgentTools(workspace.agentDir, async () => fake.handle)
+			const current = { ...config }
+			const tools = captureAgentTools(workspace.agentDir, async () => fake.handle, current)
 			const coordinator = getAgentCoordinator()
 			const tuple = { provider: selectedModel.provider, model: selectedModel.id }
 			coordinator.openTuple(tuple)
@@ -366,6 +370,7 @@ describe("agent tool", () => {
 				const details = created.details as AgentCreationResult
 				const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
 				expect(details.state).toBe("suspended")
+				current.capabilities = []
 
 				expect(recoverProviderTuple(tuple)).toBe(1)
 				await waitForSuspension(paths, fake, 2)
@@ -964,7 +969,391 @@ describe("task lifecycle controls", () => {
 	})
 })
 
+describe("foreground agents", () => {
+	test("hides waitMs, validates schemas, and rejects stale hidden arguments at execution", async () => {
+		await withTempWorkspace(async workspace => {
+			const current = { ...config, capabilities: [] as AgentsConfig["capabilities"] }
+			const tools = captureAgentTools(
+				workspace.agentDir,
+				async () => {
+					throw new Error("Must not create")
+				},
+				current
+			)
+			const args = { definition: "reviewer", label: "Review", prompt: "work" }
+			expect(Value.Check(tools.agent.parameters, args)).toBe(true)
+			expect(Value.Check(tools.agent.parameters, { ...args, waitMs: 0 })).toBe(false)
+			expect(tools.agent.description).toContain("terminal result")
+			expect(tools.input.description).toContain("wait for its terminal reply")
+			await expect(tools.agent.execute("hidden", { ...args, waitMs: 0 }, undefined, taskContext(workspace.cwd))).rejects.toThrow(
+				"backgroundAgents"
+			)
+			await expect(
+				tools.input.execute("hidden", { id: "a_11111111", content: "work", waitMs: 0 }, undefined, taskContext(workspace.cwd))
+			).rejects.toThrow("task_input does not accept waitMs")
+			current.capabilities = ["backgroundAgents"]
+			const background = captureAgentTools(
+				workspace.agentDir,
+				async () => {
+					throw new Error("Must not create")
+				},
+				current
+			)
+			expect(Value.Check(background.agent.parameters, { ...args, waitMs: 0 })).toBe(true)
+			current.capabilities = []
+			await expect(background.agent.execute("stale", { ...args, waitMs: 0 }, undefined, taskContext(workspace.cwd))).rejects.toThrow(
+				"backgroundAgents"
+			)
+			const limited = captureAgentTools(
+				workspace.agentDir,
+				async () => {
+					throw new Error("Must not create")
+				},
+				current,
+				() => false
+			)
+			expect(Value.Check(limited.agent.parameters, { ...args, allowAgents: true })).toBe(false)
+			await expect(
+				limited.agent.execute("hidden-delegation", { ...args, allowAgents: true }, undefined, taskContext(workspace.cwd))
+			).rejects.toThrow("cannot delegate")
+		})
+	})
+
+	test("waits past the configured deadline and message completion without notifications", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const started = deferred<void>()
+			const finish = deferred<void>()
+			const fake = fakeChild(async child => {
+				child.assistant("Final reply")
+				started.resolve(undefined)
+				await finish.promise
+			})
+			const tool = captureAgentTool(workspace.agentDir, fake.handle, { ...config, capabilities: [], waitMs: 0 })
+			let returned = false
+			const pending = tool
+				.execute("create", { definition: "reviewer", label: "Foreground", prompt: "work" }, undefined, taskContext(workspace.cwd))
+				.then(result => {
+					returned = true
+					return result
+				})
+			await started.promise
+			await Bun.sleep(20)
+			expect(returned).toBe(false)
+			finish.resolve(undefined)
+			const details = (await pending).details as AgentCreationResult
+			expect(details).toMatchObject({ state: "idle", latestOutcome: "succeeded", detached: false, output: { text: "Final reply" } })
+			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
+			const loaded = await readTaskMetadata(paths)
+			expect(loaded.status === "ok" ? loaded.metadata.notifications : null).toEqual([])
+			await releaseParentLeaseFor(workspace.cwd, "parent-session")
+		})
+	})
+
+	test("waits for a cold Follow-up's own reply and lends managed parent permits", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const first = fakeChild(async child => child.assistant("Initial reply"))
+			const started = deferred<void>()
+			const finish = deferred<void>()
+			const second = fakeChild(async child => {
+				child.assistant("Follow-up reply")
+				started.resolve(undefined)
+				await finish.promise
+			})
+			const children = [first.handle, second.handle]
+			const tools = captureAgentTools(
+				workspace.agentDir,
+				async () => {
+					const child = children.shift()
+					if (!child) throw new Error("Unexpected child")
+					return child
+				},
+				{ ...config, capabilities: [], waitMs: 0 }
+			)
+			const coordinator = getAgentCoordinator()
+			const limit = coordinator.maxConcurrency
+			coordinator.setMaxConcurrency(1)
+			try {
+				const ctx = taskContext(workspace.cwd)
+				const tuple = { provider: "anthropic", model: "sonnet" }
+				const created = await coordinator.run({ tuple }, () =>
+					tools.agent.execute("create", { definition: "reviewer", label: "Foreground", prompt: "work" }, undefined, ctx)
+				)
+				const { id } = created.details as AgentCreationResult
+				while (!first.disposed) await Bun.sleep(1)
+				let returned = false
+				const pending = coordinator
+					.run({ tuple }, () => tools.input.execute("follow", { id, content: "again", delivery: "steer" }, undefined, ctx))
+					.then(result => {
+						returned = true
+						return result
+					})
+				await started.promise
+				await Bun.sleep(20)
+				expect(returned).toBe(false)
+				finish.resolve(undefined)
+				const result = await pending
+				expect(result.details).toMatchObject({
+					effectiveDelivery: "followup",
+					latestOutcome: "succeeded",
+					output: { text: "Follow-up reply" }
+				})
+				expect(result.content[0]?.text).toContain("Follow-up reply")
+				const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
+				const loaded = await readTaskMetadata(paths)
+				expect(loaded.status === "ok" ? loaded.metadata.notifications : null).toEqual([])
+				expect(coordinator.activeCount).toBe(0)
+			} finally {
+				finish.resolve(undefined)
+				coordinator.setMaxConcurrency(limit)
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
+			}
+		})
+	})
+
+	test("rejects foreground admission behind old background work but still permits live Steers", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const started = deferred<void>()
+			const finish = deferred<void>()
+			const fake = fakeChild(async child => {
+				started.resolve(undefined)
+				await finish.promise
+				child.assistant("Background reply")
+			})
+			const current = { ...config }
+			const tools = captureAgentTools(workspace.agentDir, async () => fake.handle, current)
+			const ctx = taskContext(workspace.cwd)
+			const created = await tools.agent.execute(
+				"create",
+				{ definition: "reviewer", label: "Background", prompt: "work", waitMs: 0 },
+				undefined,
+				ctx
+			)
+			const { id } = created.details as AgentCreationResult
+			await started.promise
+			current.capabilities = []
+			try {
+				await expect(tools.input.execute("follow", { id, content: "unattended queue" }, undefined, ctx)).rejects.toThrow("busy")
+				const steer = await tools.input.execute("steer", { id, content: "redirect", delivery: "steer" }, undefined, ctx)
+				expect(steer.details).toMatchObject({ effectiveDelivery: "steer", queuedFollowUps: 0 })
+				expect(fake.steers).toEqual(["redirect"])
+				finish.resolve(undefined)
+				const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
+				await waitForOutcome(paths)
+				while (!fake.disposed) await Bun.sleep(1)
+				const loaded = await readTaskMetadata(paths)
+				expect(loaded.status === "ok" ? loaded.metadata.notifications.map(notification => notification.type) : null).toEqual(["completion"])
+			} finally {
+				finish.resolve(undefined)
+				await tools.stop.execute("stop", { id }, undefined, ctx)
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
+			}
+		})
+	})
+
+	test("cancels accepted foreground capacity waits without starting them later", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const fake = fakeChild(async child => child.assistant("Must not run"))
+			const coordinator = getAgentCoordinator()
+			const limit = coordinator.maxConcurrency
+			coordinator.setMaxConcurrency(1)
+			const blocker = await coordinator.acquire({ tuple: { provider: "blocker", model: "model" } })
+			const abort = new AbortController()
+			const tool = captureAgentTool(workspace.agentDir, fake.handle, { ...config, capabilities: [] })
+			const pending = tool.execute(
+				"queued",
+				{ definition: "reviewer", label: "Queued", prompt: "work" },
+				abort.signal,
+				taskContext(workspace.cwd)
+			)
+			void pending.catch(() => {})
+			try {
+				while (coordinator.queuedCount === 0) await Bun.sleep(1)
+				abort.abort(new Error("cancelled"))
+				await expect(pending).rejects.toThrow("cancelled")
+				blocker.release()
+				await Bun.sleep(10)
+				expect(fake.prompts).toEqual([])
+				expect(fake.disposed).toBe(true)
+				expect(coordinator.queuedCount).toBe(0)
+				const list = await loadTaskList(workspace.cwd, "parent-session")
+				expect(list.details.tasks[0]).toMatchObject({ state: "idle", latestOutcome: "stopped" })
+			} finally {
+				abort.abort(new Error("cancelled"))
+				blocker.release()
+				coordinator.setMaxConcurrency(limit)
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
+			}
+		})
+	})
+
+	test("cancels an accepted foreground Follow-up and cannot detach it", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const first = fakeChild(async child => child.assistant("Initial"))
+			const started = deferred<void>()
+			const second = fakeChild(async child => {
+				started.resolve(undefined)
+				await child.aborted
+			})
+			const children = [first.handle, second.handle]
+			const tools = captureAgentTools(
+				workspace.agentDir,
+				async () => {
+					const child = children.shift()
+					if (!child) throw new Error("Unexpected child")
+					return child
+				},
+				{ ...config, capabilities: [] }
+			)
+			const ctx = taskContext(workspace.cwd)
+			const created = await tools.agent.execute(
+				"create",
+				{ definition: "reviewer", label: "Foreground", prompt: "initial" },
+				undefined,
+				ctx
+			)
+			const { id } = created.details as AgentCreationResult
+			while (!first.disposed) await Bun.sleep(1)
+			const abort = new AbortController()
+			const pending = tools.input.execute("follow", { id, content: "later" }, abort.signal, ctx)
+			void pending.catch(() => {})
+			await started.promise
+			abort.abort(new Error("cancelled"))
+			await expect(pending).rejects.toThrow("cancelled")
+			expect(second.disposed).toBe(true)
+			const paths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
+			const loaded = await readTaskMetadata(paths)
+			expect(loaded.status === "ok" ? loaded.metadata : null).toMatchObject({ state: "idle", latestOutcome: "stopped", notifications: [] })
+			await releaseParentLeaseFor(workspace.cwd, "parent-session")
+		})
+	})
+
+	test("terminates provider failures and never restarts them through either recovery path", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const fake = fakeChild(async child => child.assistantError("429 rate limit exceeded"))
+			const coordinator = getAgentCoordinator()
+			const tuple = { provider: "anthropic", model: "sonnet" }
+			const tool = captureAgentTool(workspace.agentDir, fake.handle, { ...config, capabilities: [] })
+			try {
+				const result = await tool.execute(
+					"limit",
+					{ definition: "reviewer", label: "Foreground", prompt: "work" },
+					undefined,
+					taskContext(workspace.cwd)
+				)
+				expect(result.details).toMatchObject({ state: "idle", latestOutcome: "failed", detached: false })
+				expect((result.details as AgentCreationResult).output.text).toContain("will not restart automatically")
+				expect(coordinator.isTupleOpen(tuple)).toBe(false)
+				expect(await recoverOwnedTaskTree(workspace.cwd, "parent-session")).toEqual({ resumed: 0, diagnostics: [] })
+				expect(recoverProviderTuple(tuple)).toBe(0)
+				expect(fake.prompts).toHaveLength(1)
+			} finally {
+				coordinator.openTuple(tuple)
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
+			}
+		})
+	})
+
+	test("enforces parent allowAgents even when the tool is directly invoked", async () => {
+		await withTempWorkspace(async workspace => {
+			const tool = captureAgentTool(workspace.agentDir, fakeChild(async () => {}).handle, { ...config, capabilities: [] })
+			const unbind = getAgentCoordinator().bindSessionContext("parent-session", { depth: 1, allowAgents: false })
+			try {
+				await expect(
+					tool.execute("forged", { definition: "reviewer", label: "Denied", prompt: "work" }, undefined, taskContext(workspace.cwd))
+				).rejects.toThrow("not allowed to delegate")
+			} finally {
+				unbind()
+			}
+		})
+	})
+
+	test("cancels nested foreground work while all managed permits are lent", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const coordinator = getAgentCoordinator()
+			const limit = coordinator.maxConcurrency
+			coordinator.setMaxConcurrency(1)
+			const nestedAbort = new AbortController()
+			const started = deferred<void>()
+			const nested = fakeChild(
+				async child => {
+					started.resolve(undefined)
+					await child.aborted
+				},
+				true,
+				"grandchild-session"
+			)
+			const parent = fakeChild(async child => {
+				void child.aborted.then(() => nestedAbort.abort(new Error("parent cancelled")))
+				await tools.agent.execute("nested", { definition: "reviewer", label: "Nested", prompt: "nested work" }, nestedAbort.signal, {
+					...taskContext(workspace.cwd),
+					sessionManager: { getSessionId: () => child.handle.session.sessionId }
+				} as ExtensionContext)
+			})
+			const children = [parent.handle, nested.handle]
+			const tools = captureAgentTools(
+				workspace.agentDir,
+				async options => {
+					const child = children.shift()
+					if (!child) throw new Error("Unexpected child")
+					const depth = options.parentDepth + 1
+					const unbind = coordinator.bindSessionContext(child.session.sessionId, { depth, allowAgents: options.allowAgents })
+					return {
+						...child,
+						depth,
+						allowAgents: options.allowAgents,
+						dispose() {
+							unbind()
+							child.dispose()
+						}
+					}
+				},
+				{ ...config, capabilities: [] }
+			)
+			const abort = new AbortController()
+			const pending = tools.agent.execute(
+				"parent",
+				{
+					definition: "reviewer",
+					label: "Parent",
+					prompt: "delegate",
+					allowAgents: true
+				},
+				abort.signal,
+				taskContext(workspace.cwd)
+			)
+			void pending.catch(() => {})
+			try {
+				await started.promise
+				expect(coordinator.activeCount).toBe(1)
+				abort.abort(new Error("cancelled"))
+				await expect(pending).rejects.toThrow("cancelled")
+				expect(parent.disposed).toBe(true)
+				expect(nested.disposed).toBe(true)
+				expect(coordinator.activeCount).toBe(0)
+				expect(coordinator.residentCount).toBe(0)
+				const tasks = (await loadTaskList(workspace.cwd, "parent-session")).details.tasks
+				expect(tasks[0]).toMatchObject({ state: "idle", latestOutcome: "stopped" })
+			} finally {
+				abort.abort(new Error("cancelled"))
+				nestedAbort.abort(new Error("cancelled"))
+				coordinator.setMaxConcurrency(limit)
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
+				await releaseParentLeaseFor(workspace.cwd, "child-session")
+			}
+		})
+	})
+})
+
 type CapturedAgentTool = {
+	parameters: TSchema
+	description: string
 	execute(
 		toolCallId: string,
 		params: Record<string, unknown>,
@@ -987,12 +1376,15 @@ function captureAgentTool(agentDir: string, child: ChildSessionHandle, toolConfi
 function captureAgentTools(
 	agentDir: string,
 	createChild: (options: CreateChildSessionOptions) => Promise<ChildSessionHandle>,
-	toolConfig: AgentsConfig = config
+	toolConfig: AgentsConfig = config,
+	canDelegate?: () => boolean
 ): CapturedAgentTools {
 	const captured = new Map<string, CapturedAgentTool>()
 	const api = {
-		registerTool(tool: { name: string; execute: (...args: unknown[]) => unknown }) {
+		registerTool(tool: { name: string; parameters: TSchema; description: string; execute: (...args: unknown[]) => unknown }) {
 			captured.set(tool.name, {
+				parameters: tool.parameters,
+				description: tool.description,
 				execute: (toolCallId, params, signal, ctx) =>
 					tool.execute(toolCallId, params, signal, undefined, ctx) as ReturnType<CapturedAgentTool["execute"]>
 			})
@@ -1004,6 +1396,7 @@ function captureAgentTools(
 	registerAgentTool(api, {
 		getConfig: () => toolConfig,
 		getAgentDir: () => agentDir,
+		...(canDelegate ? { canDelegate } : {}),
 		createChild
 	})
 	registerTaskInputTool(api, {
@@ -1048,7 +1441,7 @@ type FakeChild = {
 	tool(name: string, args: unknown, resultValue: unknown): void
 }
 
-function fakeChild(runPrompt: (child: FakeChild) => Promise<void>, deliverSteers = true): FakeChild {
+function fakeChild(runPrompt: (child: FakeChild) => Promise<void>, deliverSteers = true, sessionId = "child-session"): FakeChild {
 	const listeners = new Set<(event: AgentSessionEvent) => void>()
 	const messages: Array<{
 		role: "assistant"
@@ -1106,7 +1499,7 @@ function fakeChild(runPrompt: (child: FakeChild) => Promise<void>, deliverSteers
 				get systemPrompt() {
 					return result.systemPrompt
 				},
-				sessionId: "child-session",
+				sessionId,
 				model: selectedModel,
 				thinkingLevel: "medium",
 				messages,
@@ -1145,6 +1538,15 @@ function fakeChild(runPrompt: (child: FakeChild) => Promise<void>, deliverSteers
 				async abort() {
 					aborted.resolve(undefined)
 				},
+				async steer(text: string) {
+					await result.handle.session.prompt(text, { expandPromptTemplates: true, streamingBehavior: "steer" })
+				},
+				agent: {
+					steer(message: { content: string }) {
+						void result.handle.session.prompt(message.content, { expandPromptTemplates: false, streamingBehavior: "steer" })
+					}
+				},
+				clearQueue() {},
 				subscribe(listener: (event: AgentSessionEvent) => void) {
 					listeners.add(listener)
 					return () => listeners.delete(listener)

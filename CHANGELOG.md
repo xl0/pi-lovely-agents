@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Fix stale-context crashes on idle child disposal and background-color gaps in
+  truncated agent calls. Sort UI rows by creation time; hide internal activity.
+- Add opt-in capabilities with foreground-only defaults, synchronous Follow-ups,
+  cancellation, and config-aware tool schemas/visibility. Context forks and
+  Background Bash are marked unavailable until implemented.
+- Style notifications as distinct messages with bold headers and bodies hidden
+  until expanded.
+- Notify the parent model after manual task discard, without waking an idle
+  turn.
 - Add configurable `fast`, `smart`, and `workhorse` model/thinking aliases,
   roster descriptions, and alias selection in calls and Definitions. Alias
   targets join available model choices automatically; existing agents stay fixed.

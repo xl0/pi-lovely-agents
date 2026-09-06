@@ -5,6 +5,7 @@ import { reconcileParentTasks, recoverOwnedTaskTree, stopOwnedTaskTree } from ".
 import {
 	ensureParentStorage,
 	initializeRetainedLogs,
+	mutateTaskMetadata,
 	readTaskMetadata,
 	releaseParentLeaseFor,
 	reserveTaskStorage,
@@ -16,6 +17,33 @@ import {
 import { withTempWorkspace } from "./test-helpers.js"
 
 describe("task lifecycle recovery", () => {
+	test("interrupts foreground or unspecified-policy work without notices or recovery", async () => {
+		await withTempWorkspace(async workspace => {
+			const paths = await createTask(workspace.cwd, "parent", "a_70000005", "child", "suspended")
+			await mutateTaskMetadata(paths, metadata => {
+				if (!metadata.activeRun) throw new Error("Missing run")
+				const { background: _background, ...activeRun } = metadata.activeRun
+				return { ...metadata, activeRun }
+			})
+			let recovered = false
+			const unbind = getAgentCoordinator().bindResident(paths.taskDirectory, {
+				stop() {},
+				dispose() {},
+				recover() {
+					recovered = true
+					return true
+				}
+			})
+			expect(await recoverOwnedTaskTree(workspace.cwd, "parent")).toEqual({ resumed: 0, diagnostics: [] })
+			expect(recovered).toBe(false)
+			unbind()
+			expect(await reconcileParentTasks(workspace.cwd, "parent")).toEqual({ interrupted: 1, diagnostics: [] })
+			const loaded = await readTaskMetadata(paths)
+			expect(loaded.status === "ok" ? loaded.metadata : null).toMatchObject({ state: "interrupted", notifications: [] })
+			await releaseParentLeaseFor(workspace.cwd, "parent")
+		})
+	})
+
 	test("marks stale accepted work interrupted and records one notification", async () => {
 		await withTempWorkspace(async workspace => {
 			const paths = await createTask(workspace.cwd, "parent", "a_11111111", "child", "running")
@@ -175,6 +203,7 @@ async function createTask(
 						id: "r_1111111111111111",
 						sequence: 1,
 						kind: "initial",
+						background: true,
 						state,
 						input: "work",
 						acceptedAt: 1,
