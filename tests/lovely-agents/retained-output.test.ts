@@ -51,7 +51,7 @@ describe("task progress", () => {
 		}
 	})
 
-	test("waits for scheduler-only changes without a metadata write", async () => {
+	test("ignores scheduler-only changes until the run ends", async () => {
 		await withTaskStorage("running", async paths => {
 			await mutateTaskMetadata(paths, metadata => {
 				if (!metadata.activeRun) throw new Error("Missing fixture run")
@@ -64,25 +64,28 @@ describe("task progress", () => {
 				const pending = readRetainedOutput(paths, { waitMs: 1_000 })
 				await Bun.sleep(20)
 				coordinator.closeTuple(tuple)
-				expect(await pending).toMatchObject({ timedOut: false, queueReason: "provider-limit", text: "" })
+				expect(await Promise.race([pending, Bun.sleep(30).then(() => "waiting")])).toBe("waiting")
 				expect(await readFile(paths.metadata, "utf8")).toBe(before)
+				await mutateTaskMetadata(paths, metadata => ({ ...metadata, state: "idle", latestOutcome: "stopped", activeRun: null }))
+				expect(await pending).toMatchObject({ timedOut: false, state: "idle", latestOutcome: "stopped", text: "" })
 			} finally {
 				coordinator.openTuple(tuple)
 			}
 		})
 	})
 
-	test("activity wakes empty snapshots, survives bookkeeping, and fences late runs", async () => {
+	test("activity does not wake empty snapshots, survives bookkeeping, and fences late runs", async () => {
 		await withTaskStorage("running", async paths => {
 			const pending = readRetainedOutput(paths, { waitMs: 1_000 })
 			await Bun.sleep(20)
 			const lastActivity = { at: Date.now(), action: "thinking" }
 			await writeTaskProgress(paths, runId, { lastActivity })
-			expect(await pending).toMatchObject({ timedOut: false, text: "", lastActivity })
+			expect(await Promise.race([pending, Bun.sleep(30).then(() => "waiting")])).toBe("waiting")
 			await mutateTaskMetadata(paths, metadata => ({ ...metadata, updatedAt: Date.now() }))
 			await writeTaskProgress(paths, "r_1111111111111111", { lastActivity: { at: Date.now(), action: "late" } })
 			expect((await readRetainedOutput(paths)).lastActivity).toEqual(lastActivity)
 			await mutateTaskMetadata(paths, metadata => ({ ...metadata, state: "idle", activeRun: null }))
+			expect(await pending).toMatchObject({ timedOut: false, state: "idle", text: "", lastActivity })
 			await writeTaskProgress(paths, runId, { lastActivity: { at: Date.now(), action: "late" } })
 			expect((await readRetainedOutput(paths)).lastActivity).toEqual(lastActivity)
 		})
@@ -225,21 +228,17 @@ describe("latest reply snapshots", () => {
 		})
 	})
 
-	test("waits for equal-length replacements as well as streaming/status changes", async () => {
+	test("waits for run completion despite partial replies and assistant-message completion", async () => {
 		await withTaskStorage("running", async paths => {
 			await writeLatestReply(paths, runId, "one", true)
 			const pending = readRetainedOutput(paths, { waitMs: 1_000 })
 			await Bun.sleep(20)
 			await writeLatestReply(paths, runId, "two", true)
-			expect(await pending).toMatchObject({ text: "two", timedOut: false })
-			const finalReply = readRetainedOutput(paths, { waitMs: 1_000 })
-			await Bun.sleep(20)
+			expect(await Promise.race([pending, Bun.sleep(30).then(() => "waiting")])).toBe("waiting")
 			await writeLatestReply(paths, runId, "two", false)
-			expect(await finalReply).toMatchObject({ text: "two", streaming: false, state: "running", timedOut: false })
-			const completion = readRetainedOutput(paths, { waitMs: 1_000 })
-			await Bun.sleep(20)
+			expect(await Promise.race([pending, Bun.sleep(30).then(() => "waiting")])).toBe("waiting")
 			await mutateTaskMetadata(paths, metadata => ({ ...metadata, state: "idle", latestOutcome: "succeeded", activeRun: null }))
-			expect(await completion).toMatchObject({ text: "two", state: "idle", latestOutcome: "succeeded", timedOut: false })
+			expect(await pending).toMatchObject({ text: "two", state: "idle", latestOutcome: "succeeded", timedOut: false })
 		})
 	})
 
@@ -254,6 +253,48 @@ describe("latest reply snapshots", () => {
 			const pending = readRetainedOutput(paths, { waitMs: 1_000, signal: controller.signal })
 			controller.abort(new Error("cancelled"))
 			await expect(pending).rejects.toThrow("cancelled")
+		})
+	})
+
+	test("returns on suspension and does not wait again while suspended", async () => {
+		await withTaskStorage("running", async paths => {
+			const pending = readRetainedOutput(paths, { waitMs: 1_000 })
+			await Bun.sleep(20)
+			await mutateTaskMetadata(paths, metadata => {
+				if (!metadata.activeRun) throw new Error("Missing fixture run")
+				return { ...metadata, state: "suspended", activeRun: { ...metadata.activeRun, state: "suspended" } }
+			})
+			expect(await pending).toMatchObject({ state: "suspended", timedOut: false })
+			expect(await Promise.race([readRetainedOutput(paths, { waitMs: 1_000 }), Bun.sleep(100).then(() => "too-slow")])).toMatchObject({
+				state: "suspended",
+				timedOut: false
+			})
+		})
+	})
+
+	test("returns the latest partial snapshot on timeout despite ongoing activity", async () => {
+		await withTaskStorage("running", async paths => {
+			const pending = readRetainedOutput(paths, { waitMs: 100 })
+			await Bun.sleep(20)
+			await writeTaskProgress(paths, runId, {
+				lastActivity: { at: Date.now(), action: "thinking" },
+				latestReply: { text: "partial", streaming: true }
+			})
+			expect(await pending).toMatchObject({ state: "running", text: "partial", streaming: true, timedOut: true })
+		})
+	})
+
+	test("does not chase a newer Follow-up when the observed run has ended", async () => {
+		await withTaskStorage("running", async paths => {
+			const pending = readRetainedOutput(paths, { waitMs: 1_000 })
+			await Bun.sleep(20)
+			await mutateTaskMetadata(paths, metadata => ({
+				...metadata,
+				state: "queued",
+				lastRunSequence: 2,
+				activeRun: { id: "r_1111111111111111", sequence: 2, kind: "followup", state: "queued", input: "Next", acceptedAt: 2 }
+			}))
+			expect(await pending).toMatchObject({ state: "queued", timedOut: false })
 		})
 	})
 

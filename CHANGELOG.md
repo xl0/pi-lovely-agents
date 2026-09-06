@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Package `agent` and `agent-creator` skills, and rewrite the README as a user guide.
+- Remove developer fixtures from the management command menu.
+- Make timed `task_output` reads wait for run completion or suspension, rather
+  than returning early on thinking, partial output, or capacity changes.
 - Add `bash_bg` with independent concurrency, durable `b_` task controls,
   literal stdin/EOF, bounded output tails/full logs, and process-group cleanup.
   Configure background agents and Bash with separate on-by-default switches.

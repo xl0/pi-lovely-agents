@@ -24,6 +24,7 @@
 	"packageManager": "bun@1.3.13",
 	"files": [
 		"extensions/",
+		"skills/",
 		"README.md",
 		"CHANGELOG.md",
 		"LICENSE"
@@ -53,6 +54,9 @@
 	"pi": {
 		"extensions": [
 			"./extensions"
+		],
+		"skills": [
+			"./skills"
 		]
 	},
 	"dependencies": {

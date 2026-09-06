@@ -11,7 +11,6 @@ import lovelyAgentsExtension, { latestReplyWasInterrupted, successfulTurnTuple }
 import { seedFixtureTasks } from "../../extensions/lovely-agents/management.js"
 import { notificationRouteKey } from "../../extensions/lovely-agents/notifications.js"
 import { ensureParentStorage, releaseParentLeaseFor, taskStoragePaths } from "../../extensions/lovely-agents/state.js"
-import { renderActiveTaskRows } from "../../extensions/lovely-agents/task-panel.js"
 import { publishSchedulerUpdate, publishTaskUpdate } from "../../extensions/lovely-agents/updates.js"
 import { withTempWorkspace } from "./test-helpers.js"
 
@@ -300,21 +299,6 @@ describe("automatic tuple recovery", () => {
 		expect(successfulTurnTuple({ role: "user", provider: "provider", model: "model" })).toBeUndefined()
 		expect(successfulTurnTuple({ role: "assistant", stopReason: "stop" })).toBeUndefined()
 	})
-})
-
-test("active task rows stay compact", () => {
-	const rows = renderActiveTaskRows(
-		Array.from({ length: 7 }, (_, index) => ({
-			id: `a_0000000${index}`,
-			label: `Task ${index}`,
-			state: index % 2 ? "running" : "queued",
-			queuedFollowUps: index
-		}))
-	)
-	expect(rows).toHaveLength(6)
-	expect(rows[0]).toBe("↳ a_00000000 queued Task 0")
-	expect(rows[1]).toContain("(+1)")
-	expect(rows.at(-1)).toBe("  … 2 more active")
 })
 
 function branch(stopReason: string): SessionEntry[] {

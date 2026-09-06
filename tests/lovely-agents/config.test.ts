@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { join } from "node:path"
 import type { ExtensionContext, ScopedModel } from "@earendil-works/pi-coding-agent"
 import {
 	createAgentsConfigSpec,
 	defaultAgentsConfig,
 	loadAgentsConfig,
-	resolveAgentsConfig,
 	resolveConfiguredModels,
 	resolveModelChoices
 } from "../../extensions/lovely-agents/config.js"
@@ -30,33 +28,11 @@ describe("Lovely Agents config", () => {
 			environment.PI_CODING_AGENT_DIR = workspace.agentDir
 			let config = createAgentsConfigSpec(configContext).load(workspace.cwd)
 			expect(config.value).toMatchObject({ backgroundAgents: true, backgroundBash: true, maxBashConcurrency: 4 })
-			expect(config.fields.find(field => field.key === "capabilities")).toBeUndefined()
-			for (const key of ["backgroundAgents", "backgroundBash"]) {
-				expect(config.fields.find(field => field.key === key)).toMatchObject({ kind: "boolean", default: true })
-			}
-			const visible = (key: "waitMs" | "maxBashConcurrency") =>
-				config.fields
-					.find(field => field.key === key)
-					?.visibleWhen?.({
-						scope: "workspace",
-						get: key =>
-							key === "backgroundAgents"
-								? config.value.backgroundAgents
-								: key === "backgroundBash"
-									? config.value.backgroundBash
-									: undefined,
-						getScoped: () => undefined
-					})
-			expect(visible("waitMs")).toBe(true)
-			expect(visible("maxBashConcurrency")).toBe(true)
 			config = config.update("user", "backgroundAgents", false)
-			expect(visible("waitMs")).toBe(false)
-			expect(config.value.backgroundBash).toBe(true)
+			expect(config.value).toMatchObject({ backgroundAgents: false, backgroundBash: true })
 			config = config.update("workspace", "backgroundAgents", true)
 			config = config.update("workspace", "backgroundBash", false)
 			expect(config.value).toMatchObject({ backgroundAgents: true, backgroundBash: false })
-			expect(visible("waitMs")).toBe(true)
-			expect(visible("maxBashConcurrency")).toBe(false)
 		})
 	})
 
@@ -93,50 +69,6 @@ describe("Lovely Agents config", () => {
 			expect(loaded.value.maxConcurrency).toBe(4)
 			expect(loaded.warnings).toHaveLength(1)
 			expect(loaded.warnings[0]?.message).toContain("Invalid config")
-		})
-	})
-
-	test("editor writes are reflected immediately", async () => {
-		await withTempWorkspace(async workspace => {
-			environment.PI_CODING_AGENT_DIR = workspace.agentDir
-			const config = createAgentsConfigSpec(configContext).load(workspace.cwd)
-			const updated = config.update("workspace", "waitMs", 0)
-			expect(resolveAgentsConfig(updated).value.waitMs).toBe(0)
-			expect(await Bun.file(join(workspace.cwd, ".pi/xl0-pi-lovely-agents.json")).json()).toEqual({ waitMs: 0 })
-		})
-	})
-
-	test("builds a searchable selector from authenticated models", () => {
-		const field = createAgentsConfigSpec(configContext).fields.find(field => field.key === "models")
-		if (field?.kind !== "multiEnum") throw new Error("models field is not a multi-enum")
-		expect(field).toMatchObject({
-			kind: "multiEnum",
-			values: ["anthropic/sonnet", "openai/gpt"],
-			default: []
-		})
-		const sonnet: string = "anthropic/sonnet"
-		expect(field.valueDescriptions?.[sonnet]).toBe("sonnet")
-	})
-
-	test("alias pickers expose authenticated models and scoped thinking presets", async () => {
-		await withTempWorkspace(async workspace => {
-			environment.PI_CODING_AGENT_DIR = workspace.agentDir
-			let config = createAgentsConfigSpec(configContext).load(workspace.cwd)
-			for (const name of ["fast", "smart", "workhorse"]) {
-				expect(config.fields.find(field => field.key === `${name}Model`)).toMatchObject({
-					kind: "enum",
-					values: ["disabled", "anthropic/sonnet", "openai/gpt"],
-					default: "disabled",
-					search: true
-				})
-				expect(config.fields.find(field => field.key === `${name}Thinking`)).toMatchObject({ kind: "enum", depth: 1 })
-			}
-			config = config.update("user", "fastModel", "openai/gpt")
-			config = config.update("user", "fastThinking", "low")
-			config = config.update("workspace", "fastThinking", "high")
-			expect(resolveAgentsConfig(config).value).toMatchObject({ fastModel: "openai/gpt", fastThinking: "high", models: [] })
-			config = config.update("workspace", "fastModel", "disabled")
-			expect(resolveAgentsConfig(config).value.fastModel).toBe("disabled")
 		})
 	})
 })

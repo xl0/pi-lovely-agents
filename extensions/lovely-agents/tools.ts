@@ -296,13 +296,13 @@ export function registerTaskTools(
 			"Read a task's latest reply or Bash output tail, run status, last activity, queue reason, and its execution capacity. Snapshots are capped at 2,000 lines/50 KiB; full agent replies are in history.md and full Bash output in output.log.",
 		promptSnippet: "Read a task's latest reply, progress, and current run status",
 		promptGuidelines: [
-			"task_output returns a snapshot, not history. Use waitMs to wait for reply, activity, or scheduling changes; inspect history.md for earlier replies and inputs."
+			"task_output returns a snapshot, not history. With waitMs, wait for the current run to end or suspend, or for the timeout; activity and partial output do not end the wait. Omit waitMs for an immediate snapshot."
 		],
 		parameters: Type.Object(
 			{
 				id: Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" }),
 				waitMs: Type.Optional(
-					Type.Integer({ minimum: 0, maximum: 600_000, description: "Maximum wait for output, activity, or scheduling changes" })
+					Type.Integer({ minimum: 0, maximum: 600_000, description: "Maximum wait for the current run to end or suspend" })
 				)
 			},
 			{ additionalProperties: false }
@@ -334,7 +334,7 @@ export function registerTaskTools(
 					...(params.waitMs !== undefined ? { waitMs: params.waitMs } : {}),
 					...(signal ? { signal } : {})
 				})
-			const shouldLend = (params.waitMs ?? 0) > 0 && isActiveState(loaded.metadata.state)
+			const shouldLend = (params.waitMs ?? 0) > 0 && (loaded.metadata.state === "queued" || loaded.metadata.state === "running")
 			const output = shouldLend ? await getAgentCoordinator().withLentPermit(readOutput, signal) : await readOutput()
 			return buildTaskOutputToolResult(params.id, output)
 		}

@@ -198,9 +198,12 @@ reference to `history.md` for full replies. There are no offsets or pages.
 Structured details include status, outcome, streaming, queued Follow-ups,
 truncation, and retained history/session paths.
 
-`waitMs` waits for a reply/activity/status/scheduling change and caps at ten minutes, even when
-text already exists. Idle or terminal work returns immediately. Normal file
-tools can inspect `history.md` directly.
+`waitMs` waits for the observed run to end or suspend, capped at ten minutes.
+Partial output, thinking/tool activity, and capacity changes do not end the wait.
+Timeout returns the latest snapshot without stopping work. Idle, interrupted,
+and suspended tasks return immediately; omitting `waitMs` always reads immediately.
+A newer Follow-up does not extend the wait; results remain latest-snapshot reads.
+Normal file tools can inspect `history.md` directly.
 
 Last activity records observed start, thinking, reply, or tool events, not
 bookkeeping writes. Thinking/tool-update heartbeats are capped at one per
@@ -595,9 +598,8 @@ resent. This closes the send/crash window without duplicating model context.
 - `/continue`: after an errored or aborted parent reply, wake owned suspended
   descendants and resume through a hidden empty custom message; successful
   replies are a silent no-op
-- `/lovely-agents`: inspect Agent Definitions and direct tasks, create/remove
-  development fixtures, and edit scoped config. As task controls become
-  available, this same UI gains live output, Follow-up/Steer, stop, and discard.
+- `/lovely-agents`: inspect Agent Definitions and direct tasks, edit scoped
+  config, and use live output, Follow-up/Steer, stop, and discard.
 
 The management command keeps the main Pi session active; it never rebinds the
 TUI to a child session file. Compact status, below-editor active rows,
@@ -655,7 +657,9 @@ extensions/lovely-agents/
 
 Tests live under `tests/lovely-agents/`. Prefer pure helpers and temporary
 directories over mocks; introduce a session/provider seam only where an
-in-process Pi integration cannot be tested directly.
+in-process Pi integration cannot be tested directly. Protect concrete failure
+modes and known regressions, not incidental wording or dependency internals.
+Prefer existing behavioral coverage over additional tests of the same contract.
 
 ### [x] 0. Design contract
 
@@ -692,7 +696,7 @@ Simultaneous stale takeover is deliberately best-effort.
 
 Private `history.md` records inputs/replies, outcomes, and compact UTF-8-safe
 tool summaries. The latest reply is a coalesced atomic metadata snapshot,
-read with size caps and optional reply/status waiting, without pagination.
+read with size caps and optional run-completion waiting, without pagination.
 Pi remains the sole writer of authoritative `session.jsonl`.
 
 #### [x] 2.4 `task_list` and `task_output`
@@ -706,11 +710,10 @@ and exposes bounded latest-reply snapshots with run/streaming status.
 #### [x] 2.5 Interactive management UI
 
 Expanded `/lovely-agents` into one interactive entry point for fresh Agent
-Definition discovery, durable direct-task inspection, developer fixtures, and
-the existing scoped config editor. The always-visible developer menu can seed
-all states/outcomes, queued Follow-ups, descendants, tombstones, corrupt
-metadata, large UTF-8 output, and a short live transition. Cleanup explicitly
-removes only marked fixture directories, including nested fixture partitions.
+Definition discovery, durable direct-task inspection, and the scoped config
+editor. Fixture creation/cleanup helpers remain internal for tests; the command
+has no developer menu. Cleanup removes only marked fixture directories,
+including nested fixture partitions.
 
 ### [ ] 3. In-process Agent execution
 
@@ -844,7 +847,8 @@ The management menu focuses the same panel; selection survives live reordering.
 Durable metadata/output writes publish through a
 process-global update bus; shared capacity/gate changes refresh all parents.
 Queue reasons, permit counts, and last-action ages appear in inspection tools
-and the task UI. Snapshot waits also wake on activity and scheduler changes.
+and the task UI. Timed tool reads wait for run completion or suspension instead
+of waking on partial output, activity, or scheduler changes.
 Task actions expose current/queued inputs and full history, plus the captured
 Pi system prompt alone. Missing captures notify separately; no fallback body or
 explanatory text is mixed into the prompt. Static text views support wrapped
@@ -885,9 +889,10 @@ identities across alias edits and cold Follow-ups.
 
 #### [ ] 6.2 Documentation and package verification
 
-Update README examples, Agent Definition format, tool reference, storage/privacy
-notes and lifecycle semantics. Update
-CHANGELOG and `CODE.md` to actual implementation state.
+README covers human setup and usage, all definition fields, task controls,
+settings, and storage/privacy limits. The packaged `agent-creator` skill guides
+definition authoring and validation. Package verification remains; confirm
+installation instructions against the published dependencies before release.
 
 Run:
 
@@ -901,7 +906,8 @@ npm pack --dry-run
 
 Full Biome remains contingent on the unrelated `.vscode/settings.json` being
 formatted or excluded; targeted project checks must pass regardless. Verify the
-packed archive contains runtime dependencies and only intended package files.
+packed archive contains runtime dependencies, the `agent` and `agent-creator` skills,
+and only intended package files.
 Publish the Lovely Config release containing `multiEnum` before package
 verification; development uses `bun link`.
 

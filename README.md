@@ -1,156 +1,190 @@
-# @xl0/pi-lovely-agents
+# Lovely Agents
 
-Agent orchestration for [Pi](https://github.com/earendil-works/pi).
+Give [Pi](https://github.com/earendil-works/pi) a second pair of eyes—or let it
+run a build while you keep working.
 
-Durable agent creation/execution, Follow-up and Steer control, retained task
-inspection, Background Bash, stop/discard, quota recovery, notifications, configuration, and the
-management UI are available.
+Lovely Agents lets Pi delegate jobs to other agents, run Bash commands in the
+background, and bring back results when they're ready. You can inspect the work,
+redirect it, ask follow-up questions, or stop it.
 
-## Commands
-
-- `/continue` — continue the current Pi session after an error or aborted turn
-- `/lovely-agents` — inspect Definitions/tasks, create test fixtures, and edit
-  user/workspace settings
-
-## Model aliases
-
-In **Configuration**, pick a model and thinking level for any of these presets:
-
-| Alias | Intended use | Default thinking |
-| --- | --- | --- |
-| `fast` | Cheap, low-latency work | `low` |
-| `smart` | Difficult reasoning and complex work | `high` |
-| `workhorse` | Routine coding and research | `medium` |
-
-Aliases start disabled. Their targets become available automatically; no need
-to also select them under **Models**. The roster describes enabled aliases, but
-the parent chooses freely—there is no automatic routing.
-
-Use `model: "fast"` (or another alias) in an `agent` call or Definition.
-An explicit `thinking` argument overrides the preset. An alias selected in the
-call overrides the Definition's thinking; a Definition's own `thinking` overrides
-its alias preset. Pi clamps unsupported levels. Explicit model IDs do not
-inherit preset thinking, and omitted `model` keeps Definition/parent inheritance.
-
-Config keys are `fastModel` / `fastThinking`, `smartModel` / `smartThinking`,
-and `workhorseModel` / `workhorseThinking`. Set a model field to `disabled` to
-hide that alias. Existing agents keep their resolved model and thinking after
-alias edits; unavailable aliases fail explicitly rather than choosing a substitute.
-
-## Tools
-
-- `agent_roster` — list effective Agent Definitions, model choices, diagnostics,
-  and delegation depth
-- `agent` — create a durable Agent Session and start its initial run
-- `bash_bg` — start a managed background Bash command (`b_` task)
-- `task_list` — list every durable direct task owned by this Pi session
-- `task_output({ id, waitMs? })` — latest assistant reply and run/streaming status;
-  no inputs, older replies, or pagination
-- `task_input` — run a Follow-up or Steer a running agent
-- `task_stop` / `task_discard` — stop work or permanently archive the owned subtree
-
-## Capabilities
-
-**Background agents** and **Background Bash** are independent on/off switches,
-both on by default. With Background agents off, agent creation waits for
-completion; Follow-ups require an idle task and
-wait for their own result. Cancellation stops the work, including descendants.
-Foreground provider-limit failures do not restart automatically. UI inputs
-show a cancellable progress dialog.
-
-`backgroundAgents` enables timed detachment (`agent.waitMs`) and queued,
-asynchronous Follow-ups. Existing accepted runs keep their execution policy
-when settings change.
-
-`backgroundBash` exposes `bash_bg`; normal Pi `bash` stays unchanged.
-Creation tools follow delegation permission/depth. Task controls remain visible
-for existing owned work, even when creation is disabled; Definition allowlists
-still apply. Tool schemas/descriptions update with the settings.
-
-## Background Bash
-
-```ts
-bash_bg({ label: "Build", command: "bun run build" })
-bash_bg({ label: "Input pipe", command: "cat", cwd: "." })
-task_input({ id: "b_12345678", content: "hello\n" })
-task_input({ id: "b_12345678", content: "", eof: true })
-```
-
-`bash_bg` returns immediately by default. Optional `waitMs` waits up to ten
-minutes before detaching the same command. Before detachment, cancellation stops
-the task; afterward use `task_stop` or `task_discard`.
-`maxBashConcurrency` defaults to 4, separate from agent permits and provider gates.
-Stdin is literal: no automatic newline, Follow-up, or Steer. EOF is irreversible.
-
-`task_output` returns a UTF-8-safe tail capped at 2,000 lines/50 KiB, with an
-explicit truncation flag. Full stdout/stderr is retained in `output.log`;
-command, delivered stdin/EOF, and outcome are recorded in `history.md`.
-Completed commands cannot restart or receive more input. Detached completion
-uses the same durable notifications as agents.
-
-POSIX only; uses `bash -c` and process-group termination. Reload preserves live
-commands; semantic parent shutdown stops them. Restart marks stale work
-interrupted, never reattaches or kills a saved PID. SIGKILL/power loss and
-commands that deliberately escape their process group require OS supervision.
-
-## Inspection
-
-Agent tool calls fit the Definition, `label=`, quoted `prompt=` preview, and
-`-> task ID` on one line. Ctrl+O expands the full prompt and result.
-Tool errors stay visible without expansion.
-Notifications have a distinct message background and bold header; Ctrl+O
-reveals their body.
-
-The below-editor task list uses full-width rows with prompt previews captured
-for new runs. Previews remain after completion; older completed runs are not backfilled.
-Rows stay in creation order, newest first; activity/status changes do not reorder
-them. Thinking/responding labels are hidden from the list.
-
-Task inspection reports last observed activity and shared held/max execution
-permits. Queued work shows `capacity`, `provider-limit`, or transitional
-`starting`; no ETA is inferred. Thinking and tool activity remain visible
-without copying reasoning or tool payloads into snapshots. `waitMs` wakes on
-reply, activity, status, or scheduling changes; it never stops the run.
-
-In the task UI, **Inputs / history** shows current and queued inputs plus prior
-runs and delivered Steers. **System prompt** shows only Pi's captured prompt.
-Use arrows, PgUp/PgDn, or Home/End to scroll. Missing captures produce a separate
-notification, not substitute content. Provider-level payload rewrites are not
-captured.
-
-Definitions are Markdown files in `~/.pi/agent/agents/` or the nearest trusted
-`.pi/agents/` ancestor. Project definitions override user definitions by name.
-The management UI's always-visible developer section creates dummy durable
-tasks, including state/outcome, nesting, corruption, large-output, and live
-cases. Its cleanup action deletes only directories carrying its fixture marker.
-
-Durable state lives under `<cwd>/.pi/lovely-agents/`, partitioned by the exact
-parent Pi session. Quit and session replacement recursively stop owned work;
-reload keeps it running. After an unclean restart, stale accepted work is
-retained as `interrupted`.
-
-`history.md` keeps inputs, replies, run outcomes, and compact tool summaries.
-Full tool payloads remain in Pi's `session.jsonl`; there is no `activity.md`.
-The latest reply is stored atomically with status in v3 `metadata.json`. New
-runs clear the old answer before execution. Output snapshots are capped at
-2,000 lines/50 KiB; inspect history for full replies. Older metadata versions
-are rejected for execution but can still be discarded into
-`.pi/lovely-agents/archive/<parent>/<task>/`. Discard preserves the files,
-excludes them from task discovery, and has no automatic expiry or undelete.
-Discard agents after consuming their results unless a Follow-up is expected.
-
-The generated storage `.gitignore` ignores everything, including itself.
+Agents have their own conversations, but **share your checkout**. They're useful
+for research, reviews, and separate pieces of work—not several agents editing
+the same file. The included `agent` skill gives Pi guidance on when delegation
+is worth the overhead.
 
 ## Install
+
+For published releases:
 
 ```bash
 pi install npm:@xl0/pi-lovely-agents
 ```
 
+The package is still in development; see [Development](#development) to run a
+local checkout.
+
+## Create your first agent
+
+An agent definition is a Markdown file that describes a job. Ask Pi to create
+one with the included skill:
+
+```text
+/skill:agent-creator Create a read-only reviewer for this project.
+```
+
+Or create `.pi/agents/reviewer.md` yourself:
+
+```markdown
+---
+name: reviewer
+description: Review changes for bugs and missing edge cases
+# model: smart   # Optional: configure this alias before uncommenting
+thinking: high
+tools: [read, grep, find, ls]
+exclude_agents_md: false
+---
+
+Review the requested changes. Focus on concrete defects, not style preferences.
+Explain each finding with a file location and why it matters.
+```
+
+Then ask Pi:
+
+> Ask reviewer to check the current changes. While it works, help me update the docs.
+
+Pi starts the reviewer. For a short job, it may return the result directly;
+longer work continues in the background and sends a notification when done.
+
+Put definitions in `~/.pi/agent/agents/` to use them across projects. A trusted
+project's definition takes precedence over a user definition with the same name.
+
+### Definition fields
+
+The YAML between the `---` lines accepts these fields:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `name` | Yes | The name you use to request this agent. 1–64 lowercase letters, digits, `_`, or `-`; start with a letter or digit. |
+| `description` | Yes | A short explanation of when to use it. Nonblank, at most 500 UTF-8 bytes. |
+| `model` | No | A `provider/model-id`, an unambiguous model ID, or a configured `fast`, `smart`, or `workhorse` alias. Omit to use the starting Pi session's model. |
+| `thinking` | No | Effort level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Omit to use the model alias's preset, or otherwise the starting session's level. Pi adjusts unsupported levels. |
+| `tools` | No | Allowed tool names, as a YAML list or comma-separated string. Omit for normal tools and extensions; `[]` allows no tools. |
+| `exclude_agents_md` | No | Set `true` to leave out discovered `AGENTS.md` and `CLAUDE.md` instructions. Defaults to `false`. |
+
+The Markdown below the closing `---` is also required: it tells the agent how
+to do its job and what to report. Keep reusable instructions here; give the
+specific assignment when you ask Pi to start it.
+
+Unknown fields, tool names, and models are rejected. Names must be unique
+within each scope. You can request a different model or thinking level when
+starting an agent; these fields are defaults, not locks.
+
+The example restricts its reviewer to reading tools. Without a `tools` list,
+agents get the normal tools and extensions; a role description is not a sandbox.
+
+## Watch and guide the work
+
+Open **`/lovely-agents` → Tasks**, or press **Down with an empty editor** to focus
+the task list below it.
+
+- **Arrow keys** select a task; **Enter** opens its actions.
+- **Live output** shows what it has produced so far.
+- **Inputs / history** shows earlier requests and results.
+- **Follow-up** adds another request after the agent's current work.
+- **Steer** redirects work already in progress.
+- **Stop** cancels the work but keeps its files. An agent can take a new request later.
+- **Discard** stops and archives it, removing it from the list. It does not delete the files.
+- **Esc** returns to the editor.
+
+You can also ask Pi directly:
+
+> Ask the reviewer to check the cancellation path too.
+
+> Stop the build and show me its output.
+
+Tool calls and notifications are compact by default. **Ctrl+O** expands their
+full contents.
+
+## Background Bash
+
+Ask Pi to run a long command in the background:
+
+> Run `bun run build` in the background and tell me when it finishes.
+
+The command appears alongside agent tasks. You can inspect its output or stop
+it from the same menu. Normal, short Bash commands still work as before.
+
+For a command that needs input, **Write stdin** sends exactly what you type;
+include a newline if the command expects one. **Close stdin** sends EOF: “there
+will be no more input.” This lets commands such as `cat` finish reading. It
+doesn't kill the process, and you cannot reopen its input afterward.
+
+A finished Bash command cannot be restarted as the same task—start a new one.
+Background Bash currently supports Linux and macOS, not Windows.
+
+## Settings and models
+
+Open **`/lovely-agents` → Configuration**. Settings can apply to all projects or
+just this workspace; workspace settings win.
+
+**Background agents** and **Background Bash** are both on by default. Turn off
+Background agents if you want Pi to wait for agents to finish instead of leaving
+work running. Turning either switch off does not stop tasks already accepted.
+
+Agent work and Bash jobs have separate concurrency limits, both initially 4.
+Extra work queues until a slot is free. Pi initially waits up to 30 seconds for
+an agent result before leaving it in the background.
+
+Under **Models**, choose additional models Pi may use for agents. You can also
+configure these optional shortcuts:
+
+| Alias | Suggested use |
+| --- | --- |
+| `fast` | Quick research and straightforward tasks |
+| `smart` | Difficult reasoning and complex reviews |
+| `workhorse` | Everyday coding and research |
+
+Each shortcut has a model and thinking level. They start disabled until you pick
+a model; choosing one also makes that model available without a separate Models
+selection. Pi decides when to use each shortcut. Changing settings doesn't
+switch the model of an existing agent.
+
+## Results, limits, and interruptions
+
+Long results aren't lost. Pi's output-reading tool returns at most **2,000 lines
+or 50 KiB** at a time, with a truncation notice and a file path when capped.
+These are snapshots, not pages to assemble by repeatedly reading. Full agent
+replies are in `history.md`; full Bash output is in `output.log`.
+
+If Pi asks to wait for a result, the wait ends when the run finishes, pauses on
+a provider limit, or reaches the requested timeout. A timeout returns the
+latest output—it does not stop the task.
+
+Tasks belong to the Pi conversation that started them. **`/reload` keeps work
+running; quitting or switching conversations stops it.** After a crash, lost
+work is marked interrupted rather than silently restarted. Agent conversations
+can receive a new request; Bash commands must be started again.
+
+Background agents pause on provider quota or rate limits. A successful request
+using the affected model can resume them. If your main conversation ended with
+an error or was aborted, **`/continue`** resumes it and eligible paused agents.
+
+Task files live in `.pi/lovely-agents/` under your working directory and are
+ignored by Git. They include conversation history and command output, so treat
+them as potentially sensitive. Discarded tasks move to its `archive/` directory;
+there is no automatic deletion.
+
 ## Development
 
 ```bash
 bun install
-bun run check
 pi -e .
 ```
+
+Development currently requires a linked checkout of `@xl0/pi-lovely-config`
+with its unreleased `multiEnum` support.
+
+Run checks with `bun run check`.
+
+See [CODE.md](CODE.md) for implementation details and [PLAN.md](PLAN.md) for the
+design and remaining work.

@@ -1740,10 +1740,11 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T | PromiseLike<T>
 }
 
 async function waitForOutcome(paths: ReturnType<typeof taskStoragePaths>): Promise<string | null> {
-	for (let attempt = 0; attempt < 6; attempt++) {
+	const deadline = Date.now() + 2_000
+	while (Date.now() < deadline) {
 		const loaded = await readTaskMetadata(paths)
 		if (loaded.status === "ok" && loaded.metadata.latestOutcome) return loaded.metadata.latestOutcome
-		await readRetainedOutput(paths, { waitMs: 2_000 })
+		await Bun.sleep(5)
 	}
 	return null
 }

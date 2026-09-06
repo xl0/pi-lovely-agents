@@ -27,7 +27,7 @@ import {
 	taskStoragePaths,
 	writeTaskProgress
 } from "../../extensions/lovely-agents/state.js"
-import { buildTaskOutputToolResult } from "../../extensions/lovely-agents/tools.js"
+import { buildTaskOutputToolResult, registerTaskTools } from "../../extensions/lovely-agents/tools.js"
 import { type TempWorkspace, withTempWorkspace } from "./test-helpers.js"
 
 const parentId = "bash-parent"
@@ -103,6 +103,42 @@ function runtime(paths: TaskStoragePaths) {
 }
 
 describe("bash_bg real processes", () => {
+	test("task_output waits through startup, unrelated capacity changes, and partial output until exit", async () => {
+		await fixture(async (workspace, tool) => {
+			let outputTool: ToolDefinition | undefined
+			registerTaskTools({
+				registerTool(tool: ToolDefinition) {
+					if (tool.name === "task_output") outputTool = tool
+				},
+				on() {}
+			} as unknown as ExtensionAPI)
+			if (!outputTool) throw new Error("Missing task_output")
+			const created = await execute(tool, workspace.cwd, {
+				command: "read -r first; printf 'partial\\n'; read -r second; printf 'final\\n'",
+				label: "Wait for exit"
+			})
+			const paths = pathsFor(workspace.cwd, created.details.id)
+			const pending = outputTool.execute("output-call", { id: created.details.id, waitMs: 5_000 }, undefined, undefined, {
+				cwd: workspace.cwd,
+				sessionManager: { getSessionId: () => parentId }
+			} as ExtensionContext)
+			await until(async () => (await metadata(paths)).state === "running")
+			await execute(tool, workspace.cwd, { command: "sleep 0.05", label: "Unrelated task", waitMs: 1_000 })
+			expect(await Promise.race([pending, Bun.sleep(30).then(() => "waiting")])).toBe("waiting")
+			await runtime(paths).input("first\n", "stdin")
+			await until(async () => (await metadata(paths)).latestReply?.text === "partial\n")
+			expect(await Promise.race([pending, Bun.sleep(30).then(() => "waiting")])).toBe("waiting")
+			await runtime(paths).input("second\n", "stdin", { eof: true })
+			expect((await pending).details).toMatchObject({
+				state: "idle",
+				latestOutcome: "succeeded",
+				exitCode: 0,
+				timedOut: false,
+				text: expect.stringContaining("partial\nfinal\n")
+			})
+		})
+	})
+
 	test("success retains both streams and one run, without a fabricated agent session or synchronous notice", async () => {
 		await fixture(async (workspace, tool) => {
 			const result = await execute(tool, workspace.cwd, {

@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { type Static, Type } from "typebox"
 import { Value } from "typebox/value"
 import { getAgentCoordinator, getBashCoordinator } from "./coordinator.js"
-import { bindTaskUpdateRoute, publishTaskUpdate } from "./updates.js"
+import { publishTaskUpdate } from "./updates.js"
 
 export const TASK_METADATA_VERSION = 3
 export const TASK_REFERENCE_PATTERN = /^[ab]_[0-9a-f]{8}$/
@@ -605,8 +605,8 @@ export async function countRetainedOutputLines(paths: TaskStoragePaths): Promise
 }
 
 /**
- * Returns a snapshot, never transcript pages. With waitMs, active tasks wait
- * for a reply/status change, even when there is already text.
+ * Returns a snapshot, never transcript pages. With waitMs, wait for the current
+ * run to end or suspend, not for partial output, activity, or capacity changes.
  */
 export async function readRetainedOutput(paths: TaskStoragePaths, options: RetainedOutputReadOptions = {}): Promise<RetainedOutputRead> {
 	const waitMs = options.waitMs ?? 0
@@ -617,10 +617,10 @@ export async function readRetainedOutput(paths: TaskStoragePaths, options: Retai
 	if (options.signal?.aborted) throw abortReason(options.signal)
 	let metadata = await requireTaskMetadata(paths)
 	let timedOut = false
-	if (waitMs > 0 && isActiveTaskState(metadata.state)) {
-		const changed = await waitForRetainedChange(paths, retainedObservation(metadata), waitMs, options.signal)
-		timedOut = !changed
-		metadata = await requireTaskMetadata(paths)
+	if (waitMs > 0 && metadata.activeRun && metadata.state !== "suspended") {
+		const settled = await waitForRunEnd(paths, metadata.activeRun.id, waitMs, options.signal)
+		timedOut = settled === undefined
+		metadata = settled ?? (await requireTaskMetadata(paths))
 	}
 
 	return retainedOutputSnapshot(paths, metadata, timedOut)
@@ -876,29 +876,32 @@ async function requireTaskMetadata(paths: TaskStoragePaths): Promise<TaskMetadat
 	return loaded.metadata
 }
 
-async function waitForRetainedChange(paths: TaskStoragePaths, baseline: string, waitMs: number, signal?: AbortSignal): Promise<boolean> {
+async function waitForRunEnd(
+	paths: TaskStoragePaths,
+	runId: string,
+	waitMs: number,
+	signal?: AbortSignal
+): Promise<TaskMetadata | undefined> {
 	if (signal?.aborted) throw abortReason(signal)
-	return new Promise<boolean>((resolvePromise, rejectPromise) => {
+	return new Promise<TaskMetadata | undefined>((resolvePromise, rejectPromise) => {
 		let settled = false
 		let checking = false
 		let checkPending = false
-		let unbindUpdates: (() => void) | undefined
 		const watcher = watch(paths.taskDirectory, { persistent: false }, () => {
 			requestCheck()
 		})
-		const timer = setTimeout(() => finish(false), waitMs)
+		const timer = setTimeout(() => finish(undefined), waitMs)
 		const onAbort = () => fail(abortReason(signal))
 		const cleanup = () => {
 			clearTimeout(timer)
 			watcher.close()
-			unbindUpdates?.()
 			signal?.removeEventListener("abort", onAbort)
 		}
-		const finish = (changed: boolean) => {
+		const finish = (metadata: TaskMetadata | undefined) => {
 			if (settled) return
 			settled = true
 			cleanup()
-			resolvePromise(changed)
+			resolvePromise(metadata)
 		}
 		const fail = (error: unknown) => {
 			if (settled) return
@@ -917,8 +920,9 @@ async function waitForRetainedChange(paths: TaskStoragePaths, baseline: string, 
 			if (settled) return
 			checking = true
 			try {
-				const current = retainedObservation(await requireTaskMetadata(paths))
-				if (current !== baseline) finish(true)
+				const current = await requireTaskMetadata(paths)
+				// A later Follow-up must not extend a wait for the run we observed.
+				if (current.activeRun?.id !== runId || current.state === "suspended") finish(current)
 			} catch (error) {
 				fail(error)
 			} finally {
@@ -931,26 +935,9 @@ async function waitForRetainedChange(paths: TaskStoragePaths, baseline: string, 
 		}
 
 		watcher.once("error", fail)
-		unbindUpdates = bindTaskUpdateRoute(paths.workspace, paths.parentSessionId, requestCheck)
 		signal?.addEventListener("abort", onAbort, { once: true })
 		requestCheck()
 	})
-}
-
-function retainedObservation(metadata: TaskMetadata): string {
-	return JSON.stringify([
-		metadata.activeRun?.id,
-		metadata.state,
-		metadata.latestOutcome,
-		metadata.latestReply,
-		metadata.queuedFollowUps.length,
-		metadata.lastActivity,
-		taskSchedulingStatus(metadata)
-	])
-}
-
-function isActiveTaskState(state: Static<typeof TaskState>): boolean {
-	return state === "queued" || state === "running" || state === "suspended"
 }
 
 function splitCompleteLines(content: string): string[] {

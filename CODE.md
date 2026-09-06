@@ -11,7 +11,7 @@ Background Bash shares the durable task controls without creating a Pi session.
 
 - `extensions/lovely-agents/index.ts`: extension registration, management
   command, and `/continue`
-- `extensions/lovely-agents/management.ts`: unified TUI and development fixtures
+- `extensions/lovely-agents/management.ts`: unified TUI and internal test fixtures
 - `extensions/lovely-agents/task-panel.ts`: below-editor task status/navigation
 - `extensions/lovely-agents/coordinator.ts`: process-global scheduling, tuple
   gates, and runtime bindings
@@ -33,11 +33,18 @@ Background Bash shares the durable task controls without creating a Pi session.
 - `extensions/lovely-agents/state.ts`: versioned task metadata, private paths,
   serialized atomic snapshots, parent leases, and retained logs
 - `tests/lovely-agents/`: extension tests and temp-workspace helpers
+- `skills/agent/SKILL.md`: packaged delegation guidance; prefer research,
+  exploration, and isolated coding, with architecture/integration kept in the parent
+- `skills/agent-creator/SKILL.md`: self-contained definition format and authoring
+  guidance, with roster validation without starting test agents
+- `README.md`: human-facing setup, examples, task controls, settings, and limits;
+  implementation contracts stay in `CODE.md` and `PLAN.md`
 - `package.json`: package metadata, Pi discovery, and Bun tooling
 - `scripts/release.ts`: interactive release driver
 - `.github/workflows/publish.yml`: tag-triggered npm/GitHub release pipeline
 
-The package is ESM. Pi discovers `./extensions` through the package manifest.
+The package is ESM. Pi discovers `./extensions` and `./skills` through the
+package manifest; both directories are included in npm distributions.
 Pi runtime packages stay peer dependencies. Development uses `bun link` for
 Lovely Config's unreleased `multiEnum`; publish that dependency before release.
 
@@ -121,9 +128,11 @@ recency. Direct rows include retained paths and bounded recursive descendant
 summaries without descendant Task References. All direct rows and diagnostics
 are returned at once. `task_output` rejects foreign/discarded tasks and returns
 only the latest assistant reply from the current run, bounded to 2,000
-lines/50 KiB with a full-history reference on truncation. Optional long-polling
-waits for reply, activity, status, or scheduling changes, including equal-length
-text replacements. Lists and snapshots expose process-wide held/max execution
+lines/50 KiB with a full-history reference on truncation. Optional timed reads
+wait for the observed run to end or suspend, ignoring partial output, activity,
+and scheduling changes. Timeout returns the latest snapshot without stopping
+work; a newer Follow-up does not extend the wait. Idle, interrupted, and
+suspended tasks return immediately. Lists and snapshots expose process-wide held/max execution
 permits and queued reasons: `provider-limit`, `capacity`, or transitional
 `starting`. Counts reflect cooperative permits, not running-state counts;
 no queue position or ETA is inferred.
@@ -285,9 +294,9 @@ Follow-ups clear, and one deterministic interruption notification is retained.
 Stable idle/interrupted records and malformed/orphaned files are never deleted.
 
 `/lovely-agents` opens one selector for fresh Agent Definitions, durable tasks,
-developer fixtures, and the scoped config editor. Fixture actions are always
-visible for now. They seed states/outcomes plus queued, nested, discarded,
-corrupt, large UTF-8, and live-transition cases. Cleanup removes only
+and the scoped config editor. Fixture helpers remain for tests, not in the
+command menu. They seed states/outcomes plus queued, nested, discarded,
+corrupt, large UTF-8, and live-transition cases. Their cleanup removes only
 owner-marked `.fixture` task directories across direct and nested partitions.
 Definition previews include their complete system-prompt body. Definition/task
 detail views never rebind Pi's active session. Task actions include on-demand
@@ -316,8 +325,8 @@ they close. The editor wrapper preserves and restores the prior factory.
 Process-global update routes refresh these surfaces on durable metadata/output
 writes and shared capacity/gate changes without polling. Panels omit internal
 thinking/responding activity; inspection tools retain detailed progress and
-timestamps. Panel disposal fences in-flight refreshes. Snapshot
-waits subscribe to scheduler updates as well as filesystem changes.
+timestamps. Panel disposal fences in-flight refreshes. Timed output reads watch
+the task directory for durable run transitions; UI update routes remain separate.
 Live fixture timers use a process-global registry so
 reload preserves them and semantic shutdown stops them before releasing the
 parent lease.
@@ -333,6 +342,8 @@ or `aborted`.
 
 TypeScript is strict and checks `extensions/` and `tests/`; Bun runs the test
 suite; Biome handles formatting and linting. `bun run check` runs all three.
+Tests prioritize lifecycle/ownership safety and reported regressions. Avoid
+duplicating dependency tests, UI descriptor checks, and exact presentation text.
 
 The unreleased package starts at `0.0.0`; the first minor release becomes
 `0.1.0`. `bun run release` verifies and bumps locally, then pushes a `v*` tag.

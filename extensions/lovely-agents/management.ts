@@ -53,7 +53,6 @@ export async function openManagementUi(ctx: ExtensionContext, options: Managemen
 				description: `${definitions.diagnostics.length} diagnostics`
 			},
 			{ value: "tasks", label: `Tasks (${tasks.total})`, description: "Inspect durable direct children" },
-			{ value: "fixtures", label: "Developer fixtures", description: "Create or remove dummy tasks in this session" },
 			{ value: "config", label: "Configuration", description: "Edit user and workspace settings" }
 		])
 		if (!choice) return
@@ -65,9 +64,6 @@ export async function openManagementUi(ctx: ExtensionContext, options: Managemen
 			case "tasks":
 				await options.focusTasks()
 				return
-			case "fixtures":
-				await showFixtureMenu(ctx)
-				break
 			case "config":
 				await options.openConfig()
 				break
@@ -395,34 +391,6 @@ async function showLiveTaskOutput(ctx: ExtensionContext, task: TaskListRow): Pro
 			}
 		}
 	})
-}
-
-async function showFixtureMenu(ctx: ExtensionContext): Promise<void> {
-	const choice = await select(ctx, "Developer fixtures", [
-		{ value: "states", label: "Seed task states", description: "Create running, suspended, queued, interrupted, and idle tasks" },
-		{
-			value: "edges",
-			label: "Seed edge cases",
-			description: "Create queued Follow-up, descendant, discarded, corrupt, and large UTF-8 data"
-		},
-		{ value: "live", label: "Seed live task", description: "Append five updates, then complete automatically" },
-		{ value: "clear", label: "Remove fixtures", description: "Permanently delete marked fixture task directories" }
-	])
-	if (!choice) return
-	const parentSessionId = ctx.sessionManager.getSessionId()
-	if (choice === "states") {
-		const ids = await seedFixtureTasks(ctx.cwd, parentSessionId)
-		ctx.ui.notify(`Created fixture tasks: ${ids.join(", ")}`, "info")
-	} else if (choice === "edges") {
-		const ids = await seedFixtureEdgeCases(ctx.cwd, parentSessionId)
-		ctx.ui.notify(`Created fixture edge cases: ${ids.join(", ")}`, "info")
-	} else if (choice === "live") {
-		const id = await seedLiveFixtureTask(ctx.cwd, parentSessionId)
-		ctx.ui.notify(`Created live fixture ${id}`, "info")
-	} else if (await ctx.ui.confirm("Remove Lovely Agent fixtures?", "Only task directories marked as fixtures will be deleted.")) {
-		const count = await clearFixtureTasks(ctx.cwd, parentSessionId)
-		ctx.ui.notify(`Removed ${count} fixture task${count === 1 ? "" : "s"}`, "info")
-	}
 }
 
 async function select(ctx: ExtensionContext, title: string, items: SelectItem[]): Promise<string | null> {

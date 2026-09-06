@@ -311,7 +311,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	})
 
 	pi.registerCommand("lovely-agents", {
-		description: "Manage Lovely Agent definitions, tasks, fixtures, and settings",
+		description: "Manage Lovely Agent definitions, tasks, and settings",
 		async handler(_args, ctx) {
 			if (ctx.mode !== "tui") return
 			try {

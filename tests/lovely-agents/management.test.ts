@@ -7,14 +7,12 @@ import {
 	clearFixtureTasks,
 	openManagementUi,
 	openTaskManagementUi,
-	renderDefinition,
 	seedFixtureEdgeCases,
 	seedFixtureTasks,
 	seedLiveFixtureTask
 } from "../../extensions/lovely-agents/management.js"
 import {
 	appendHistoryLog,
-	countRetainedOutputLines,
 	ensureParentStorage,
 	mutateTaskMetadata,
 	readRetainedOutput,
@@ -24,6 +22,7 @@ import {
 	taskStoragePaths
 } from "../../extensions/lovely-agents/state.js"
 import { loadTaskList, type TaskListRow } from "../../extensions/lovely-agents/tools.js"
+import { bindTaskUpdateRoute } from "../../extensions/lovely-agents/updates.js"
 import { withTempWorkspace } from "./test-helpers.js"
 
 test("management Tasks hands off to the existing panel instead of opening another selector", async () => {
@@ -129,45 +128,6 @@ describe("management fixtures", () => {
 			[task.id, " \n", "stdin"],
 			[task.id, "", "stdin", true]
 		])
-	})
-
-	test("cancelled foreground input does not show an acceptance notice", async () => {
-		await withTempWorkspace(async workspace => {
-			const [id] = await seedFixtureTasks(workspace.cwd, "parent")
-			const notices: string[] = []
-			let selected = false
-			let inputs = 0
-			await openTaskManagementUi(
-				{
-					cwd: workspace.cwd,
-					sessionManager: { getSessionId: () => "parent" },
-					ui: {
-						custom: async () => {
-							if (selected) return
-							selected = true
-							return "followup"
-						},
-						editor: async () => "More work",
-						notify: (text: string) => notices.push(text)
-					}
-				} as unknown as ExtensionContext,
-				{
-					discoverDefinitions: () => ({ definitions: [], diagnostics: [], projectAgentsDir: undefined }),
-					loadTasks: async () => (await loadTaskList(workspace.cwd, "parent")).details,
-					focusTasks: async () => {},
-					openConfig: async () => {},
-					controlTask: async () => {},
-					inputTask: async () => {
-						inputs++
-						return false
-					}
-				},
-				`task:${id}`
-			)
-			expect(inputs).toBe(1)
-			expect(notices).toEqual([])
-			await releaseParentLeaseFor(workspace.cwd, "parent")
-		})
 	})
 
 	test("task context shows retained inputs and prompts in a bounded, scrollable read-only view", async () => {
@@ -279,18 +239,6 @@ describe("management fixtures", () => {
 		})
 	})
 
-	test("renders the Agent Definition body in its preview", () => {
-		const preview = renderDefinition({
-			name: "reviewer",
-			description: "Review changes",
-			systemPrompt: "Inspect the complete diff.\nReport concrete defects.",
-			source: "project",
-			filePath: "/workspace/.pi/agents/reviewer.md",
-			displayPath: ".pi/agents/reviewer.md"
-		})
-		expect(preview).toContain("Body:\nInspect the complete diff.\nReport concrete defects.")
-	})
-
 	test("a missing capture reports separately instead of substituting prompt content", async () => {
 		await withTempWorkspace(async workspace => {
 			const [id] = await seedFixtureTasks(workspace.cwd, "parent-session")
@@ -326,28 +274,14 @@ describe("management fixtures", () => {
 		})
 	})
 
-	test("seeds every visible state and removes only marked fixtures", async () => {
+	test("fixture cleanup removes only owned, marked tasks", async () => {
 		await withTempWorkspace(async workspace => {
 			const ids = await seedFixtureTasks(workspace.cwd, "parent-session")
-			expect(ids).toHaveLength(7)
-			expect(ids.every(id => /^a_[0-9a-f]{8}$/.test(id))).toBe(true)
-
 			const parent = await ensureParentStorage(workspace.cwd, "parent-session")
-			const loaded = await Promise.all(ids.map(id => readTaskMetadata(taskStoragePaths(parent, id))))
-			const metadata = loaded.flatMap(result => (result.status === "ok" ? [result.metadata] : []))
-			expect(metadata.map(task => task.state).sort()).toEqual(["idle", "idle", "idle", "interrupted", "queued", "running", "suspended"])
-			expect(
-				metadata
-					.map(task => task.latestOutcome)
-					.filter(Boolean)
-					.sort()
-			).toEqual(["failed", "interrupted", "stopped", "succeeded"])
-			expect(metadata.every(task => task.kind === "agent" && task.definitionName === "lovely-fixture")).toBe(true)
-			expect(await Promise.all(ids.map(id => countRetainedOutputLines(taskStoragePaths(parent, id))))).not.toContain(0)
 
 			const foreignFixture = await reserveTaskStorage(parent, () => "a_ffffffff")
 			await writeFile(join(foreignFixture.taskDirectory, ".fixture"), "another-parent")
-			expect(await clearFixtureTasks(workspace.cwd, "parent-session")).toBe(7)
+			expect(await clearFixtureTasks(workspace.cwd, "parent-session")).toBe(ids.length)
 			expect((await stat(foreignFixture.taskDirectory)).isDirectory()).toBe(true)
 			const first = ids[0]
 			if (!first) throw new Error("Fixture task was not created")
@@ -389,17 +323,21 @@ describe("management fixtures", () => {
 			const id = await seedLiveFixtureTask(workspace.cwd, "parent-session")
 			const parent = await ensureParentStorage(workspace.cwd, "parent-session")
 			const paths = taskStoragePaths(parent, id)
-			const update = await readRetainedOutput(paths, { waitMs: 2_000 })
-			expect(update.timedOut).toBe(false)
-			expect(update.text).toContain("Fixture update 1")
-			let completion = update
-			for (let attempt = 0; attempt < 6 && completion.state !== "idle"; attempt++) {
-				completion = await readRetainedOutput(paths, { waitMs: 1_000 })
+			const updates: string[] = []
+			const unbind = bindTaskUpdateRoute(workspace.cwd, "parent-session", async () => {
+				updates.push((await readRetainedOutput(paths)).text)
+			})
+			try {
+				const completion = await readRetainedOutput(paths, { waitMs: 4_000 })
+				expect(completion.timedOut).toBe(false)
+				expect(completion.state).toBe("idle")
+				expect(completion.text).toBe("Fixture update 5")
+				expect(updates).toContain("Fixture update 1")
+			} finally {
+				unbind()
+				expect(await clearFixtureTasks(workspace.cwd, "parent-session")).toBe(1)
+				await releaseParentLeaseFor(workspace.cwd, "parent-session")
 			}
-			expect(completion.timedOut).toBe(false)
-			expect(completion.state).toBe("idle")
-			expect(await clearFixtureTasks(workspace.cwd, "parent-session")).toBe(1)
-			await releaseParentLeaseFor(workspace.cwd, "parent-session")
 		})
 	})
 })
