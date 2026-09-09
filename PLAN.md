@@ -8,11 +8,21 @@ Make completed runs addressable, keep evidence paths stable, and reduce output
 and coordination friction. Preserve ownership, durable acceptance, late-event
 fencing, and notification reconciliation; avoid a workflow engine.
 
-### [ ] Guidance and output
+### [x] Guidance and output
 
-Clarify detached notifications, Steer acceptance and process-wide capacity.
-Add short Bash tails, tail-first previews, scrollable live output with exit status,
-and task grouping by kind with active statuses first.
+Bash guidance explains automatic detached completion notices and their
+synchronous/stop exceptions. Steer acknowledgements report queued acceptance
+and explicit Follow-up conversion, with the targeted run index. Roster capacity
+is labelled process-wide; creation reports queue reasons. Keep idle specialists
+and evidence until dependent work is integrated.
+
+Bash notices keep the last 2 KiB, UTF-8-safe with leading truncation.
+`task_output(lines: N)` returns the last N Bash lines with status and the full-log
+path. Shared live output supports wrapped keyboard scrolling; Bash follows
+the tail until upward navigation, and End resumes following. Its fixed header
+shows exit code and termination signal without reducing the output viewport.
+The task UI groups Agents and Bash separately, active statuses first within each
+group, then newest-created. Nonselectable group headings preserve task navigation.
 
 ### [x] Run-index retrieval
 
@@ -40,11 +50,20 @@ safety control eligibility—not absence from `active/`. Stale non-discarded
 tasks stay until their parent is reopened; abandoned sessions need no automatic
 cleanup. Old archive directories are left untouched.
 
-### [ ] Final verification
+### [x] Final verification
 
-Storage/lifecycle tests (230), typecheck and Biome pass. Repeat verification and
-check packaging after the usability changes. Restart Pi before trying the
-branch so process-resident runtimes use the new code.
+235 tests pass, including promotion/retrieval, queued run waits, UTF-8 tails,
+scrolling/grouped navigation, live exit status (unknown, 0, 7, SIGTERM),
+post-discard notices, pruning guards, and failed cleanup lease retention.
+Typecheck, scoped Biome and npm pack dry-run pass.
+Full `bun run check` reaches Biome but fails only on the pre-existing
+`.vscode/settings.json` formatting; that unrelated file is untouched.
+Restart Pi before trying the branch so process-resident runtimes use the new code.
+Live smoke testing after reload also passed: three indexed agent runs, Steer
+conversion, post-discard reads/input rejection, stable active links, Bash
+UTF-8 tails/failure notices, notification acknowledgement, and prune lease refusal.
+Live UI appearance is confirmed by the user; navigation/grouping component
+tests pass.
 
 External review Definition/skill changes remain separate from this branch:
 distinguish role
@@ -189,7 +208,7 @@ new task; existing direct children remain available through `task_list`.
 
 ```ts
 task_list({})
-task_output({ id: TaskRef, run?: number, waitMs?: number })
+task_output({ id: TaskRef, run?: number, lines?: number, waitMs?: number })
 task_input({ id: TaskRef, content: string, delivery?: "followup" | "steer" })
 task_stop({ id: TaskRef })
 task_discard({ id: TaskRef })
@@ -244,8 +263,8 @@ partial while streaming. It excludes inputs, tool logs, and earlier replies.
 Starting a new run clears the prior answer, including while queued. Run
 status/outcome is independent of assistant-message completion.
 For Bash, it returns a bounded stdout/stderr tail, exit code/signal, sticky
-truncation status, and a path to the complete `output.log`.
-Optional `run` selects a 1-based index; omission
+truncation status, and a path to the complete `output.log`. Optional `lines`
+limits the last N Bash lines. Optional `run` selects a 1-based index; omission
 selects the current snapshot. Completed results remain readable after discard.
 
 Snapshots are capped at 2,000 lines/50 KiB with UTF-8-safe truncation and a
@@ -634,7 +653,7 @@ A completion notification includes:
 - Task Reference, run index, label, and an exact `task_output` retrieval operation
 - state and latest outcome
 - effective model/thinking for agents, command/exit status for Bash
-- labelled preview: first 2 KiB of the agent reply or Bash output;
+- labelled preview: first 2 KiB of the agent reply, last 2 KiB of Bash output;
   never echoed inputs or earlier replies
 - retained history/session paths
 - compact descendant summary
@@ -919,8 +938,9 @@ expands them; the installed Pi custom-message renderer lacks click toggles.
 Focused task rows use full terminal width for label, status/model, and prompt.
 Bounded prompt previews are captured for new runs and retained after completion;
 human-only list loading keeps them out of task-tool results.
-Panel rows sort newest-created first with stable ID ties, independent of status
-and activity. Thinking/responding labels and the list heading are omitted.
+Panel rows group Agents then Bash, active statuses first within each group,
+then newest-created with stable ID ties. Group headings are nonselectable;
+thinking/responding labels remain omitted.
 Call truncation preserves the surrounding tool background.
 Managed child disposal removes subscriptions and fences pending refreshes before
 SDK context invalidation, without treating idle unload as semantic shutdown.

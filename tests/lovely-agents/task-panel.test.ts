@@ -42,20 +42,20 @@ test("navigation scrolls five rows, bounds width, and preserves selection across
 	await h.panel.refresh()
 	h.panel.focus()
 	for (let index = 0; index < 8; index++) h.panel.handleInput(down, true)
-	expect(h.lines().join("\n")).toContain("→ a_00000008")
-	expect(h.lines()).toHaveLength(7) // five rows, position, help
+	expect(h.lines().join("\n")).toContain("→ a_00000007")
+	expect(h.lines().filter(line => line.includes("a_"))).toHaveLength(5)
 	for (const width of [1, 20, 40, 120]) {
 		expect(h.lines(width).every(line => visibleWidth(line) <= width)).toBe(true)
 	}
 	h.panel.handleInput(down, true)
-	expect(h.lines().join("\n")).toContain("→ a_00000008")
+	expect(h.lines().join("\n")).toContain("→ a_00000007")
 	h.result.tasks.reverse()
 	publishTaskUpdate(h.ctx.cwd, "parent")
 	await h.panel.refresh()
-	expect(h.lines().join("\n")).toContain("→ a_00000008")
-	h.result.tasks.shift()
-	await h.panel.refresh()
 	expect(h.lines().join("\n")).toContain("→ a_00000007")
+	h.result.tasks = h.result.tasks.filter(task => task.id !== "a_00000007")
+	await h.panel.refresh()
+	expect(h.lines().join("\n")).toContain("→ a_00000005")
 })
 
 test("task rows use the full width for labels and prompt previews", async () => {
@@ -83,18 +83,21 @@ test("task rows use the full width for labels and prompt previews", async () => 
 	expect(h.lines(80).join("\n")).toContain("System prompt inspection")
 })
 
-test("passive and focused rows keep creation order across activity and state changes", async () => {
+test("passive and focused rows group agents then Bash and sort active statuses before idle", async () => {
 	const h = harness()
 	h.result.tasks = [
-		{ ...row(2), state: "running" },
-		{ ...row(1), state: "running", createdAt: 100 },
-		{ ...row(0), state: "running" }
+		{ ...row(0), state: "idle", createdAt: 100 },
+		{ ...row(1), state: "queued", createdAt: 80 },
+		{ ...row(2), state: "running", createdAt: 60 },
+		{ ...row(3), id: "b_00000003", kind: "bash", state: "running", createdAt: 200 },
+		{ ...row(4), id: "b_00000004", kind: "bash", state: "idle", createdAt: 300 }
 	]
 	const ids = () => h.lines().flatMap(line => line.match(/a_\d{8}/g) ?? [])
-	const expected = ["a_00000000", "a_00000001", "a_00000002"]
 	await h.panel.refresh()
-	expect(ids()).toEqual(expected)
-	expect(h.result.tasks.map(task => task.id)).toEqual(["a_00000002", "a_00000001", "a_00000000"])
+	expect(h.lines().join("\n")).toContain("Agents\n↳ a_00000002 running")
+	expect(h.lines().join("\n")).toContain("↳ a_00000001 queued")
+	expect(h.lines().join("\n")).toContain("Bash\n↳ b_00000003 running")
+	expect(h.lines().join("\n")).not.toContain("a_00000000 idle")
 
 	for (const task of h.result.tasks) {
 		task.updatedAt = 1000 - task.createdAt
@@ -102,13 +105,15 @@ test("passive and focused rows keep creation order across activity and state cha
 	}
 	h.result.tasks.reverse()
 	await h.panel.refresh()
-	expect(ids()).toEqual(expected)
+	expect(ids()).toEqual(["a_00000002", "a_00000001"])
 	h.panel.focus()
-	expect(ids()).toEqual(expected)
-	for (const task of h.result.tasks) task.state = task.id === "a_00000000" ? "idle" : "queued"
+	expect(h.lines().join("\n")).toMatch(/Agents[\s\S]*→ a_00000002[\s\S]*a_00000001[\s\S]*a_00000000[\s\S]*Bash[\s\S]*b_00000003/)
+	h.panel.handleInput(down, true)
+	expect(h.lines().join("\n")).toContain("→ a_00000001")
+	for (const task of h.result.tasks) task.state = task.id === "a_00000001" ? "idle" : "queued"
 	await h.panel.refresh()
-	expect(ids()).toEqual(expected)
-	expect(h.lines().join("\n")).toContain("→ a_00000000")
+	expect(h.lines().join("\n")).toContain("→ a_00000001")
+	expect(h.lines().join("\n")).toMatch(/a_00000000[\s\S]*a_00000002[\s\S]*a_00000001[\s\S]*Bash/)
 })
 
 test("Bash rows and footer use their own kind and capacity without an invented model", async () => {
@@ -134,13 +139,14 @@ test("shows queue reasons without a heading or distracting internal activity", a
 	await h.panel.refresh()
 	expect(h.lines().join("\n")).toContain("waiting: capacity")
 	h.panel.focus()
-	expect(h.lines()[0]).toStartWith("→ a_00000000")
+	expect(h.lines()[0]).toBe("Agents")
+	expect(h.lines()[1]).toStartWith("→ a_00000000")
 	task.queueReason = "provider-limit"
 	h.result.capacity = { active: 0, limit: 4 }
 	publishSchedulerUpdate()
 	await Bun.sleep(0)
 	expect(h.lines().join("\n")).toContain("waiting: provider-limit")
-	expect(h.lines()[0]).toStartWith("→ a_00000000")
+	expect(h.lines()[1]).toStartWith("→ a_00000000")
 	task.state = "running"
 	task.queueReason = null
 	task.lastActivity = { at: Date.now() - 20_000, action: "thinking" }
@@ -242,6 +248,7 @@ test("failed action restores the panel and reports the error", async () => {
 function row(index: number): TaskListRow {
 	return {
 		id: `a_0000000${index}`,
+		kind: "agent",
 		label: `Task ${index}`,
 		state: index % 2 ? "idle" : "running",
 		model: "provider/model",

@@ -101,6 +101,7 @@ export type TaskInputResult = {
 	run: number
 	requestedDelivery: "followup" | "steer" | undefined
 	effectiveDelivery: "followup" | "steer" | "stdin"
+	conversionReason?: string
 	queuePosition: number | null
 	state: TaskMetadata["state"]
 	latestOutcome: TaskMetadata["latestOutcome"]
@@ -341,7 +342,11 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 				? "Write literal stdin to a running Bash task"
 				: "Send input to an owned task",
 		promptGuidelines: [
-			...(agentInput ? ["Use Follow-up for later work; use Steer only to redirect a currently running agent."] : []),
+			...(agentInput
+				? [
+						"Use task_input Follow-up for a new run; Steer queues input for a live streaming run. Without a live steering target, Steer becomes a Follow-up (foreground busy tasks reject it). Acceptance does not guarantee observation before stop."
+					]
+				: []),
 			...(bashInput ? ["For Bash, omit delivery and write literal stdin; eof closes stdin without restarting the command."] : [])
 		],
 		parameters: Type.Object(
@@ -386,10 +391,10 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 							result.effectiveDelivery === "stdin"
 								? `${result.id} run=${result.run}: stdin delivered${params.eof ? " (EOF)" : ""}`
 								: result.effectiveDelivery === "steer"
-									? `${result.id} run=${result.run}: steer delivered (${result.state}; ${result.queuedFollowUps} Follow-ups queued)`
+									? `${result.id} run=${result.run}: steer queued for current run`
 									: result.output
-										? `${result.id} run=${result.run}: followup ${result.latestOutcome}\n${result.output.text}`
-										: `${result.id} run=${result.run}: followup accepted (position ${result.queuePosition}; ${result.state}; ${result.queuedFollowUps} queued)`
+										? `${result.id} run=${result.run}: ${result.conversionReason ? `requested steer -> followup (${result.conversionReason}); ` : ""}followup ${result.latestOutcome}\n${result.output.text}`
+										: `${result.id} run=${result.run}: ${result.conversionReason ? `requested steer -> ` : ""}followup accepted${result.conversionReason ? `; ${result.conversionReason}` : ""} (position ${result.queuePosition}; task=${result.state}; ${result.queuedFollowUps} queued)`
 					}
 				],
 				details: result
@@ -503,6 +508,7 @@ export async function sendTaskInput(
 	return {
 		id,
 		run: accepted.run,
+		...(accepted.conversionReason ? { conversionReason: accepted.conversionReason } : {}),
 		requestedDelivery: delivery,
 		effectiveDelivery: accepted.delivery,
 		queuePosition: accepted.queuePosition,
@@ -744,7 +750,8 @@ class AgentRuntime implements ResidentAgent {
 					run: sequence,
 					delivery: "followup",
 					queuePosition,
-					queuedFollowUps: metadata.queuedFollowUps.length + 1
+					queuedFollowUps: metadata.queuedFollowUps.length + 1,
+					...(delivery === "steer" ? { conversionReason: `task ${metadata.state}, no live stream to steer` } : {})
 				}
 				acceptedRun = {
 					id: runId,

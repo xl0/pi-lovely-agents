@@ -41,6 +41,7 @@ export type ResidentInputOptions = { background?: boolean; signal?: AbortSignal;
 export type ResidentInputResult = {
 	run: number
 	delivery: "followup" | "steer" | "stdin"
+	conversionReason?: string
 	queuePosition: number | null
 	queuedFollowUps: number
 	completed?: TaskMetadata

@@ -29,12 +29,14 @@ describe("durable notifications", () => {
 			const { paths, metadata } = await createTask(workspace.cwd, "parent", "b_12345678")
 			if (metadata.kind !== "bash" || !metadata.activeRun) throw new Error("Expected Bash")
 			metadata.exitCode = 7
-			metadata.latestReply = { text: `Last shell output\n${"🙂".repeat(2_000)}`, streaming: false }
+			metadata.latestReply = { text: `Early shell output\n${"🙂".repeat(2_000)}\nFinal summary`, streaming: false }
 			const notice = await prepareTaskNotification(paths, metadata, metadata.activeRun, "completion", "failed")
 			expect(notice.content).toContain("Command: printf hello")
 			expect(notice.content).toContain("Exit: 7")
-			expect(notice.content).toContain("Last shell output")
+			expect(notice.content).not.toContain("Early shell output")
+			expect(notice.content).toContain("Final summary")
 			expect(notice.content).toContain('task_output(id: "b_12345678", run: 1)')
+			expect(notice.content).toContain("Output preview:\n...")
 			expect(notice.content).toContain("output.log")
 			expect(notice.content).not.toContain("Model:")
 			expect(notice.content).not.toContain("session.jsonl")

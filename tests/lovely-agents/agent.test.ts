@@ -839,6 +839,7 @@ describe("task_input tool", () => {
 					run: 2,
 					requestedDelivery: "steer",
 					effectiveDelivery: "followup",
+					conversionReason: expect.stringContaining("queued"),
 					queuePosition: 1,
 					queuedFollowUps: 1
 				})
