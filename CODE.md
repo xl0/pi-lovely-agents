@@ -44,6 +44,9 @@ Background Bash shares the durable task controls without creating a Pi session.
   guidance, with roster validation without starting test agents
 - `README.md`: human-facing setup, examples, task controls, settings, and limits;
   implementation contracts stay in `CODE.md` and `PLAN.md`
+- `USAGE-ACCOUNTING-PROPOSAL.md`: proposed upstream Pi API for durable,
+  idempotent external usage accounting; child costs are not yet aggregated
+  into the parent session
 - `package.json`: package metadata, Pi discovery, and Bun tooling
 - `scripts/release.ts`: interactive release driver
 - `.github/workflows/publish.yml`: tag-triggered npm/GitHub release pipeline

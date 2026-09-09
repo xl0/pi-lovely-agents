@@ -75,6 +75,13 @@ preserve documented safety invariants, and accept empty findings freely.
 Peak-memory accounting, batch APIs, dependency graphs, and PTY/tmux support
 remain deferred.
 
+### [ ] Upstream usage accounting
+
+Implement native parent-session cost aggregation once Pi supports durable,
+idempotent external usage entries. API and integration proposal:
+[`USAGE-ACCOUNTING-PROPOSAL.md`](USAGE-ACCOUNTING-PROPOSAL.md).
+Keep accounting independent of tool-result reads and completion notifications.
+
 ## Product shape
 
 Lovely Agents adds durable, in-process workers to Pi. Each worker is a normal Pi
