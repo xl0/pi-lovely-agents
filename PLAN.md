@@ -1,5 +1,58 @@
 # Lovely Agents design
 
+## Field-feedback follow-up
+
+Sources: the CAD build session's `SUBAGENTS-FEEDBACK.md` and
+`../pi-lovely-ide/AGENT_FRAMEWORK_FEEDBACK.md` from a multi-agent review.
+Make completed runs addressable, keep evidence paths stable, and reduce output
+and coordination friction. Preserve ownership, durable acceptance, late-event
+fencing, and notification reconciliation; avoid a workflow engine.
+
+### [ ] Guidance and output
+
+Clarify detached notifications, Steer acceptance and process-wide capacity.
+Add short Bash tails, tail-first previews, scrollable live output with exit status,
+and task grouping by kind with active statuses first.
+
+### [x] Run-index retrieval
+
+Use one public 1-based run index in results, acknowledgements and notices.
+`task_output(id, run: N)` retrieves that run; omission reads current progress.
+Timed waits pin the selected/observed run through subsequent promotions.
+Final agent replies persist in per-run files before settlement publishes;
+current progress still clears when the next run starts. Older completed runs
+remain accessible through history, without a migration or Markdown parser.
+
+### [x] Stable storage, notifications and explicit pruning
+
+Discard stops and tombstones in place; files never move. A parent's `active/`
+directory links to all non-discarded tasks, including idle ones. Membership is
+metadata-owned and links are rebuildable. Unsupported metadata gets an
+ownership-validated discard marker rather than being rewritten.
+
+Results remain readable after discard, but input/restart stays prohibited.
+Notices include labelled previews and exact run retrieval; delivery and
+acknowledgement continue at stable paths. No result-consumption protocol.
+
+The standalone pruner defaults to dry-run and requires `--apply` to delete
+explicitly discarded trees. Leases, metadata, pending notices, and descendant
+safety control eligibility—not absence from `active/`. Stale non-discarded
+tasks stay until their parent is reopened; abandoned sessions need no automatic
+cleanup. Old archive directories are left untouched.
+
+### [ ] Final verification
+
+Storage/lifecycle tests (230), typecheck and Biome pass. Repeat verification and
+check packaging after the usability changes. Restart Pi before trying the
+branch so process-resident runtimes use the new code.
+
+External review Definition/skill changes remain separate from this branch:
+distinguish role
+instructions from repository rules, start with fewer correctness-focused angles,
+preserve documented safety invariants, and accept empty findings freely.
+Peak-memory accounting, batch APIs, dependency graphs, and PTY/tmux support
+remain deferred.
+
 ## Product shape
 
 Lovely Agents adds durable, in-process workers to Pi. Each worker is a normal Pi
@@ -30,8 +83,8 @@ It has a stable Task Reference such as `a_k7m2p9x4` and belongs to exactly one
 parent Pi session.
 
 An **agent run** is one accepted period of work in that conversation. The first
-prompt creates the first run; each Follow-up creates another. Run identifiers
-and sequence numbers stay internal.
+prompt creates the first run; each Follow-up creates another. A 1-based sequence
+addresses each run publicly; opaque run IDs remain internal fencing identities.
 
 The **parent session** is the exact Pi session that created the agent session.
 It may control direct children only. Descendant activity is summarized without
@@ -136,7 +189,7 @@ new task; existing direct children remain available through `task_list`.
 
 ```ts
 task_list({})
-task_output({ id: TaskRef, waitMs?: number })
+task_output({ id: TaskRef, run?: number, waitMs?: number })
 task_input({ id: TaskRef, content: string, delivery?: "followup" | "steer" })
 task_stop({ id: TaskRef })
 task_discard({ id: TaskRef })
@@ -186,12 +239,14 @@ through the process-global registry.
 
 ### Reading output
 
-`task_output` returns only the latest assistant reply from the latest run,
+`task_output` returns only the latest assistant reply from the selected run,
 partial while streaming. It excludes inputs, tool logs, and earlier replies.
 Starting a new run clears the prior answer, including while queued. Run
 status/outcome is independent of assistant-message completion.
 For Bash, it returns a bounded stdout/stderr tail, exit code/signal, sticky
 truncation status, and a path to the complete `output.log`.
+Optional `run` selects a 1-based index; omission
+selects the current snapshot. Completed results remain readable after discard.
 
 Snapshots are capped at 2,000 lines/50 KiB with UTF-8-safe truncation and a
 reference to `history.md` for full replies. There are no offsets or pages.
@@ -202,7 +257,7 @@ truncation, and retained history/session paths.
 Partial output, thinking/tool activity, and capacity changes do not end the wait.
 Timeout returns the latest snapshot without stopping work. Idle, interrupted,
 and suspended tasks return immediately; omitting `waitMs` always reads immediately.
-A newer Follow-up does not extend the wait; results remain latest-snapshot reads.
+A newer Follow-up cannot extend the wait or replace the selected run's result.
 Normal file tools can inspect `history.md` directly.
 
 Last activity records observed start, thinking, reply, or tool events, not
@@ -285,14 +340,13 @@ Stop and completion share one serialized transition:
 - if stop commits first, no redundant completion notification is sent
 - if completion commits first, stop is a no-op and its notification remains
 
-`task_discard` stops and archives the owned subtree, returning its archive
-directory. It is idempotent, has no undelete operation, and never deletes files.
-Current metadata is tombstoned before moving to fence concurrent input.
-Unsupported versions can be archived after validating ownership identities,
-without migrating metadata or executing their recipes. Later model I/O is
-rejected, and archived Task References cannot be reused.
+`task_discard` stops and tombstones the owned subtree in place, returning its
+stable task directory. It is idempotent and never deletes files. Unsupported
+versions use an ownership-validated marker without rewriting their metadata.
+Later input/restart is rejected, but results remain readable. The active browsing
+links are removed; canonical files stay until explicit pruning.
 
-Prompt policy: discard tasks after consuming their results when no Follow-up
+Prompt policy: discard tasks after dependent work is integrated and no Follow-up
 is expected; retain reusable specialists. Idle sessions already unload, so no
 automatic idle deletion or retention timer is needed.
 
@@ -503,14 +557,15 @@ Lovely Config.
   .gitignore
   <parent-session-uuid>/
     .lease
+    active/
+      <task-ref> -> ../<task-ref>  # non-discarded tasks, including idle ones
     <task-ref>/
       metadata.json
       session.jsonl        # agents only
       output.log           # Bash only
       history.md
-  archive/
-    <parent-session-uuid>/
-      <task-ref>/           # entire discarded task directory
+      runs/<index>.json     # settled agent replies, stable across promotion
+      .discarded.json       # only for discarded unsupported metadata
 ```
 
 On first use, create this file without overwriting an existing one:
@@ -541,7 +596,7 @@ acknowledged only after temp write, fsync, and atomic rename.
 Version 3 retains the immutable Definition prompt/tool/context recipe, fixed
 scoped model identities, scheduler acceptance order, and the latest reply.
 Earlier versions are rejected for execution but support ownership-validated
-archival. Their retained files are not rewritten.
+discard in place. Their retained files are not rewritten.
 
 One PID lease protects each open parent partition. Reload and same-process
 rebind reuse it. A second live OS process opening the same parent session gets an
@@ -576,10 +631,11 @@ status notification.
 
 A completion notification includes:
 
-- Task Reference and label
+- Task Reference, run index, label, and an exact `task_output` retrieval operation
 - state and latest outcome
 - effective model/thinking for agents, command/exit status for Bash
-- up to 2 KiB of the latest assistant reply, never echoed inputs or earlier replies
+- labelled preview: first 2 KiB of the agent reply or Bash output;
+  never echoed inputs or earlier replies
 - retained history/session paths
 - compact descendant summary
 
@@ -630,7 +686,7 @@ schemas remain available for retained work after disabling creation.
 Typed Bash metadata stores command/cwd/exit status, bounded live tails with
 sticky truncation, and full `output.log` plus command/stdin/outcome history.
 No fabricated model/session recipe. POSIX process groups, pre-detach cancellation,
-serialized backpressured stdin, cleanup-before-archival, and reload-safe
+serialized backpressured stdin, cleanup-before-discard, and reload-safe
 residents are covered by real-process tests. Restart never signals a stored PID
 or replays a command. SIGKILL/power loss and deliberate process-group escapes
 need OS supervision. Windows is explicitly unsupported.
@@ -800,7 +856,7 @@ configuration, and queued counts.
 
 Added idempotent `task_stop` and `task_discard`: first-writer-wins settlement,
 Follow-up clearing, recursive descendant stop, permanent retained tombstones,
-and hidden/rejected post-discard model I/O. Task lists group by state with
+and hidden post-discard task rows; result reads remain allowed, input does not. Task lists group by state with
 relative times; retained history uses flat tags and compact tool summaries. Long
 tool results use bounded head/tail previews with full Ctrl+O expansion.
 

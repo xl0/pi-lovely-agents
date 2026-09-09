@@ -4,9 +4,8 @@ import { appendTaskNotification, prepareTaskNotification } from "./notifications
 import {
 	acquireParentLease,
 	appendHistoryLog,
-	archivedTaskStoragePaths,
-	archiveTaskStorage,
 	mutateTaskMetadata,
+	type ParentLease,
 	parentStoragePaths,
 	readTaskIdentity,
 	readTaskMetadata,
@@ -16,6 +15,7 @@ import {
 	type TaskStoragePaths,
 	taskStoragePaths
 } from "./state.js"
+import { readTaskDiscardMarker, rebuildActiveTaskLinks, syncActiveTaskLink, writeTaskDiscardMarker } from "./storage.js"
 
 export type ReconciliationResult = {
 	interrupted: number
@@ -29,7 +29,7 @@ export type RecoveryResult = {
 
 const DISCARD_OPERATIONS = Symbol.for("@xl0/pi-lovely-agents/discards/v1")
 
-/** Stops and archives an owned subtree, decoding only identity for unsupported versions. */
+/** Stops and tombstones an owned subtree without changing its canonical paths. */
 export function discardTask(paths: TaskStoragePaths, visited = new Set([paths.parentSessionId])): Promise<void> {
 	const global = globalThis as typeof globalThis & { [DISCARD_OPERATIONS]?: Map<string, Promise<void>> }
 	global[DISCARD_OPERATIONS] ??= new Map()
@@ -38,11 +38,9 @@ export function discardTask(paths: TaskStoragePaths, visited = new Set([paths.pa
 	if (existing) return existing
 	const pending = (async () => {
 		const identity = await readTaskIdentity(paths)
-		if (!identity) {
-			if (await readTaskIdentity(archivedTaskStoragePaths(paths))) return
-			throw new Error(`Unknown Task Reference: ${paths.taskRef}`)
-		}
+		if (!identity) throw new Error(`Unknown Task Reference: ${paths.taskRef}`)
 		if (identity.kind === "agent" && visited.has(identity.childSessionId)) throw new Error("Cyclic task ownership")
+		const marked = await readTaskDiscardMarker(paths)
 		const loaded = await readTaskMetadata(paths)
 		if (loaded.status === "ok") {
 			await stopTask(paths)
@@ -54,23 +52,25 @@ export function discardTask(paths: TaskStoragePaths, visited = new Set([paths.pa
 			}))
 			// Fence input that raced the first stop before the tombstone committed.
 			await stopTask(paths)
-		} else if (loaded.status === "invalid" && loaded.diagnostic.code === "unsupported-version") {
-			await getAgentCoordinator().getResident(paths.taskDirectory)?.stop()
+		} else if (marked || (loaded.status === "invalid" && loaded.diagnostic.code === "unsupported-version")) {
+			if (!marked) {
+				await getAgentCoordinator().getResident(paths.taskDirectory)?.stop()
+				await writeTaskDiscardMarker(paths)
+			}
 		} else {
 			throw new Error(loaded.status === "invalid" ? loaded.diagnostic.message : `Missing metadata: ${paths.metadata}`)
 		}
 		if (identity.kind === "agent") {
 			const descendants = new Set([...visited, identity.childSessionId])
 			const lease = await acquireParentLease(paths.workspace, identity.childSessionId)
-			try {
-				for (const child of await directTaskPaths(paths.workspace, identity.childSessionId)) {
-					await discardTask(child, descendants)
-				}
-			} finally {
-				await releaseParentLease(lease)
+			for (const child of await directTaskPaths(paths.workspace, identity.childSessionId, true)) {
+				await discardTask(child, descendants)
 			}
+			// Failed cleanup may leave residents using this borrowed partition lease.
+			await releaseParentLease(lease)
 		}
-		await archiveTaskStorage(paths)
+		const warning = await syncActiveTaskLink(paths, true)
+		if (warning) throw new Error(warning)
 	})().finally(() => {
 		if (operations.get(paths.taskDirectory) === pending) operations.delete(paths.taskDirectory)
 	})
@@ -85,13 +85,27 @@ export async function reconcileParentTasks(cwd: string, parentSessionId: string)
 	await acquireParentLease(cwd, parentSessionId)
 
 	const result: ReconciliationResult = { interrupted: 0, diagnostics: [] }
+	try {
+		result.diagnostics.push(...(await rebuildActiveTaskLinks(parent)))
+	} catch (error) {
+		result.diagnostics.push(`Active task index: ${errorMessage(error)}`)
+	}
 	for (const paths of await directTaskPaths(cwd, parentSessionId)) {
-		const loaded = await readTaskMetadata(paths)
-		if (loaded.status !== "ok") {
-			if (loaded.status === "invalid") result.diagnostics.push(`${paths.taskDirectory}: ${loaded.diagnostic.message}`)
+		try {
+			if (await readTaskDiscardMarker(paths)) continue
+		} catch (error) {
+			result.diagnostics.push(`${paths.taskDirectory}: ${errorMessage(error)}`)
 			continue
 		}
-		if (getAgentCoordinator().getResident(paths.taskDirectory)) continue
+		const loaded = await readTaskMetadata(paths)
+		if (loaded.status !== "ok") {
+			if (loaded.status === "invalid") {
+				const diagnostic = `${paths.taskDirectory}: ${loaded.diagnostic.message}`
+				if (!result.diagnostics.includes(diagnostic)) result.diagnostics.push(diagnostic)
+			}
+			continue
+		}
+		if (loaded.metadata.discardedAt !== null || getAgentCoordinator().getResident(paths.taskDirectory)) continue
 		if (loaded.metadata.state === "idle" || loaded.metadata.state === "interrupted") {
 			if (loaded.metadata.queuedFollowUps.length > 0) {
 				await mutateTaskMetadata(paths, metadata => ({ ...metadata, queuedFollowUps: [], updatedAt: Date.now() }))
@@ -135,7 +149,10 @@ export async function reconcileParentTasks(cwd: string, parentSessionId: string)
 
 /** Stops active work and clears queued input throughout an owned task tree. */
 export async function stopOwnedTaskTree(cwd: string, parentSessionId: string): Promise<void> {
-	await stopPartition(cwd, parentSessionId, new Set())
+	const leases: ParentLease[] = []
+	await stopPartition(cwd, parentSessionId, new Set(), leases)
+	// A failed owner can remain live even when stopping its descendants succeeded.
+	for (const lease of leases.reverse()) await releaseParentLease(lease)
 }
 
 /** Requeues resident suspended work in the exact owned descendant tree. */
@@ -152,31 +169,32 @@ export async function stopTask(paths: TaskStoragePaths): Promise<void> {
 	else await settleStopped(paths)
 }
 
-async function stopPartition(cwd: string, parentSessionId: string, visited: Set<string>): Promise<void> {
+async function stopPartition(cwd: string, parentSessionId: string, visited: Set<string>, leases: ParentLease[]): Promise<void> {
 	if (visited.has(parentSessionId)) return
 	visited.add(parentSessionId)
 	const parent = parentStoragePaths(cwd, parentSessionId)
 	if (!(await isDirectory(parent.parentDirectory))) return
-	const lease = await acquireParentLease(cwd, parentSessionId)
+	leases.push(await acquireParentLease(cwd, parentSessionId))
 	const errors: unknown[] = []
 
-	try {
-		for (const paths of await directTaskPaths(cwd, parentSessionId)) {
-			const loaded = await readTaskMetadata(paths)
-			if (loaded.status !== "ok") continue
-			try {
-				await stopTask(paths)
-			} catch (error) {
-				errors.push(error)
+	for (const paths of await directTaskPaths(cwd, parentSessionId)) {
+		const loaded = await readTaskMetadata(paths)
+		if (loaded.status !== "ok") {
+			if (getAgentCoordinator().getResident(paths.taskDirectory)) {
+				errors.push(new Error(`Cannot validate live task ownership: ${paths.metadata}`))
 			}
-			try {
-				if (loaded.metadata.kind === "agent") await stopPartition(cwd, loaded.metadata.childSessionId, visited)
-			} catch (error) {
-				errors.push(error)
-			}
+			continue
 		}
-	} finally {
-		await releaseParentLease(lease)
+		try {
+			await stopTask(paths)
+		} catch (error) {
+			errors.push(error)
+		}
+		try {
+			if (loaded.metadata.kind === "agent") await stopPartition(cwd, loaded.metadata.childSessionId, visited, leases)
+		} catch (error) {
+			errors.push(error)
+		}
 	}
 	if (errors.length > 0) throw new AggregateError(errors, `Failed to stop ${errors.length} owned task operation(s)`)
 }
@@ -188,13 +206,19 @@ async function recoverPartition(cwd: string, parentSessionId: string, visited: S
 	if (!(await isDirectory(parent.parentDirectory))) return
 
 	for (const paths of await directTaskPaths(cwd, parentSessionId)) {
+		try {
+			if (await readTaskDiscardMarker(paths)) continue
+		} catch (error) {
+			result.diagnostics.push(`${paths.taskDirectory}: ${errorMessage(error)}`)
+			continue
+		}
 		const loaded = await readTaskMetadata(paths)
 		if (loaded.status !== "ok") {
 			if (loaded.status === "invalid") result.diagnostics.push(`${paths.taskDirectory}: ${loaded.diagnostic.message}`)
 			continue
 		}
-		if (loaded.metadata.kind !== "agent") continue
-		if (loaded.metadata.discardedAt === null && loaded.metadata.state === "suspended" && loaded.metadata.activeRun?.background) {
+		if (loaded.metadata.discardedAt !== null || loaded.metadata.kind !== "agent") continue
+		if (loaded.metadata.state === "suspended" && loaded.metadata.activeRun?.background) {
 			const resident = getAgentCoordinator().getResident(paths.taskDirectory)
 			if (!resident?.recover) result.diagnostics.push(`${paths.taskDirectory}: suspended task has no recoverable resident`)
 			else if (await resident.recover()) result.resumed++
@@ -223,9 +247,16 @@ async function settleStopped(paths: TaskStoragePaths): Promise<void> {
 	}
 }
 
-async function directTaskPaths(cwd: string, parentSessionId: string): Promise<TaskStoragePaths[]> {
+async function directTaskPaths(cwd: string, parentSessionId: string, strict = false): Promise<TaskStoragePaths[]> {
 	const parent = parentStoragePaths(cwd, parentSessionId)
 	const entries = await readdir(parent.parentDirectory, { withFileTypes: true })
+	if (strict) {
+		for (const entry of entries) {
+			if (TASK_REFERENCE_PATTERN.test(entry.name) && (!entry.isDirectory() || entry.isSymbolicLink())) {
+				throw new Error(`Unsafe descendant task path: ${parent.parentDirectory}/${entry.name}`)
+			}
+		}
+	}
 	return entries
 		.filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && TASK_REFERENCE_PATTERN.test(entry.name))
 		.map(entry => taskStoragePaths(parent, entry.name))

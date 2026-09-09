@@ -17,7 +17,6 @@ import { type AgentsConfig, defaultAgentsConfig } from "../../extensions/lovely-
 import { getAgentCoordinator, type ResidentInputOptions } from "../../extensions/lovely-agents/coordinator.js"
 import { recoverOwnedTaskTree } from "../../extensions/lovely-agents/lifecycle.js"
 import {
-	archivedTaskStoragePaths,
 	ensureParentStorage,
 	initializeRetainedLogs,
 	mutateTaskMetadata,
@@ -546,7 +545,7 @@ describe("task_input tool", () => {
 				dispose() {},
 				async input(content, delivery, options) {
 					delivered.push({ content, delivery, options })
-					return { delivery: "stdin", queuePosition: null, queuedFollowUps: 0 }
+					return { run: 1, delivery: "stdin", queuePosition: null, queuedFollowUps: 0 }
 				}
 			})
 			try {
@@ -619,9 +618,11 @@ describe("task_input tool", () => {
 				undefined,
 				taskContext(workspace.cwd)
 			)
-			expect(first.details).toMatchObject({ effectiveDelivery: "followup", queuePosition: 1, queuedFollowUps: 1 })
-			expect(second.details).toMatchObject({ effectiveDelivery: "followup", queuePosition: 2, queuedFollowUps: 2 })
+			expect(first.details).toMatchObject({ run: 2, effectiveDelivery: "followup", queuePosition: 1, queuedFollowUps: 1 })
+			expect(second.details).toMatchObject({ run: 3, effectiveDelivery: "followup", queuePosition: 2, queuedFollowUps: 2 })
 			const acceptedPaths = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), id)
+			expect(await readRetainedOutput(acceptedPaths, { run: 2 })).toMatchObject({ run: 2, state: "queued", text: "" })
+			const waitForSecond = readRetainedOutput(acceptedPaths, { run: 2, waitMs: 1_000 })
 			const accepted = await readTaskMetadata(acceptedPaths)
 			if (accepted.status !== "ok") throw new Error("Accepted task metadata is invalid")
 			const acceptanceOrders = [
@@ -635,6 +636,10 @@ describe("task_input tool", () => {
 			releaseInitial.resolve(undefined)
 			const paths = acceptedPaths
 			await waitForRunCount(paths, 3)
+			expect(await waitForSecond).toMatchObject({ run: 2, state: "idle", text: "reply 2", latestOutcome: "succeeded" })
+			for (const run of [1, 2, 3]) {
+				expect(await readRetainedOutput(paths, { run })).toMatchObject({ run, text: `reply ${run}`, latestOutcome: "succeeded" })
+			}
 			expect(fake.prompts.map(prompt => prompt.text)).toEqual(["initial", "follow one", "follow two"])
 			const output = await readFile(paths.history, "utf8")
 			expect(output).toContain("<run 2 followup>")
@@ -831,6 +836,7 @@ describe("task_input tool", () => {
 					taskContext(workspace.cwd)
 				)
 				expect(input.details).toMatchObject({
+					run: 2,
 					requestedDelivery: "steer",
 					effectiveDelivery: "followup",
 					queuePosition: 1,
@@ -1109,8 +1115,9 @@ describe("task lifecycle controls", () => {
 			expect(again.details).toMatchObject({ id: details.id, discarded: true })
 			const listed = await loadTaskList(workspace.cwd, "parent-session")
 			expect(listed.details.tasks).toHaveLength(0)
-			const archived = archivedTaskStoragePaths(taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id))
-			expect(await readFile(archived.history, "utf8")).toContain("done")
+			const retained = taskStoragePaths(parentStoragePaths(workspace.cwd, "parent-session"), details.id)
+			expect(await readFile(retained.history, "utf8")).toContain("done")
+			expect(await readRetainedOutput(retained, { run: 1 })).toMatchObject({ text: "done", run: 1 })
 			await expect(tools.input.execute("input", { id: details.id, content: "later" }, undefined, ctx)).rejects.toThrow("has been discarded")
 			await expect(tools.stop.execute("stop", { id: details.id }, undefined, ctx)).rejects.toThrow("has been discarded")
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")

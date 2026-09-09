@@ -206,8 +206,16 @@ describe("latest reply snapshots", () => {
 			await writeTaskProgress(paths, runId, { effectiveSystemPrompt: "Late old prompt" })
 			expect(JSON.parse(await readFile(paths.metadata, "utf8"))).not.toHaveProperty("effectiveSystemPrompt")
 			expect(await readRetainedOutput(paths)).toMatchObject({ text: "", state: "queued", latestOutcome: null })
+			expect(await readRetainedOutput(paths, { run: 1 })).toMatchObject({
+				run: 1,
+				text: "Old answer",
+				state: "idle",
+				latestOutcome: "succeeded"
+			})
 			await mutateTaskMetadata(paths, metadata => ({ ...metadata, state: "idle", activeRun: null, latestOutcome: "stopped" }))
-			expect(await readRetainedOutput(paths)).toMatchObject({ text: "", latestOutcome: "stopped" })
+			expect(await readRetainedOutput(paths)).toMatchObject({ run: 2, text: "", latestOutcome: "stopped" })
+			expect(await readRetainedOutput(paths, { run: 1 })).toMatchObject({ run: 1, text: "Old answer", latestOutcome: "succeeded" })
+			await expect(readRetainedOutput(paths, { run: 3 })).rejects.toThrow("No retained result")
 		})
 	})
 
@@ -286,28 +294,37 @@ describe("latest reply snapshots", () => {
 
 	test("does not chase a newer Follow-up when the observed run has ended", async () => {
 		await withTaskStorage("running", async paths => {
+			await writeLatestReply(paths, runId, "Run A's answer", false)
 			const pending = readRetainedOutput(paths, { waitMs: 1_000 })
 			await Bun.sleep(20)
 			await mutateTaskMetadata(paths, metadata => ({
 				...metadata,
 				state: "queued",
+				latestOutcome: "succeeded",
 				lastRunSequence: 2,
 				activeRun: { id: "r_1111111111111111", sequence: 2, kind: "followup", state: "queued", input: "Next", acceptedAt: 2 }
 			}))
-			expect(await pending).toMatchObject({ state: "queued", timedOut: false })
+			expect(await pending).toMatchObject({ run: 1, text: "Run A's answer", state: "idle", latestOutcome: "succeeded", timedOut: false })
+			expect(await readRetainedOutput(paths)).toMatchObject({ run: 2, text: "", state: "queued", latestOutcome: null })
 		})
 	})
 
-	test("discard during a wait rejects reads and later reply writes", async () => {
+	test("discard preserves run reads but fences later reply writes", async () => {
 		await withTaskStorage("running", async paths => {
+			await writeLatestReply(paths, runId, "Retained answer", false)
 			const pending = readRetainedOutput(paths, { waitMs: 1_000 })
-			const observed = pending.catch(error => error)
 			await Bun.sleep(20)
-			await mutateTaskMetadata(paths, metadata => ({ ...metadata, discardedAt: 2 }))
-			expect(await observed).toMatchObject({ message: expect.stringContaining("discarded") })
+			await mutateTaskMetadata(paths, metadata => ({
+				...metadata,
+				state: "idle",
+				activeRun: null,
+				latestOutcome: "stopped",
+				discardedAt: 2
+			}))
+			expect(await pending).toMatchObject({ run: 1, text: "Retained answer", latestOutcome: "stopped" })
 			await writeLatestReply(paths, runId, "late", false)
-			await expect(readRetainedOutput(paths)).rejects.toThrow("discarded")
-			expect(JSON.parse(await readFile(paths.metadata, "utf8")).latestReply).toBeNull()
+			expect(await readRetainedOutput(paths, { run: 1 })).toMatchObject({ text: "Retained answer" })
+			expect(JSON.parse(await readFile(paths.metadata, "utf8")).latestReply.text).toBe("Retained answer")
 		})
 	})
 })

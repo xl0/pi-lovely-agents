@@ -227,7 +227,7 @@ describe("read-only task tools", () => {
 		})
 	})
 
-	test("reads only owned, non-discarded latest replies with run status", async () => {
+	test("reads owned replies, including discarded tasks, with run status", async () => {
 		await withTempWorkspace(async workspace => {
 			await createTask(workspace.cwd, "parent-session", {
 				id: "a_00000001",
@@ -270,7 +270,7 @@ describe("read-only task tools", () => {
 				streaming: false,
 				latestOutcome: null
 			})
-			expect(result.content[0]?.text).toContain("task_output state=running outcome=none streaming=false queued=1")
+			expect(result.content[0]?.text).toContain("task_output run=1 state=running outcome=none streaming=false queued=1")
 			expect(result.content[0]?.text).toContain("first\nsecond\nthird")
 			expect(details.paths.history).toBe(".pi/lovely-agents/parent-session/a_00000001/history.md")
 			expect(result.content[0]?.text).not.toContain("activity.md")
@@ -278,9 +278,8 @@ describe("read-only task tools", () => {
 			await expect(captured.tools.get("task_output")?.execute("nested", { id: "a_10000001" }, undefined, ctx)).rejects.toThrow(
 				"Unknown Task Reference"
 			)
-			await expect(captured.tools.get("task_output")?.execute("discarded", { id: "a_00000002" }, undefined, ctx)).rejects.toThrow(
-				"discarded"
-			)
+			const discarded = await captured.tools.get("task_output")?.execute("discarded", { id: "a_00000002" }, undefined, ctx)
+			expect(discarded?.details).toMatchObject({ id: "a_00000002", state: "idle" })
 			await captured.shutdown?.({ type: "session_shutdown", reason: "quit" }, ctx)
 		})
 	})

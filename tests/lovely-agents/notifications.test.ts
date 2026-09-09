@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { unlink } from "node:fs/promises"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
+import { discardTask } from "../../extensions/lovely-agents/lifecycle.js"
 import {
 	appendTaskNotification,
 	clearNotificationInFlight,
@@ -33,6 +34,7 @@ describe("durable notifications", () => {
 			expect(notice.content).toContain("Command: printf hello")
 			expect(notice.content).toContain("Exit: 7")
 			expect(notice.content).toContain("Last shell output")
+			expect(notice.content).toContain('task_output(id: "b_12345678", run: 1)')
 			expect(notice.content).toContain("output.log")
 			expect(notice.content).not.toContain("Model:")
 			expect(notice.content).not.toContain("session.jsonl")
@@ -98,6 +100,10 @@ describe("durable notifications", () => {
 				expect(resent).toMatchObject({ delivered: 0, sent: 1, diagnostics: [] })
 				expect(delivered).toEqual([notification.id, notification.id])
 
+				await discardTask(paths)
+				clearNotificationInFlight(workspace.cwd, "parent")
+				expect(await deliverTaskNotifications(paths)).toBe(1)
+				expect(delivered).toEqual([notification.id, notification.id, notification.id])
 				const observed = await reconcileParentNotifications(workspace.cwd, "parent", [
 					{
 						type: "custom_message",
@@ -124,7 +130,7 @@ describe("durable notifications", () => {
 			if (!run) throw new Error("fixture has no run")
 			const notification = await prepareTaskNotification(paths, metadata, run, "suspension")
 			expect(Buffer.byteLength(notification.content)).toBeLessThanOrEqual(8 * 1024)
-			expect(notification.content).toContain("Output:\nLatest answer")
+			expect(notification.content).toContain("Output preview:\nLatest answer")
 			expect(notification.content).not.toContain("Inspect")
 			expect(notification.content).not.toContain("activity.md")
 			expect(notification.content).toContain("Descendants:")
@@ -137,7 +143,7 @@ describe("durable notifications", () => {
 			await unlink(paths.history)
 			expect((await prepareTaskNotification(paths, metadata, run, "completion", "failed")).content).toContain("Latest answer")
 			metadata.latestReply = null
-			expect((await prepareTaskNotification(paths, metadata, run, "completion", "failed")).content).toContain("Output: (empty)")
+			expect((await prepareTaskNotification(paths, metadata, run, "completion", "failed")).content).toContain("Output preview: (empty)")
 			await releaseParentLeaseFor(workspace.cwd, "parent")
 		})
 	})

@@ -14,6 +14,7 @@ import {
 	type TaskStoragePaths,
 	taskStoragePaths
 } from "./state.js"
+import { readTaskDiscardMarker } from "./storage.js"
 import { loadTaskList } from "./tools.js"
 
 export const NOTIFICATION_CUSTOM_TYPE = "lovely-agents:notification"
@@ -55,11 +56,12 @@ export async function prepareTaskNotification(
 	const content = truncateUtf8(
 		[
 			`[Lovely ${metadata.kind === "bash" ? "Bash" : "Agent"} ${metadata.taskRef}:${run.id}:${type}]`,
-			`Task ${metadata.taskRef} ${JSON.stringify(metadata.label)} ${status}`,
+			`Task ${metadata.taskRef} run=${run.sequence} ${JSON.stringify(metadata.label)} ${status}`,
 			metadata.kind === "bash"
 				? `Command: ${truncateUtf8(metadata.command, 1024)}\nExit: ${metadata.exitCode ?? "unknown"}${metadata.signal ? ` signal=${metadata.signal}` : ""}`
 				: `Model: ${metadata.model.provider}/${metadata.model.id}:${metadata.thinking}`,
-			output ? `Output:\n${output}` : "Output: (empty)",
+			`Read: task_output(id: "${metadata.taskRef}", run: ${run.sequence})`,
+			output ? `Output preview:\n${output}` : "Output preview: (empty)",
 			`Files: history=${pathsForDisplay.history} ${metadata.kind === "bash" ? `output=${pathsForDisplay.output}` : `session=${pathsForDisplay.session}`}${descendantText}`
 		].join("\n"),
 		MAX_NOTIFICATION_CONTENT_BYTES
@@ -85,7 +87,8 @@ export function appendTaskNotification(notifications: TaskNotification[], notifi
 /** Sends every pending notification for one task, without marking delivery. */
 export async function deliverTaskNotifications(paths: TaskStoragePaths): Promise<number> {
 	const loaded = await readTaskMetadata(paths)
-	if (loaded.status !== "ok" || loaded.metadata.discardedAt !== null) return 0
+	// Discard leaves result paths intact; accepted notices still reconcile normally.
+	if (loaded.status !== "ok") return 0
 	const routeKey = notificationRouteKey(paths.workspace, loaded.metadata.parentSessionId)
 	const route = getAgentCoordinator().getNotificationRoute(routeKey)
 	if (!route) return 0
@@ -118,6 +121,12 @@ export async function reconcileParentNotifications(
 	for (const paths of await directTaskPaths(cwd, parentSessionId)) {
 		const loaded = await readTaskMetadata(paths)
 		if (loaded.status !== "ok") {
+			try {
+				if (await readTaskDiscardMarker(paths)) continue
+			} catch (error) {
+				result.diagnostics.push(`${paths.taskDirectory}: ${errorMessage(error)}`)
+				continue
+			}
 			if (loaded.status === "invalid") result.diagnostics.push(`${paths.taskDirectory}: ${loaded.diagnostic.message}`)
 			continue
 		}

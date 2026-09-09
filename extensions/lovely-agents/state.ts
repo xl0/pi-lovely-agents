@@ -1,10 +1,11 @@
 import { randomBytes } from "node:crypto"
-import { watch } from "node:fs"
+import { constants, watch } from "node:fs"
 import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { type Static, Type } from "typebox"
 import { Value } from "typebox/value"
 import { getAgentCoordinator, getBashCoordinator } from "./coordinator.js"
+import { readTaskDiscardMarker, syncActiveTaskLink } from "./storage.js"
 import { publishTaskUpdate } from "./updates.js"
 
 export const TASK_METADATA_VERSION = 3
@@ -154,6 +155,8 @@ export const AgentTaskMetadataSchema = Type.Object(
 		// Pi's composed prompt at agent start, distinct from the immutable Definition recipe.
 		effectiveSystemPrompt: Type.Optional(Type.String()),
 		lastRunSequence: Type.Integer({ minimum: 0 }),
+		// Last settled run, distinct from the highest accepted (possibly queued) sequence.
+		lastSettledRun: Type.Optional(Type.Integer({ minimum: 1 })),
 		activeRun: Type.Union([ActiveRun, Type.Null()]),
 		queuedFollowUps: Type.Array(QueuedFollowUp, { maxItems: MAX_QUEUED_FOLLOWUPS }),
 		notifications: Type.Array(Notification, { maxItems: MAX_TASK_NOTIFICATIONS }),
@@ -177,6 +180,7 @@ export const BashTaskMetadataSchema = Type.Object(
 			"latestReply",
 			"lastActivity",
 			"lastRunSequence",
+			"lastSettledRun",
 			"activeRun",
 			"queuedFollowUps",
 			"notifications",
@@ -205,6 +209,21 @@ export type AgentTaskMetadata = Static<typeof AgentTaskMetadataSchema>
 export type BashTaskMetadata = Static<typeof BashTaskMetadataSchema>
 export type TaskMetadata = AgentTaskMetadata | BashTaskMetadata
 type ParentLeaseFile = Static<typeof ParentLeaseFileSchema>
+
+/** One final agent reply, written before settlement/promotion publishes new metadata. */
+const RunResultSchema = Type.Object(
+	{
+		version: Type.Literal(1),
+		taskRef: Type.String({ pattern: "^a_[0-9a-f]{8}$" }),
+		parentSessionId: Type.String({ pattern: SESSION_ID_PATTERN.source }),
+		run: Type.Integer({ minimum: 1 }),
+		state: Type.Union([Type.Literal("idle"), Type.Literal("interrupted")]),
+		outcome: Type.Union([RunOutcome, Type.Null()]),
+		text: Type.String(),
+		lastActivity: Type.Union([Type.Object({ at: Timestamp, action: Type.String() }, { additionalProperties: false }), Type.Null()])
+	},
+	{ additionalProperties: false }
+)
 
 /** Filesystem locations owned by one parent Pi session. */
 export type ParentStoragePaths = {
@@ -248,10 +267,14 @@ export type HistoryEntry =
 export type RetainedOutputReadOptions = {
 	waitMs?: number
 	signal?: AbortSignal
+	/** 1-based accepted run sequence; omitted reads the current run. */
+	run?: number
 }
 
 /** Latest agent reply or Bash output tail; run status is independent of streaming. */
 export type RetainedOutputRead = {
+	/** Null for older settled metadata whose accepted-run count cannot identify its reply. */
+	run: number | null
 	text: string
 	totalLines: number
 	truncated: boolean
@@ -343,10 +366,6 @@ export function taskStoragePaths(parent: ParentStoragePaths, taskRef: string): T
 	}
 }
 
-export function archivedTaskStoragePaths(paths: TaskStoragePaths): TaskStoragePaths {
-	return taskStoragePaths({ ...paths, parentDirectory: join(paths.root, "archive", paths.parentSessionId) }, paths.taskRef)
-}
-
 /** Only ownership is decoded across versions. Unsupported execution recipes stay unreadable. */
 export async function readTaskIdentity(
 	paths: TaskStoragePaths
@@ -379,28 +398,6 @@ export async function readTaskIdentity(
 		throw new Error("Invalid child session identity")
 	}
 	return { kind: "agent", childSessionId }
-}
-
-/** Moves stopped work under archive without rewriting its retained metadata. */
-export async function archiveTaskStorage(paths: TaskStoragePaths): Promise<void> {
-	await serializeMetadataMutation(paths.metadata, async () => {
-		const archived = archivedTaskStoragePaths(paths)
-		await assertRegularDirectory(paths.taskDirectory)
-		for (const directory of [dirname(archived.parentDirectory), archived.parentDirectory]) {
-			await mkdir(directory, { recursive: true, mode: DIRECTORY_MODE })
-			await assertRegularDirectory(directory)
-		}
-		try {
-			await lstat(archived.taskDirectory)
-		} catch (error) {
-			if (!hasCode(error, "ENOENT")) throw error
-			await rename(paths.taskDirectory, archived.taskDirectory)
-			await Promise.all([syncDirectory(paths.parentDirectory), syncDirectory(archived.parentDirectory)])
-			publishTaskUpdate(paths.workspace, paths.parentSessionId)
-			return
-		}
-		throw new Error(`Archive already exists: ${archived.taskDirectory}`)
-	})
 }
 
 export function createTaskReference(kind: TaskMetadata["kind"] = "agent"): string {
@@ -605,25 +602,92 @@ export async function countRetainedOutputLines(paths: TaskStoragePaths): Promise
 }
 
 /**
- * Returns a snapshot, never transcript pages. With waitMs, wait for the current
- * run to end or suspend, not for partial output, activity, or capacity changes.
+ * Returns one run's snapshot, never transcript pages. A timed read stays pinned
+ * to the selected/observed run through promotion, ignoring partial progress.
  */
 export async function readRetainedOutput(paths: TaskStoragePaths, options: RetainedOutputReadOptions = {}): Promise<RetainedOutputRead> {
 	const waitMs = options.waitMs ?? 0
 	if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > RETAINED_OUTPUT_MAX_WAIT_MS) {
 		throw new Error(`waitMs must be an integer from 0 to ${RETAINED_OUTPUT_MAX_WAIT_MS}`)
 	}
+	if (options.run !== undefined && (!Number.isSafeInteger(options.run) || options.run < 1)) {
+		throw new Error("run must be a positive integer (1-based)")
+	}
 
 	if (options.signal?.aborted) throw abortReason(options.signal)
 	let metadata = await requireTaskMetadata(paths)
+	const run = options.run ?? metadata.activeRun?.sequence ?? metadata.lastSettledRun ?? (metadata.lastRunSequence === 1 ? 1 : null)
+	if (run !== null && run > metadata.lastRunSequence)
+		throw new Error(`No retained result for run ${run} of ${paths.taskRef}: run has not been accepted`)
+	const selected =
+		metadata.activeRun?.sequence === run ? metadata.activeRun : metadata.queuedFollowUps.find(input => input.sequence === run)
 	let timedOut = false
-	if (waitMs > 0 && metadata.activeRun && metadata.state !== "suspended") {
-		const settled = await waitForRunEnd(paths, metadata.activeRun.id, waitMs, options.signal)
+	if (waitMs > 0 && selected && !(metadata.activeRun?.sequence === run && metadata.state === "suspended")) {
+		const settled = await waitForRunEnd(paths, selected.id, waitMs, options.signal)
 		timedOut = settled === undefined
 		metadata = settled ?? (await requireTaskMetadata(paths))
 	}
 
-	return retainedOutputSnapshot(paths, metadata, timedOut)
+	if (
+		metadata.activeRun?.sequence === run ||
+		(!metadata.activeRun && (metadata.lastSettledRun ?? (metadata.lastRunSequence === 1 ? 1 : null)) === run)
+	) {
+		return retainedOutputSnapshot(paths, metadata, timedOut)
+	}
+	const queued = metadata.queuedFollowUps.find(input => input.sequence === run)
+	if (queued) {
+		return retainedOutputSnapshot(
+			paths,
+			{
+				...metadata,
+				state: "queued",
+				latestReply: null,
+				lastActivity: { at: queued.acceptedAt, action: "queued" },
+				activeRun: { ...queued, kind: "followup", state: "queued", input: queued.content }
+			},
+			timedOut
+		)
+	}
+	if (metadata.kind === "bash") throw new Error("Bash tasks only have run 1")
+	const resultPath = join(paths.taskDirectory, "runs", `${run}.json`)
+	let saved: unknown
+	try {
+		await assertRegularDirectory(dirname(resultPath))
+		const file = await open(resultPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+		try {
+			if (!(await file.stat()).isFile()) throw new Error(`Run result is not a regular file: ${resultPath}`)
+			saved = JSON.parse(await file.readFile("utf8"))
+		} finally {
+			await file.close()
+		}
+	} catch (error) {
+		if (!hasCode(error, "ENOENT")) throw error
+		throw new Error(
+			`No retained result for run ${run} of ${paths.taskRef}. Older or cancelled queued runs may only have history: ${retainedPaths(paths).history}`
+		)
+	}
+	if (
+		!Value.Check(RunResultSchema, saved) ||
+		saved.taskRef !== paths.taskRef ||
+		saved.parentSessionId !== paths.parentSessionId ||
+		saved.run !== run
+	) {
+		throw new Error(`Invalid run result: ${resultPath}`)
+	}
+	const snapshot = retainedOutputSnapshot(
+		paths,
+		{
+			...metadata,
+			state: saved.state,
+			activeRun: null,
+			lastSettledRun: run,
+			latestOutcome: saved.outcome,
+			latestReply: { text: saved.text, streaming: false }
+		},
+		timedOut
+	)
+	snapshot.lastActivity = saved.lastActivity
+	return snapshot
 }
 
 /** Formats an immutable run result before a later run can replace its reply. */
@@ -634,6 +698,7 @@ export function retainedOutputSnapshot(paths: TaskStoragePaths, metadata: TaskMe
 	const snapshotTruncated = lines.length > RETAINED_OUTPUT_MAX_LINES || Buffer.byteLength(fullText) > RETAINED_OUTPUT_MAX_BYTES
 	const truncated = snapshotTruncated || (metadata.kind === "bash" && metadata.latestReply?.truncated === true)
 	return {
+		run: metadata.activeRun?.sequence ?? metadata.lastSettledRun ?? (metadata.lastRunSequence === 1 ? 1 : null),
 		text:
 			metadata.kind === "bash"
 				? `${snapshotTruncated ? text : fullText}\n\n[${truncated ? "Output truncated; showing tail. " : ""}Full output: ${retainedPaths(paths).output}]`
@@ -663,12 +728,6 @@ export async function reserveTaskStorage(
 		const paths = taskStoragePaths(parent, nextReference())
 		try {
 			const reserved = await serializeMetadataMutation(paths.metadata, async () => {
-				try {
-					await lstat(archivedTaskStoragePaths(paths).taskDirectory)
-					return false
-				} catch (error) {
-					if (!hasCode(error, "ENOENT")) throw error
-				}
 				await mkdir(paths.taskDirectory, { mode: DIRECTORY_MODE })
 				return true
 			})
@@ -689,16 +748,7 @@ export async function readTaskMetadata(paths: TaskStoragePaths): Promise<Metadat
 		}
 		source = await readFile(paths.metadata, "utf8")
 	} catch (error) {
-		if (hasCode(error, "ENOENT")) {
-			try {
-				if (await readTaskIdentity(archivedTaskStoragePaths(paths))) {
-					return invalidMetadata(paths.metadata, "unreadable", `Task ${paths.taskRef} has been discarded`)
-				}
-				return { status: "missing" }
-			} catch (archiveError) {
-				return invalidMetadata(paths.metadata, "unreadable", errorMessage(archiveError))
-			}
-		}
+		if (hasCode(error, "ENOENT")) return { status: "missing" }
 		return invalidMetadata(paths.metadata, "unreadable", errorMessage(error))
 	}
 
@@ -710,6 +760,12 @@ export async function readTaskMetadata(paths: TaskStoragePaths): Promise<Metadat
 	}
 	const version = isRecord(value) ? property(value, "version") : undefined
 	if (typeof version === "number" && version !== TASK_METADATA_VERSION) {
+		try {
+			if (await readTaskDiscardMarker(paths))
+				return invalidMetadata(paths.metadata, "unreadable", `Task ${paths.taskRef} has been discarded; unsupported metadata is retained`)
+		} catch (error) {
+			return invalidMetadata(paths.metadata, "unreadable", errorMessage(error))
+		}
 		return invalidMetadata(paths.metadata, "unsupported-version", `Unsupported metadata version ${version}`)
 	}
 	const validated = validateTaskMetadata(value)
@@ -725,7 +781,10 @@ export function writeTaskMetadata(paths: TaskStoragePaths, metadata: TaskMetadat
 	return serializeMetadataMutation(paths.metadata, async () => {
 		assertMetadataForPath(paths, metadata)
 		const snapshot = metadata.activeRun ? { ...metadata, inputPreview: historyPreview(metadata.activeRun.input, 512) } : metadata
-		await atomicWriteMetadata(paths.metadata, snapshot)
+		await atomicWriteJson(paths.metadata, snapshot)
+		// Index failure must not turn durable acceptance into a producer cleanup/delete.
+		const warning = await syncActiveTaskLink(paths, snapshot.discardedAt !== null)
+		if (warning) console.warn(`Lovely Agents active index: ${warning}`)
 		publishTaskUpdate(paths.workspace, paths.parentSessionId)
 	})
 }
@@ -739,6 +798,32 @@ export function mutateTaskMetadata(
 		const loaded = await readTaskMetadata(paths)
 		if (loaded.status !== "ok") throw new InvalidTaskMetadataError(metadataLoadError(loaded, paths.metadata))
 		const updated = await mutate(structuredClone(loaded.metadata))
+		assertMetadataForPath(paths, updated)
+		const settledRun = loaded.metadata.activeRun
+		if (settledRun && settledRun.id !== updated.activeRun?.id) {
+			updated.lastSettledRun = settledRun.sequence
+			if (updated.kind === "agent") {
+				const runs = join(paths.taskDirectory, "runs")
+				await mkdir(runs, { mode: DIRECTORY_MODE }).catch(error => {
+					if (!hasCode(error, "EEXIST")) throw error
+				})
+				await assertRegularDirectory(runs)
+				const result: Static<typeof RunResultSchema> = {
+					version: 1,
+					taskRef: paths.taskRef,
+					parentSessionId: paths.parentSessionId,
+					run: settledRun.sequence,
+					state: updated.state === "interrupted" ? "interrupted" : "idle",
+					outcome: updated.latestOutcome,
+					text: updated.latestReply?.text ?? "",
+					lastActivity: updated.lastActivity ?? null
+				}
+				// Publish the reply before clearing it for a promoted run. A crash can leave
+				// an unpublished result, but cannot publish settlement without its result.
+				await atomicWriteJson(join(runs, `${settledRun.sequence}.json`), result)
+				await syncDirectory(paths.taskDirectory)
+			}
+		}
 		if (updated.activeRun && updated.activeRun.id !== loaded.metadata.activeRun?.id) {
 			updated.latestReply = null
 			updated.lastActivity = { at: updated.updatedAt, action: updated.state }
@@ -747,7 +832,11 @@ export function mutateTaskMetadata(
 		}
 		if (updated.state !== "running" && updated.latestReply) updated.latestReply.streaming = false
 		assertMetadataForPath(paths, updated)
-		await atomicWriteMetadata(paths.metadata, updated)
+		await atomicWriteJson(paths.metadata, updated)
+		if (updated.discardedAt !== loaded.metadata.discardedAt) {
+			const warning = await syncActiveTaskLink(paths, updated.discardedAt !== null)
+			if (warning) console.warn(`Lovely Agents active index: ${warning}`)
+		}
 		publishTaskUpdate(paths.workspace, paths.parentSessionId)
 		return updated
 	})
@@ -785,6 +874,11 @@ function taskMetadataSemanticError(value: TaskMetadata): string | undefined {
 	}
 	if (value.updatedAt < value.createdAt) return "/updatedAt must not precede /createdAt"
 	if (value.discardedAt !== null && value.discardedAt < value.createdAt) return "/discardedAt must not precede /createdAt"
+	if (
+		value.lastSettledRun !== undefined &&
+		(value.lastSettledRun > value.lastRunSequence || (value.activeRun && value.lastSettledRun >= value.activeRun.sequence))
+	)
+		return "/lastSettledRun must not exceed accepted runs or include the active run"
 	if ((value.activeRun === null) !== (value.state === "idle" || value.state === "interrupted")) {
 		return "/activeRun must exist exactly while state is queued, running, or suspended"
 	}
@@ -870,9 +964,11 @@ function truncateUtf8(content: string, maximumBytes: number): string {
 }
 
 async function requireTaskMetadata(paths: TaskStoragePaths): Promise<TaskMetadata> {
+	await assertRegularDirectory(paths.root)
+	await assertRegularDirectory(paths.parentDirectory)
+	await assertRegularDirectory(paths.taskDirectory)
 	const loaded = await readTaskMetadata(paths)
 	if (loaded.status !== "ok") throw new InvalidTaskMetadataError(metadataLoadError(loaded, paths.metadata))
-	if (loaded.metadata.discardedAt !== null) throw new Error(`Task ${paths.taskRef} has been discarded`)
 	return loaded.metadata
 }
 
@@ -922,7 +1018,9 @@ async function waitForRunEnd(
 			try {
 				const current = await requireTaskMetadata(paths)
 				// A later Follow-up must not extend a wait for the run we observed.
-				if (current.activeRun?.id !== runId || current.state === "suspended") finish(current)
+				const active = current.activeRun?.id === runId
+				if ((!active && !current.queuedFollowUps.some(input => input.id === runId)) || (active && current.state === "suspended"))
+					finish(current)
 			} catch (error) {
 				fail(error)
 			} finally {
@@ -1039,7 +1137,7 @@ async function writePrivateFile(path: string, content: string): Promise<void> {
 	}
 }
 
-async function atomicWriteMetadata(path: string, metadata: TaskMetadata): Promise<void> {
+async function atomicWriteJson(path: string, metadata: unknown): Promise<void> {
 	const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`)
 	let handle: Awaited<ReturnType<typeof open>> | undefined
 	let renamed = false

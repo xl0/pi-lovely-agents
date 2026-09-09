@@ -17,7 +17,6 @@ import {
 } from "../../extensions/lovely-agents/notifications.js"
 import * as taskState from "../../extensions/lovely-agents/state.js"
 import {
-	archivedTaskStoragePaths,
 	type BashTaskMetadata,
 	parentStoragePaths,
 	readRetainedOutput,
@@ -265,7 +264,7 @@ describe("bash_bg real processes", () => {
 			const resident = runtime(paths)
 			await expect(resident.input("ignored", "followup")).rejects.toThrow("stdin only")
 			const content = `  /skill:literal\r\n${"😀".repeat(15000)}\r\n\n`
-			expect(await resident.input(content, "stdin")).toEqual({ delivery: "stdin", queuePosition: null, queuedFollowUps: 0 })
+			expect(await resident.input(content, "stdin")).toEqual({ run: 1, delivery: "stdin", queuePosition: null, queuedFollowUps: 0 })
 			await resident.input("", "stdin", { eof: true })
 			await expect(resident.input("late", "stdin")).rejects.toThrow("unavailable")
 			const saved = await finished(paths)
@@ -434,7 +433,7 @@ describe("bash_bg real processes", () => {
 			expect(resident.log.fd).toBe(-1)
 			expect(getAgentCoordinator().getResident(paths.taskDirectory)).toBeUndefined()
 			await discardTask(paths)
-			expect((await metadata(archivedTaskStoragePaths(paths))).latestOutcome).toBe("failed")
+			expect((await metadata(paths)).latestOutcome).toBe("failed")
 		})
 	})
 
@@ -572,7 +571,7 @@ describe("bash_bg real processes", () => {
 			expect(writesFinished).toBe(false)
 			await discardTask(paths)
 			await expect(writes).rejects.toThrow()
-			expect((await metadata(archivedTaskStoragePaths(paths))).latestOutcome).toBe("stopped")
+			expect((await metadata(paths)).latestOutcome).toBe("stopped")
 		})
 	})
 
@@ -622,14 +621,15 @@ describe("bash_bg real processes", () => {
 			if (!runId) throw new Error("Missing live run")
 			const pid = Number(await readFile(join(workspace.cwd, "grandchild"), "utf8"))
 			await Promise.all([discardTask(paths), discardTask(paths)])
-			const archive = archivedTaskStoragePaths(paths)
-			const before = await readFile(archive.output)
+			const before = await readFile(paths.output)
 			await Bun.sleep(80)
-			expect(await readFile(archive.output)).toEqual(before)
-			expect((await metadata(archive)).latestOutcome).toBe("stopped")
-			expect((await metadata(archive)).notifications).toEqual([])
-			await expect(writeTaskProgress(paths, runId, { latestReply: { text: "late", streaming: true } })).rejects.toThrow()
-			expect(await readFile(archive.output)).toEqual(before)
+			expect(await readFile(paths.output)).toEqual(before)
+			expect((await metadata(paths)).latestOutcome).toBe("stopped")
+			expect((await metadata(paths)).notifications).toEqual([])
+			const reply = (await metadata(paths)).latestReply
+			await writeTaskProgress(paths, runId, { latestReply: { text: "late", streaming: true } })
+			expect((await metadata(paths)).latestReply).toEqual(reply)
+			expect(await readFile(paths.output)).toEqual(before)
 			await discardTask(paths)
 			if (process.platform === "linux") {
 				const processState = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => "")

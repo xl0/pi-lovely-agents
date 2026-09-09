@@ -164,7 +164,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 				pi.sendMessage(
 					{
 						customType: NOTIFICATION_CUSTOM_TYPE,
-						content: `User manually discarded task ${id} and its descendants.\nFiles are archived; these tasks cannot receive further input.`,
+						content: `User manually discarded task ${id} and its descendants.\nFiles stay at their original paths for read-only inspection; these tasks cannot receive further input.`,
 						display: true
 					},
 					{ deliverAs: "steer", triggerTurn: false }

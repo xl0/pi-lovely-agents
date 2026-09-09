@@ -51,6 +51,7 @@ const BashParameters = Type.Object(
 export type BashToolInput = Static<typeof BashParameters>
 export type BashCreationResult = {
 	id: string
+	run: number
 	label: string
 	state: BashTaskMetadata["state"]
 	latestOutcome: BashTaskMetadata["latestOutcome"]
@@ -176,6 +177,7 @@ export function registerBashTool(pi: ExtensionAPI, options: { getConfig: () => A
 				if (loaded.status !== "ok" || loaded.metadata.kind !== "bash") throw new Error(`Could not read accepted task ${paths.taskRef}`)
 				const result: BashCreationResult = {
 					id: paths.taskRef,
+					run: 1,
 					label: loaded.metadata.label,
 					state: loaded.metadata.state,
 					latestOutcome: loaded.metadata.latestOutcome,
@@ -188,7 +190,7 @@ export function registerBashTool(pi: ExtensionAPI, options: { getConfig: () => A
 					content: [
 						{
 							type: "text" as const,
-							text: `${result.id} ${JSON.stringify(result.label)}: ${result.state}${result.latestOutcome ? ` / ${result.latestOutcome}` : ""}${detached ? " (detached)" : ""}\n${result.output.text}`
+							text: `${result.id} run=1 ${JSON.stringify(result.label)}: ${result.state}${result.latestOutcome ? ` / ${result.latestOutcome}` : ""}${detached ? " (detached)" : ""}\n${result.output.text}`
 						}
 					],
 					details: result
@@ -346,7 +348,7 @@ class BashRuntime implements ResidentAgent {
 				this.fail(error)
 				throw error
 			}
-			return { delivery: "stdin" as const, queuePosition: null, queuedFollowUps: 0 }
+			return { run: 1, delivery: "stdin" as const, queuePosition: null, queuedFollowUps: 0 }
 		})
 		this.#inputLane = operation.catch(() => {})
 		if (!options.signal) return operation
