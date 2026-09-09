@@ -15,6 +15,9 @@ synchronous/stop exceptions. Steer acknowledgements report queued acceptance
 and explicit Follow-up conversion, with the targeted run index. Roster capacity
 is labelled process-wide; creation reports queue reasons. Keep idle specialists
 and evidence until dependent work is integrated.
+The packaged delegation skill limits implementation delegation to embarrassingly
+parallel changes, including independence from the parent's edits. Coupled work
+stays in the parent; integration checks wait for relevant writers to finish.
 
 Bash notices keep the last 2 KiB, UTF-8-safe with leading truncation.
 `task_output(lines: N)` returns the last N Bash lines with status and the full-log

@@ -37,7 +37,9 @@ Background Bash shares the durable task controls without creating a Pi session.
 - `scripts/prune-tasks.ts`: explicit, dry-run-first pruning of discarded tasks
 - `tests/lovely-agents/`: extension tests and temp-workspace helpers
 - `skills/agent/SKILL.md`: packaged delegation guidance; prefer research,
-  exploration, and isolated coding, with architecture/integration kept in the parent
+  exploration, and independent review. Delegate implementation only for disjoint,
+  independently verifiable changes with near-zero dependencies between writers;
+  keep coupled implementation in the parent
 - `skills/agent-creator/SKILL.md`: self-contained definition format and authoring
   guidance, with roster validation without starting test agents
 - `README.md`: human-facing setup, examples, task controls, settings, and limits;
