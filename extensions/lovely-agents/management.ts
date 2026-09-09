@@ -276,7 +276,7 @@ async function manageTask(ctx: ExtensionContext, id: string, options: Management
 						{ value: "steer", label: "Steer", description: "Redirect running work; otherwise becomes a Follow-up" }
 					]),
 			{ value: "stop", label: "Stop", description: "Stop work and preserve retained files" },
-			{ value: "discard", label: "Discard", description: "Stop and archive this task and its descendants" }
+			{ value: "discard", label: "Discard", description: "Stop and remove from active work; keep files in place" }
 		])
 		if (!choice) return
 		if (choice === "details") await showText(ctx, task.label, renderTask(task))
@@ -302,7 +302,9 @@ async function manageTask(ctx: ExtensionContext, id: string, options: Management
 			) {
 				await options.controlTask(task.id, "stop")
 			}
-		} else if (await ctx.ui.confirm(`Discard ${task.id}?`, "Files move to the archive. Later model I/O is rejected.")) {
+		} else if (
+			await ctx.ui.confirm(`Discard ${task.id}?`, "Files stay at their original paths. Results remain readable; further input is rejected.")
+		) {
 			await options.controlTask(task.id, "discard")
 			return
 		}
@@ -344,6 +346,10 @@ async function showLiveTaskOutput(ctx: ExtensionContext, task: TaskListRow): Pro
 		let closed = false
 		let loading = false
 		let refreshAgain = false
+		let offset = 0
+		let pageSize = 1
+		let total = 0
+		let follow = task.kind === "bash"
 		const refresh = async () => {
 			if (closed) return
 			refreshAgain = true
@@ -364,26 +370,57 @@ async function showLiveTaskOutput(ctx: ExtensionContext, task: TaskListRow): Pro
 		const unbind = bindTaskUpdateRoute(ctx.cwd, ctx.sessionManager.getSessionId(), refresh)
 		return {
 			render(width: number) {
+				const exitStatus =
+					output.exitCode !== undefined ? ` · Exit code: ${output.exitCode ?? "unknown"} · Signal: ${output.signal ?? "none"}` : ""
 				const heading = theme.fg(
 					"accent",
 					theme.bold(
-						`${task.id} · ${output.state}${output.latestOutcome ? `/${output.latestOutcome}` : ""}${output.streaming ? " · streaming" : ""}`
+						`${task.id} · ${output.state}${output.latestOutcome ? `/${output.latestOutcome}` : ""}${output.streaming ? " · streaming" : ""}${exitStatus}`
 					)
 				)
-				const progress = [
+				const progressLines = [
 					`Capacity: ${output.capacity.active}/${output.capacity.limit} execution permits`,
 					...(output.queueReason ? [`Waiting: ${output.queueReason}`] : []),
 					...(output.lastActivity ? [`${output.lastActivity.action} · ${relativeTime(output.lastActivity.at, Date.now())}`] : [])
-				].join("\n")
-				return new Text(
-					`${heading}\n${progress}\n\n${output.text || "(no output)"}\n\n${theme.fg("dim", "Esc or Enter to go back")}`,
-					1,
-					0
-				).render(width)
+				]
+				const bodyLines = new Text(output.text || "(no output)", 0, 0).render(width)
+				total = bodyLines.length
+				pageSize = Math.max(1, Math.floor(tui.terminal.rows * 0.6) - (1 + progressLines.length + 2))
+				const maxOffset = Math.max(0, total - pageSize)
+				if (follow) offset = maxOffset
+				else offset = Math.max(0, Math.min(offset, maxOffset))
+				const position = `${Math.min(offset + 1, total)}-${Math.min(offset + pageSize, total)}/${total}${follow ? " · follow" : ""}`
+				return [
+					truncateToWidth(heading, width),
+					...progressLines.map(line => truncateToWidth(line, width)),
+					"",
+					...bodyLines.slice(offset, offset + pageSize).map(line => truncateToWidth(line, width)),
+					truncateToWidth(theme.fg("dim", `Enter/Esc back · ↑↓ PgUp/PgDn Home/End · ${position}`), width)
+				]
 			},
 			invalidate() {},
 			handleInput(data: string) {
 				if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) done(undefined)
+				else if (matchesKey(data, Key.up)) {
+					offset--
+					follow = false
+				} else if (matchesKey(data, Key.down)) {
+					offset++
+				} else if (matchesKey(data, Key.pageUp)) {
+					offset -= pageSize
+					follow = false
+				} else if (matchesKey(data, Key.pageDown)) {
+					offset += pageSize
+				} else if (matchesKey(data, Key.home)) {
+					offset = 0
+					follow = false
+				} else if (matchesKey(data, Key.end)) {
+					offset = Math.max(0, total - pageSize)
+					follow = true
+				} else return
+				offset = Math.max(0, Math.min(offset, total - pageSize))
+				if (offset >= Math.max(0, total - pageSize)) follow = true
+				tui.requestRender()
 			},
 			dispose() {
 				closed = true

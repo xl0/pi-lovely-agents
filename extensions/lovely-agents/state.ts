@@ -269,6 +269,8 @@ export type RetainedOutputReadOptions = {
 	signal?: AbortSignal
 	/** 1-based accepted run sequence; omitted reads the current run. */
 	run?: number
+	/** Last N Bash output lines, excluding status and the full-log reference. */
+	lines?: number
 }
 
 /** Latest agent reply or Bash output tail; run status is independent of streaming. */
@@ -613,9 +615,13 @@ export async function readRetainedOutput(paths: TaskStoragePaths, options: Retai
 	if (options.run !== undefined && (!Number.isSafeInteger(options.run) || options.run < 1)) {
 		throw new Error("run must be a positive integer (1-based)")
 	}
+	if (options.lines !== undefined && (!Number.isInteger(options.lines) || options.lines < 1 || options.lines > RETAINED_OUTPUT_MAX_LINES)) {
+		throw new Error(`lines must be an integer from 1 to ${RETAINED_OUTPUT_MAX_LINES}`)
+	}
 
 	if (options.signal?.aborted) throw abortReason(options.signal)
 	let metadata = await requireTaskMetadata(paths)
+	if (options.lines !== undefined && metadata.kind !== "bash") throw new Error("lines is only supported for Bash output tails")
 	const run = options.run ?? metadata.activeRun?.sequence ?? metadata.lastSettledRun ?? (metadata.lastRunSequence === 1 ? 1 : null)
 	if (run !== null && run > metadata.lastRunSequence)
 		throw new Error(`No retained result for run ${run} of ${paths.taskRef}: run has not been accepted`)
@@ -632,7 +638,7 @@ export async function readRetainedOutput(paths: TaskStoragePaths, options: Retai
 		metadata.activeRun?.sequence === run ||
 		(!metadata.activeRun && (metadata.lastSettledRun ?? (metadata.lastRunSequence === 1 ? 1 : null)) === run)
 	) {
-		return retainedOutputSnapshot(paths, metadata, timedOut)
+		return retainedOutputSnapshot(paths, metadata, timedOut, options.lines)
 	}
 	const queued = metadata.queuedFollowUps.find(input => input.sequence === run)
 	if (queued) {
@@ -645,7 +651,8 @@ export async function readRetainedOutput(paths: TaskStoragePaths, options: Retai
 				lastActivity: { at: queued.acceptedAt, action: "queued" },
 				activeRun: { ...queued, kind: "followup", state: "queued", input: queued.content }
 			},
-			timedOut
+			timedOut,
+			options.lines
 		)
 	}
 	if (metadata.kind === "bash") throw new Error("Bash tasks only have run 1")
@@ -691,11 +698,19 @@ export async function readRetainedOutput(paths: TaskStoragePaths, options: Retai
 }
 
 /** Formats an immutable run result before a later run can replace its reply. */
-export function retainedOutputSnapshot(paths: TaskStoragePaths, metadata: TaskMetadata, timedOut = false): RetainedOutputRead {
+export function retainedOutputSnapshot(
+	paths: TaskStoragePaths,
+	metadata: TaskMetadata,
+	timedOut = false,
+	maximumLines = RETAINED_OUTPUT_MAX_LINES
+): RetainedOutputRead {
 	const fullText = metadata.latestReply?.text ?? ""
 	const lines = splitCompleteLines(fullText)
-	const text = truncateUtf8(lines.slice(0, RETAINED_OUTPUT_MAX_LINES).join("\n"), RETAINED_OUTPUT_MAX_BYTES)
-	const snapshotTruncated = lines.length > RETAINED_OUTPUT_MAX_LINES || Buffer.byteLength(fullText) > RETAINED_OUTPUT_MAX_BYTES
+	const text =
+		metadata.kind === "bash"
+			? truncateUtf8Tail(lines.slice(-maximumLines).join("\n"), RETAINED_OUTPUT_MAX_BYTES)
+			: truncateUtf8(lines.slice(0, maximumLines).join("\n"), RETAINED_OUTPUT_MAX_BYTES)
+	const snapshotTruncated = lines.length > maximumLines || Buffer.byteLength(fullText) > RETAINED_OUTPUT_MAX_BYTES
 	const truncated = snapshotTruncated || (metadata.kind === "bash" && metadata.latestReply?.truncated === true)
 	return {
 		run: metadata.activeRun?.sequence ?? metadata.lastSettledRun ?? (metadata.lastRunSequence === 1 ? 1 : null),
@@ -961,6 +976,14 @@ function truncateUtf8(content: string, maximumBytes: number): string {
 	let end = maximumBytes - 3
 	while (end > 0 && isUtf8Continuation(bytes[end])) end--
 	return `${bytes.subarray(0, end).toString("utf8")}...`
+}
+
+export function truncateUtf8Tail(content: string, maximumBytes: number): string {
+	const bytes = Buffer.from(content)
+	if (bytes.length <= maximumBytes) return content
+	let start = bytes.length - maximumBytes + 3
+	while (isUtf8Continuation(bytes[start])) start++
+	return `...${bytes.subarray(start).toString("utf8")}`
 }
 
 async function requireTaskMetadata(paths: TaskStoragePaths): Promise<TaskMetadata> {

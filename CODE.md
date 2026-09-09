@@ -79,6 +79,8 @@ alias names. Aliases resolve at creation, not during Definition discovery.
 
 `agent_roster` returns effective definitions, diagnostics, and model choices as
 compact YAML-like model output. Full structured details remain available to Pi.
+It also reports process-wide held/max agent and Bash permits, explicitly
+distinguishing that shared capacity from exact-parent task listings.
 
 Task state is stored under `.pi/lovely-agents/<parent-session-id>/<task-ref>/`.
 Task directories are reserved atomically with collision-checked `a_`/`b_` references.
@@ -149,7 +151,8 @@ lines/50 KiB with a full-history reference on truncation. Optional timed reads
 wait for the selected/observed run to end or suspend, ignoring partial output, activity,
 and scheduling changes. Timeout returns the latest snapshot without stopping
 work; a newer Follow-up cannot extend the wait or replace its result.
-Queued selected Follow-ups can also be awaited. Bash has only run 1.
+Queued selected Follow-ups can also be awaited. Bash has only run 1 and accepts
+optional `lines` for the last N output lines, retaining status and the log path.
 Idle, interrupted, and
 suspended tasks return immediately. Lists and snapshots expose process-wide held/max execution
 permits and queued reasons: `provider-limit`, `capacity`, or transitional
@@ -164,7 +167,8 @@ tasks by state, combine model/thinking, show only relative creation/update
 times, omit empty descendant summaries, and expose one task directory. Output
 reads render the latest reply, run status/outcome, and streaming flag.
 Input acknowledgements use one line with the accepted/targeted run index.
-Agent creation omits redundant task inventory. Full artifact
+Steer says queued, not delivered; conversion to Follow-up includes the reason
+captured at acceptance. Agent creation omits redundant task inventory. Full artifact
 paths and exact metadata remain in tool `details`. Collapsed agent calls use one
 row: Definition, `label=`, quoted `prompt=`, then `-> task ID`. Rendering reserves
 the ID suffix before truncating the preview to the available terminal columns;
@@ -245,7 +249,8 @@ discarded task's completion outbox.
 Notification previews come from the run's latest reply, not transcript tails:
 inputs and older replies never enter the preview. History/session paths link
 to the full records. Previews are explicitly labelled and include the public
-run index and exact `task_output` invocation. Previews keep the first 2 KiB. Existing
+run index and exact `task_output` invocation. Bash previews keep the last 2 KiB,
+UTF-8-safe with leading truncation; agents keep the first 2 KiB. Existing
 completion notices still deliver and acknowledge after discard because paths
 remain stable. Reading a result does not acknowledge notification delivery.
 
@@ -337,7 +342,12 @@ duplicated Definition body). Missing captures produce a separate notification,
 never substituted content or reconstruction from today's context files.
 Static text views wrap and scroll with arrows, PgUp/PgDn, and Home/End.
 Task views also provide event-driven live output, Follow-up/Steer entry, stop,
-and discard. Foreground UI inputs use an Esc-cancellable loader, kept open until
+and discard. Shared live output uses a bounded wrapped viewport with arrows,
+PgUp/PgDn, Home/End, and a position indicator. Bash starts at the bottom and
+follows updates there; upward navigation pauses following, End resumes it.
+The fixed Bash header shows exit code/signal without reducing the output viewport.
+Agent output starts at the top. Navigation covers the retained snapshot only.
+Foreground UI inputs use an Esc-cancellable loader, kept open until
 owned work has stopped. Cancelled inputs do not show an acceptance notice.
 Bash actions expose stdin/EOF and retained command/output details, not agent
 prompt or model controls.
@@ -347,9 +357,11 @@ editor focuses that same panel, exposing all direct tasks and diagnostics in a
 five-row scrolling list. `/lovely-agents` → Tasks hands off to the panel rather
 than opening another selector. Task rows use the full available width for labels,
 model/status, and prompt previews, avoiding SelectList's fixed primary column.
-UI rows sort by creation time, newest first, with task ID breaking ties—not
-status or last activity. Selection follows task identity across updates.
-The focused list has no heading; capacity stays in the footer and inspection.
+UI rows group Agents then Bash with nonselectable group headings. Within each
+group, running/suspended/queued precede interrupted/idle; creation time is newest
+first within a status, with task ID breaking ties. Selection follows task identity
+across updates. The window shows up to five task rows plus group headings;
+capacity stays in the footer and inspection.
 Enter opens actions; Esc or Up past the first row returns to the editor, and
 other input passes through unchanged. Action/output views hide the panel until
 they close. The editor wrapper preserves and restores the prior factory.

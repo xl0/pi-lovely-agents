@@ -327,6 +327,30 @@ describe("latest reply snapshots", () => {
 			expect(JSON.parse(await readFile(paths.metadata, "utf8")).latestReply.text).toBe("Retained answer")
 		})
 	})
+
+	test("short Bash reads keep the newest lines, UTF-8, status and the full log path", async () => {
+		await withTaskStorage(
+			"running",
+			async paths => {
+				await writeLatestReply(paths, runId, "old\nmiddle\nfinal 🙂\n", true)
+				const short = await readRetainedOutput(paths, { lines: 1 })
+				expect(short).toMatchObject({ run: 1, truncated: true, streaming: true, state: "running" })
+				expect(short.text).toStartWith("final 🙂")
+				expect(short.text).not.toContain("middle")
+				expect(short.text).toContain("output.log")
+				await writeLatestReply(paths, runId, `${"🙂".repeat(20_000)}END`, true)
+				const longLine = await readRetainedOutput(paths, { lines: 1 })
+				expect(longLine.text).toContain("END")
+				expect(longLine.text).not.toContain("�")
+				await expect(readRetainedOutput(paths, { lines: 0 })).rejects.toThrow("lines")
+			},
+			"bash"
+		)
+		await withTaskStorage("running", async paths => {
+			await expect(readRetainedOutput(paths, { lines: 2 })).rejects.toThrow("Bash")
+			await expect(readRetainedOutput(paths, { run: 1.5 })).rejects.toThrow("run")
+		})
+	})
 })
 
 async function withTaskStorage(

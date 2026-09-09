@@ -12,7 +12,8 @@ import {
 	TASK_REFERENCE_PATTERN,
 	type TaskMetadata,
 	type TaskStoragePaths,
-	taskStoragePaths
+	taskStoragePaths,
+	truncateUtf8Tail
 } from "./state.js"
 import { readTaskDiscardMarker } from "./storage.js"
 import { loadTaskList } from "./tools.js"
@@ -47,7 +48,10 @@ export async function prepareTaskNotification(
 	type: NotificationType,
 	outcome?: TaskMetadata["latestOutcome"]
 ): Promise<TaskNotification> {
-	const output = truncateUtf8(metadata.latestReply?.text ?? "", NOTIFICATION_OUTPUT_PREVIEW_BYTES)
+	const output =
+		metadata.kind === "bash"
+			? truncateUtf8Tail(metadata.latestReply?.text ?? "", NOTIFICATION_OUTPUT_PREVIEW_BYTES)
+			: truncateUtf8(metadata.latestReply?.text ?? "", NOTIFICATION_OUTPUT_PREVIEW_BYTES)
 	const taskList = await loadTaskList(paths.workspace, metadata.parentSessionId).catch(() => undefined)
 	const descendants = taskList?.details.tasks.find(task => task.id === metadata.taskRef)?.descendants
 	const descendantText = descendants && descendants.total > 0 ? `\nDescendants: ${JSON.stringify(descendants)}` : ""

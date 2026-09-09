@@ -68,6 +68,8 @@ export type AgentRosterResult = {
 	models: RosterModel[]
 	aliases: Array<{ name: ModelAliasChoice["name"]; model: string; thinking: ModelAliasChoice["thinkingLevel"]; description: string }>
 	depth: { current: number; maximum: number }
+	capacity: { active: number; limit: number }
+	bashCapacity: { active: number; limit: number }
 }
 
 export type DescendantSummary = {
@@ -138,7 +140,7 @@ export function registerRosterTool(
 		name: "agent_roster",
 		label: "Agent Roster",
 		description:
-			"List available Lovely Agent definitions, configured models and model/thinking aliases, diagnostics, and delegation depth.",
+			"List available Lovely Agent definitions, configured models and aliases, diagnostics, delegation depth, and process-wide held/max execution permits.",
 		promptSnippet: "List available Lovely Agent definitions, model choices, and aliases",
 		promptGuidelines: [
 			"Call agent_roster before delegating work and after editing Agent Definition files.",
@@ -219,7 +221,9 @@ export function buildRosterToolResult(options: {
 			thinking: alias.thinkingLevel,
 			description: MODEL_ALIASES[alias.name]
 		})),
-		depth: { current: options.currentDepth, maximum: options.maximumDepth }
+		depth: { current: options.currentDepth, maximum: options.maximumDepth },
+		capacity: { active: getAgentCoordinator().activeCount, limit: getAgentCoordinator().maxConcurrency },
+		bashCapacity: { active: getBashCoordinator().activeCount, limit: getBashCoordinator().maxConcurrency }
 	}
 	const lines: string[] = []
 	if (result.definitions.length === 0) {
@@ -263,6 +267,9 @@ export function buildRosterToolResult(options: {
 		lines.push(`  - ${yamlScalar(model.id)}`)
 	}
 	lines.push(`depth: ${result.depth.current}/${result.depth.maximum}`)
+	lines.push(
+		`capacity: ${result.capacity.active}/${result.capacity.limit} agent, ${result.bashCapacity.active}/${result.bashCapacity.limit} Bash (process-wide held/max permits; task_list shows only this parent's tasks)`
+	)
 
 	return { content: [{ type: "text", text: lines.join("\n") }], details: result }
 }
@@ -294,7 +301,7 @@ export function registerTaskTools(
 		name: "task_output",
 		label: "Task Output",
 		description:
-			"Read a task's current reply or select a 1-based run, including completed and discarded tasks. Snapshots are capped at 2,000 lines/50 KiB; full agent replies are in history.md and full Bash output in output.log.",
+			"Read a task's current reply or select a 1-based run, including completed and discarded tasks. Bash lines selects the last N output lines. Snapshots are capped at 2,000 lines/50 KiB; full agent replies are in history.md and full Bash output in output.log.",
 		promptSnippet: "Read a task's latest reply, progress, and current run status",
 		promptGuidelines: [
 			"task_output returns one run's snapshot, not history. With waitMs, wait for the selected/current run to end or suspend, or for the timeout; later Follow-ups do not replace its result. Omit waitMs for an immediate snapshot. Prefer completion notices while doing other work, or one meaningful bounded wait when blocked on a result—not repeated short polling."
@@ -303,6 +310,9 @@ export function registerTaskTools(
 			{
 				id: Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" }),
 				run: Type.Optional(Type.Integer({ minimum: 1, description: "1-based run index; omit for the current run" })),
+				lines: Type.Optional(
+					Type.Integer({ minimum: 1, maximum: 2_000, description: "Bash only: last N output lines (status and log path are kept)" })
+				),
 				waitMs: Type.Optional(
 					Type.Integer({ minimum: 0, maximum: 600_000, description: "Maximum wait for the current run to end or suspend" })
 				)
@@ -310,7 +320,9 @@ export function registerTaskTools(
 			{ additionalProperties: false }
 		),
 		renderCall(args, theme) {
-			const range = [args.run ? `run=${args.run}` : "", args.waitMs ? `wait=${args.waitMs}ms` : ""].filter(Boolean).join(" ")
+			const range = [args.run ? `run=${args.run}` : "", args.lines ? `lines=${args.lines}` : "", args.waitMs ? `wait=${args.waitMs}ms` : ""]
+				.filter(Boolean)
+				.join(" ")
 			return new Text(
 				`${theme.fg("toolTitle", theme.bold("task_output"))}${args.id ? ` ${theme.fg("muted", args.id)}` : ""}${range ? ` ${theme.fg("dim", range)}` : ""}`,
 				0,
@@ -332,6 +344,7 @@ export function registerTaskTools(
 			const readOutput = () =>
 				readRetainedOutput(paths, {
 					...(params.run !== undefined ? { run: params.run } : {}),
+					...(params.lines !== undefined ? { lines: params.lines } : {}),
 					...(params.waitMs !== undefined ? { waitMs: params.waitMs } : {}),
 					...(signal ? { signal } : {})
 				})

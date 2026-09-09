@@ -83,12 +83,16 @@ agents get the normal tools and extensions; a role description is not a sandbox.
 
 Open **`/lovely-agents` → Tasks**, or press **Down with an empty editor** to focus
 the task list below it.
+Agents and Bash appear in separate groups, active tasks first within each group.
 
 - **Arrow keys** select a task; **Enter** opens its actions.
-- **Live output** shows what it has produced so far.
+- **Live output** scrolls with arrows, PgUp/PgDn, Home/End. Bash opens at the
+  bottom and follows new output; scrolling up pauses following, End resumes it.
+  Its fixed header includes the exit code and termination signal.
 - **Inputs / history** shows earlier requests and results.
 - **Follow-up** adds another request after the agent's current work.
-- **Steer** redirects work already in progress.
+- **Steer** queues input for a live streaming run. Without a live target it becomes
+  a Follow-up; foreground busy tasks reject it. Queued input can be lost on stop.
 - **Stop** cancels the work but keeps its files. An agent can take a new request later.
 - **Discard** stops it and removes it from active work. Files stay in place and
   results remain readable, but it cannot receive new input.
@@ -111,6 +115,8 @@ Ask Pi to run a long command in the background:
 
 The command appears alongside agent tasks. You can inspect its output or stop
 it from the same menu. Normal, short Bash commands still work as before.
+Detached completion automatically notifies Pi and wakes an idle parent.
+Synchronous completion and explicit stops do not send a completion notice.
 
 For a command that needs input, **Write stdin** sends exactly what you type;
 include a newline if the command expects one. **Close stdin** sends EOF: “there
@@ -132,6 +138,8 @@ work running. Turning either switch off does not stop tasks already accepted.
 Agent work and Bash jobs have separate concurrency limits, both initially 4.
 Extra work queues until a slot is free. Pi initially waits up to 30 seconds for
 an agent result before leaving it in the background.
+These limits are shared process-wide, not per conversation. The roster reports
+held/max execution permits; task lists show only the current parent's tasks.
 
 Under **Models**, choose additional models Pi may use for agents. You can also
 configure these optional shortcuts:
@@ -155,7 +163,7 @@ These are snapshots, not pages to assemble by repeatedly reading. Full agent
 replies are in `history.md`; full Bash output is in `output.log`.
 Each agent assignment has a 1-based run index, shown in tool results and notices.
 `task_output(id, run: 2)` retrieves that run even after later Follow-ups start.
-Omit `run` for the current snapshot.
+Omit `run` for the current snapshot; `lines: 20` requests a shorter Bash tail.
 Older runs completed before this feature may require reading `history.md`.
 
 If Pi asks to wait for a result, the wait ends when the run finishes, pauses on
