@@ -29,7 +29,6 @@ import {
 	type AgentTaskMetadata,
 	acquireParentLease,
 	appendHistoryLog,
-	archivedTaskStoragePaths,
 	displayWorkspacePath,
 	ensureParentStorage,
 	initializeRetainedLogs,
@@ -82,6 +81,7 @@ export function recoverProviderTuple(tuple: ModelTuple): number {
 
 export type AgentCreationResult = {
 	id: string
+	run: number
 	label: string
 	definition: string
 	state: TaskMetadata["state"]
@@ -98,6 +98,7 @@ export type AgentCreationResult = {
 
 export type TaskInputResult = {
 	id: string
+	run: number
 	requestedDelivery: "followup" | "steer" | undefined
 	effectiveDelivery: "followup" | "steer" | "stdin"
 	queuePosition: number | null
@@ -304,7 +305,7 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 				const detached = waitMs === 0 ? await wait() : await coordinator.withLentPermit(wait, signal)
 				const loaded = await readTaskMetadata(paths)
 				if (loaded.status !== "ok") throw new Error(`Could not read accepted task ${paths.taskRef}`)
-				const output = await readRetainedOutput(paths)
+				const output = await readRetainedOutput(paths, { run: 1 })
 				const tasks = (await loadTaskList(ctx.cwd, parentSessionId)).details
 				return buildAgentCreationToolResult(loaded.metadata, detached, output, tasks)
 			} finally {
@@ -383,12 +384,12 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 						type: "text",
 						text:
 							result.effectiveDelivery === "stdin"
-								? `${result.id}: stdin delivered${params.eof ? " (EOF)" : ""}`
+								? `${result.id} run=${result.run}: stdin delivered${params.eof ? " (EOF)" : ""}`
 								: result.effectiveDelivery === "steer"
-									? `${result.id}: steer delivered (${result.state}; ${result.queuedFollowUps} Follow-ups queued)`
+									? `${result.id} run=${result.run}: steer delivered (${result.state}; ${result.queuedFollowUps} Follow-ups queued)`
 									: result.output
-										? `${result.id}: followup ${result.latestOutcome}\n${result.output.text}`
-										: `${result.id}: followup accepted (position ${result.queuePosition}; ${result.state}; ${result.queuedFollowUps} queued)`
+										? `${result.id} run=${result.run}: followup ${result.latestOutcome}\n${result.output.text}`
+										: `${result.id} run=${result.run}: followup accepted (position ${result.queuePosition}; ${result.state}; ${result.queuedFollowUps} queued)`
 					}
 				],
 				details: result
@@ -403,12 +404,12 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 			description:
 				action === "stop"
 					? "Stop active or queued work for an owned Agent or Bash task while preserving its files."
-					: "Stop and permanently discard an owned task subtree, archiving its files. Unsupported metadata versions can also be archived.",
+					: "Stop and permanently discard an owned task subtree from active work. Files stay at their original paths for read-only inspection. Unsupported metadata versions can also be discarded.",
 			promptSnippet: action === "stop" ? "Stop work for a durable task" : "Discard a durable task",
 			promptGuidelines:
 				action === "discard"
 					? [
-							"After consuming an agent's results, use task_discard if no Follow-up is expected. Keep reusable specialists; do not discard agents whose results are still needed."
+							"Use task_discard after dependent work is integrated and no Follow-up is expected. Keep reusable specialists and tasks whose results are still needed; idle agents already unload."
 						]
 					: [],
 			parameters: Type.Object(
@@ -426,7 +427,7 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 							type: "text",
 							text:
 								action === "discard"
-									? `${details.id}: discarded (files archived at ${details.archiveDirectory})`
+									? `${details.id}: discarded (files retained at ${details.taskDirectory})`
 									: `${details.id}: stop complete (${details.state}; outcome ${details.latestOutcome ?? "none"}; ${details.queuedFollowUps} queued)`
 						}
 					],
@@ -472,6 +473,7 @@ export async function sendTaskInput(
 		if (current.status !== "ok") throw new Error(`Could not read accepted task ${id}`)
 		return {
 			id,
+			run: accepted.run,
 			requestedDelivery,
 			effectiveDelivery: accepted.delivery,
 			queuePosition: accepted.queuePosition,
@@ -500,6 +502,7 @@ export async function sendTaskInput(
 	if (current.status !== "ok") throw new Error(`Could not read accepted task ${id}`)
 	return {
 		id,
+		run: accepted.run,
 		requestedDelivery: delivery,
 		effectiveDelivery: accepted.delivery,
 		queuePosition: accepted.queuePosition,
@@ -515,15 +518,14 @@ export async function controlTaskLifecycle(ctx: ExtensionContext, id: string, ac
 	const paths = taskStoragePaths(lease.paths, id)
 	if (action === "discard") {
 		await discardTask(paths)
-		const archived = archivedTaskStoragePaths(paths)
 		return {
 			id,
 			action,
-			state: "archived",
+			state: "discarded",
 			latestOutcome: null,
 			discarded: true,
 			queuedFollowUps: 0,
-			archiveDirectory: displayWorkspacePath(ctx.cwd, archived.taskDirectory)
+			taskDirectory: displayWorkspacePath(ctx.cwd, paths.taskDirectory)
 		}
 	}
 	let loaded = await readTaskMetadata(paths)
@@ -542,7 +544,7 @@ export async function controlTaskLifecycle(ctx: ExtensionContext, id: string, ac
 		latestOutcome: metadata.latestOutcome,
 		discarded: metadata.discardedAt !== null,
 		queuedFollowUps: metadata.queuedFollowUps.length,
-		archiveDirectory: undefined,
+		taskDirectory: displayWorkspacePath(ctx.cwd, paths.taskDirectory),
 		paths: retainedPaths(paths)
 	}
 }
@@ -716,7 +718,12 @@ class AgentRuntime implements ResidentAgent {
 						if (index >= 0) this.#pendingSteers.splice(index, 1)
 						throw error
 					}
-					result = { delivery: "steer", queuePosition: null, queuedFollowUps: metadata.queuedFollowUps.length }
+					result = {
+						run: metadata.activeRun.sequence,
+						delivery: "steer",
+						queuePosition: null,
+						queuedFollowUps: metadata.queuedFollowUps.length
+					}
 					return metadata
 				}
 				if (
@@ -733,7 +740,12 @@ class AgentRuntime implements ResidentAgent {
 				const runId = createRunId()
 				const acceptanceOrder = getAgentCoordinator().nextAcceptanceOrder()
 				const queuePosition = metadata.activeRun ? metadata.queuedFollowUps.length + 1 : 1
-				result = { delivery: "followup", queuePosition, queuedFollowUps: metadata.queuedFollowUps.length + 1 }
+				result = {
+					run: sequence,
+					delivery: "followup",
+					queuePosition,
+					queuedFollowUps: metadata.queuedFollowUps.length + 1
+				}
 				acceptedRun = {
 					id: runId,
 					sequence,
@@ -1003,7 +1015,15 @@ class AgentRuntime implements ResidentAgent {
 			const activeRun = metadata.activeRun
 			if (activeRun?.id !== run.id) return clearFollowUps ? { ...metadata, queuedFollowUps: [], updatedAt: timestamp } : metadata
 			won = true
-			completed = { ...metadata, state: "idle", latestOutcome: outcome, activeRun: null, queuedFollowUps: [], updatedAt: timestamp }
+			completed = {
+				...metadata,
+				state: "idle",
+				latestOutcome: outcome,
+				lastSettledRun: run.sequence,
+				activeRun: null,
+				queuedFollowUps: [],
+				updatedAt: timestamp
+			}
 			if (
 				activeRun.background &&
 				(outcome === "succeeded" || outcome === "failed") &&
@@ -1285,10 +1305,11 @@ function buildAgentCreationToolResult(
 	if (metadata.kind !== "agent") throw new Error("Expected an Agent task")
 	const result: AgentCreationResult = {
 		id: metadata.taskRef,
+		run: 1,
 		label: metadata.label,
 		definition: metadata.definitionName,
-		state: metadata.state,
-		latestOutcome: metadata.latestOutcome,
+		state: output.state,
+		latestOutcome: output.latestOutcome,
 		model: `${metadata.model.provider}/${metadata.model.id}`,
 		thinking: metadata.thinking,
 		depth: metadata.depth,
@@ -1305,6 +1326,7 @@ function buildAgentCreationToolResult(
 				type: "text",
 				text: [
 					`task: ${result.id}`,
+					`run: ${result.run}`,
 					`state: ${result.state}`,
 					...(output.queueReason
 						? [`waiting: ${output.queueReason} (${output.capacity.active}/${output.capacity.limit} execution permits)`]

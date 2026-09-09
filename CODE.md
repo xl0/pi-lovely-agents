@@ -32,6 +32,9 @@ Background Bash shares the durable task controls without creating a Pi session.
 - `extensions/lovely-agents/tools.ts`: roster and task inspection tools
 - `extensions/lovely-agents/state.ts`: versioned task metadata, private paths,
   serialized atomic snapshots, parent leases, and retained logs
+- `extensions/lovely-agents/storage.ts`: rebuildable active links and
+  ownership-validated discard markers for unsupported metadata
+- `scripts/prune-tasks.ts`: explicit, dry-run-first pruning of discarded tasks
 - `tests/lovely-agents/`: extension tests and temp-workspace helpers
 - `skills/agent/SKILL.md`: packaged delegation guidance; prefer research,
   exploration, and isolated coding, with architecture/integration kept in the parent
@@ -79,6 +82,11 @@ compact YAML-like model output. Full structured details remain available to Pi.
 
 Task state is stored under `.pi/lovely-agents/<parent-session-id>/<task-ref>/`.
 Task directories are reserved atomically with collision-checked `a_`/`b_` references.
+Canonical paths never move on discard. Each parent's `active/` directory contains
+relative symlinks to non-discarded tasks, including idle specialists. Metadata,
+not link presence, controls membership. Initial acceptance and discard update
+the index; non-reload startup rebuilds it. Index failures warn rather than
+turning committed acceptance into a creation error and deleting accepted work.
 Metadata is strictly validated against its path and v3 schema before use.
 Writes are serialized per task and use a private same-directory temporary file,
 file fsync, rename, and directory fsync. Malformed and unsupported snapshots
@@ -93,7 +101,15 @@ explicit-vs-omitted tool policy, context exclusion, and scoped model identities.
 It also retains scheduler acceptance order and the latest assistant reply.
 Reply snapshots share the metadata mutation lane, so status and text are read
 atomically. Promoting a new run clears the old reply; run-ID checks fence late
-stream events. Reply and last-activity writes coalesce together so burst events
+stream events. Settlement writes each agent's final reply and outcome to a
+private `runs/<1-based-sequence>.json` before publishing terminal/promotion
+metadata. These files retain full reply text, not system prompts or tool payloads;
+reads remain bounded. Optional `lastSettledRun` distinguishes the settled reply
+from `lastRunSequence`, which includes accepted but not yet executed Follow-ups.
+Older completed runs are not reconstructed by parsing the human history;
+ambiguous old settled snapshots report an unknown run rather than treating the
+highest accepted Follow-up as the reply's identity.
+Reply and last-activity writes coalesce together so burst events
 cannot reorder their final action. Optional `lastActivity` records observed work,
 not bookkeeping timestamps: start, thinking, reply, or tool activity, without
 reasoning/tool payloads. Thinking and tool-update heartbeats are event-driven,
@@ -126,12 +142,15 @@ workspace-relative when possible.
 hides tombstones, isolates corrupt direct records, and sorts by state then
 recency. Direct rows include retained paths and bounded recursive descendant
 summaries without descendant Task References. All direct rows and diagnostics
-are returned at once. `task_output` rejects foreign/discarded tasks and returns
-only the latest assistant reply from the current run, bounded to 2,000
+are returned at once. `task_output` rejects foreign tasks but permits read-only
+inspection after discard. Optional `run` selects a 1-based run index; omission
+selects the current run. It returns that run's latest/final assistant reply, bounded to 2,000
 lines/50 KiB with a full-history reference on truncation. Optional timed reads
-wait for the observed run to end or suspend, ignoring partial output, activity,
+wait for the selected/observed run to end or suspend, ignoring partial output, activity,
 and scheduling changes. Timeout returns the latest snapshot without stopping
-work; a newer Follow-up does not extend the wait. Idle, interrupted, and
+work; a newer Follow-up cannot extend the wait or replace its result.
+Queued selected Follow-ups can also be awaited. Bash has only run 1.
+Idle, interrupted, and
 suspended tasks return immediately. Lists and snapshots expose process-wide held/max execution
 permits and queued reasons: `provider-limit`, `capacity`, or transitional
 `starting`. Counts reflect cooperative permits, not running-state counts;
@@ -144,8 +163,8 @@ Model-visible task rendering avoids repeating structured details. Lists group
 tasks by state, combine model/thinking, show only relative creation/update
 times, omit empty descendant summaries, and expose one task directory. Output
 reads render the latest reply, run status/outcome, and streaming flag.
-Input acknowledgements
-use one line, and agent creation omits redundant task inventory. Full artifact
+Input acknowledgements use one line with the accepted/targeted run index.
+Agent creation omits redundant task inventory. Full artifact
 paths and exact metadata remain in tool `details`. Collapsed agent calls use one
 row: Definition, `label=`, quoted `prompt=`, then `-> task ID`. Rendering reserves
 the ID suffix before truncating the preview to the available terminal columns;
@@ -193,7 +212,7 @@ metadata. Stdin/EOF writes serialize, respect backpressure, and log successful
 delivery without normalizing bytes. Cancelling a stdin wait cannot undo a
 submitted write; settlement drains its logging lane.
 Terminal settlement records exit status and detached notifications. Stop and
-archival wait for process/pipes/log cleanup; actual I/O failures are retained
+discard wait for process/pipes/log cleanup; actual I/O failures are retained
 when metadata remains writable. Cleanup failures stay reachable for retry.
 Live POSIX groups are killed on stop and normal process exit. SIGKILL/power
 loss or intentional `setsid` escapes require OS supervision; restart never
@@ -219,13 +238,16 @@ Steers and wake idle parents. Delivery is marked only after the parent's
 reconciles IDs in the transcript and resends only absent notices; semantic
 parent shutdown clears process-local in-flight suppression. Synchronous initial
 results and explicit stops do not notify.
-Confirmed manual discards send a parent-context notice after archival succeeds.
+Confirmed manual discards send a parent-context notice after discard succeeds.
 It uses Pi's normal Steer delivery, without starting an idle turn or using the
 discarded task's completion outbox.
 
 Notification previews come from the run's latest reply, not transcript tails:
 inputs and older replies never enter the preview. History/session paths link
-to the full records.
+to the full records. Previews are explicitly labelled and include the public
+run index and exact `task_output` invocation. Previews keep the first 2 KiB. Existing
+completion notices still deliver and acknowledge after discard because paths
+remain stable. Reading a result does not acknowledge notification delivery.
 
 Child sessions use Pi's SDK in-process and own the task's retained
 `session.jsonl`. Selection follows call, Definition, then parent precedence.
@@ -275,16 +297,22 @@ Follow-ups. Task-tree recursion follows child session IDs only for agents.
 `task_stop` aborts resident execution or cancels retained queued/suspended work,
 clears Follow-ups, recursively stops descendants, and preserves the task's
 session for later input. Completion and stop settle the active run by matching
-its durable ID, so the first transition wins. `task_discard` stops and archives
-the owned subtree under `.pi/lovely-agents/archive/<parent>/<task>/`, moving each
-whole task directory after descendant cleanup. Supported metadata is first
-tombstoned to fence concurrent input. Unsupported versions are decoded only for
-validated ownership identities; their metadata and logs move unchanged.
-Malformed identities, unsafe paths, and archive collisions fail explicitly.
-Concurrent discards share one operation; repeats succeed and archived IDs are
-never reused. Listing excludes the archive; later model I/O rejects it.
-The discard tool guideline asks agents to discard consumed, unneeded tasks
-while keeping specialists likely to receive Follow-ups. No automatic deletion.
+its durable ID, so the first transition wins. `task_discard` stops and tombstones
+the owned subtree in place and removes its active links. Unsupported versions
+are decoded only for validated ownership; a private `.discarded.json` marker
+preserves their unknown metadata unchanged. Malformed identities and unsafe
+paths fail explicitly. Concurrent discards share one operation; repeats succeed.
+Listing hides discarded tasks; input and restart remain prohibited while results
+stay readable. Guidance delays discard until dependent work is integrated.
+Old `archive/` contents remain untouched; no migration or automatic deletion.
+
+The standalone Bun pruner defaults to dry-run; `--apply` permanently removes
+eligible discarded trees, descendants first. It conservatively acquires all
+existing/referenced parent partitions and refuses live ownership conflicts.
+Unsettled work, pending notifications, unknown schemas, malformed/symlinked
+artifacts, ambiguous ownership, and retained descendants block removal.
+Absent links and stale execution state never authorize deletion. This is an
+offline maintenance script, not a model tool or automatic orphan collector.
 
 On quit/new/resume/fork, the outgoing runtime recursively stops resident and
 retained descendants before releasing exact-parent leases. Reload skips this
@@ -292,6 +320,9 @@ path, preserving process-global residents. Non-reload startup scans only the
 exact parent partition: stale active states become `interrupted`, queued
 Follow-ups clear, and one deterministic interruption notification is retained.
 Stable idle/interrupted records and malformed/orphaned files are never deleted.
+Failed tree cleanup retains acquired/borrowed partition leases for retry;
+shutdown releases its collected leases only after the whole tree stops.
+Discard likewise releases a descendant partition only after cleanup succeeds.
 
 `/lovely-agents` opens one selector for fresh Agent Definitions, durable tasks,
 and the scoped config editor. Fixture helpers remain for tests, not in the

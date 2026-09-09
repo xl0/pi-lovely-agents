@@ -90,7 +90,8 @@ the task list below it.
 - **Follow-up** adds another request after the agent's current work.
 - **Steer** redirects work already in progress.
 - **Stop** cancels the work but keeps its files. An agent can take a new request later.
-- **Discard** stops and archives it, removing it from the list. It does not delete the files.
+- **Discard** stops it and removes it from active work. Files stay in place and
+  results remain readable, but it cannot receive new input.
 - **Esc** returns to the editor.
 
 You can also ask Pi directly:
@@ -152,10 +153,16 @@ Long results aren't lost. Pi's output-reading tool returns at most **2,000 lines
 or 50 KiB** at a time, with a truncation notice and a file path when capped.
 These are snapshots, not pages to assemble by repeatedly reading. Full agent
 replies are in `history.md`; full Bash output is in `output.log`.
+Each agent assignment has a 1-based run index, shown in tool results and notices.
+`task_output(id, run: 2)` retrieves that run even after later Follow-ups start.
+Omit `run` for the current snapshot.
+Older runs completed before this feature may require reading `history.md`.
 
 If Pi asks to wait for a result, the wait ends when the run finishes, pauses on
 a provider limit, or reaches the requested timeout. A timeout returns the
 latest output—it does not stop the task.
+The wait stays attached to the selected run; a later Follow-up cannot replace
+its answer. Prefer completion notices or a meaningful wait over short polling.
 
 Tasks belong to the Pi conversation that started them. **`/reload` keeps work
 running; quitting or switching conversations stops it.** After a crash, lost
@@ -168,8 +175,24 @@ an error or was aborted, **`/continue`** resumes it and eligible paused agents.
 
 Task files live in `.pi/lovely-agents/` under your working directory and are
 ignored by Git. They include conversation history and command output, so treat
-them as potentially sensitive. Discarded tasks move to its `archive/` directory;
-there is no automatic deletion.
+them as potentially sensitive. Each task keeps its original
+`<parent-session>/<task-id>/` path. The parent's `active/` directory links to all
+non-discarded tasks, including idle specialists. It is a browsing index, rebuilt
+when that parent is reopened—not the authority for execution or deletion.
+Keep tasks until dependent work is integrated, then discard what is no longer
+needed. Existing old `archive/` contents are left untouched.
+
+There is no automatic deletion. From the package checkout/install directory:
+
+```bash
+bun scripts/prune-tasks.ts /path/to/workspace          # dry-run
+bun scripts/prune-tasks.ts /path/to/workspace --apply  # permanently delete eligible tasks
+```
+
+Pruning requires closed parent sessions and retains non-discarded tasks, pending
+notifications, unknown/corrupt records, and unsafe or still-needed descendants.
+Missing `active/` links never authorize deletion. Crash leftovers stay until
+their parent is reopened; abandoned sessions are not automatically collected.
 
 ## Development
 

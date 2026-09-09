@@ -25,6 +25,7 @@
 	"files": [
 		"extensions/",
 		"skills/",
+		"scripts/prune-tasks.ts",
 		"README.md",
 		"CHANGELOG.md",
 		"LICENSE"
@@ -35,6 +36,7 @@
 		"check": "bun run typecheck && bun run test && bun run biome:check",
 		"prepublishOnly": "bun run check",
 		"release": "bun run scripts/release.ts",
+		"prune": "bun scripts/prune-tasks.ts",
 		"lint": "biome lint .",
 		"format": "biome format --write .",
 		"format:check": "biome format .",

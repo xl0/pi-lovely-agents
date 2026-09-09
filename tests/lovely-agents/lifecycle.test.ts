@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { readdir, readFile, stat, writeFile } from "node:fs/promises"
+import { readdir, readFile, readlink, stat, writeFile } from "node:fs/promises"
+import { join } from "node:path"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
 import { discardTask, reconcileParentTasks, recoverOwnedTaskTree, stopOwnedTaskTree } from "../../extensions/lovely-agents/lifecycle.js"
 import {
-	archivedTaskStoragePaths,
+	acquireParentLease,
 	ensureParentStorage,
 	initializeRetainedLogs,
 	mutateTaskMetadata,
@@ -18,6 +19,71 @@ import {
 import { withTempWorkspace } from "./test-helpers.js"
 
 describe("task lifecycle recovery", () => {
+	test("failed stop/discard retains borrowed tree leases until retry succeeds", async () => {
+		for (const action of ["stop", "discard"] as const) {
+			await withTempWorkspace(async workspace => {
+				const owner = await createTask(workspace.cwd, "parent", "a_00000001", "child", "running")
+				const failing = await createTask(workspace.cwd, "child", "a_00000002", "grandchild", "running")
+				const sibling = await createTask(workspace.cwd, "child", "b_00000003", "", "running")
+				const leaf = await createTask(workspace.cwd, "grandchild", "b_00000004", "", "running")
+				const ids = ["parent", "child", "grandchild"]
+				const leases = await Promise.all(ids.map(id => acquireParentLease(workspace.cwd, id)))
+				const originals = await Promise.all(leases.map(lease => readFile(lease.paths.lease, "utf8")))
+				const unbind = getAgentCoordinator().bindResident(failing.taskDirectory, {
+					stop() {
+						throw new Error("cleanup failed")
+					},
+					dispose() {}
+				})
+				const run = () => (action === "stop" ? stopOwnedTaskTree(workspace.cwd, "parent") : discardTask(owner))
+				try {
+					await expect(run()).rejects.toThrow()
+					expect(getAgentCoordinator().getResident(failing.taskDirectory)).toBeDefined()
+					expect(await Promise.all(leases.map(lease => readFile(lease.paths.lease, "utf8")))).toEqual(originals)
+					if (action === "stop") {
+						for (const paths of [sibling, leaf]) {
+							expect(await readTaskMetadata(paths)).toMatchObject({ metadata: { state: "idle", latestOutcome: "stopped" } })
+						}
+					}
+					const probe = Bun.spawn(
+						[
+							"bun",
+							"-e",
+							`
+						import { acquireParentLease, releaseParentLease } from ${JSON.stringify(join(import.meta.dir, "../../extensions/lovely-agents/state.ts"))};
+						for (const id of ["child", "grandchild"]) {
+							try {
+								const lease = await acquireParentLease(${JSON.stringify(workspace.cwd)}, id);
+								await releaseParentLease(lease);
+								throw new Error("Unexpectedly acquired live partition " + id);
+							} catch (error) {
+								if (error.code !== "LOVELY_AGENTS_PARENT_LEASE_CONFLICT") throw error;
+								console.log(id + ": conflict");
+							}
+						}
+					`
+						],
+						{ stdout: "pipe", stderr: "pipe" }
+					)
+					expect(await probe.exited).toBe(0)
+					expect(await new Response(probe.stdout).text()).toBe("child: conflict\ngrandchild: conflict\n")
+					unbind()
+					await run()
+					for (const lease of leases) {
+						if (action === "discard" && lease.paths.parentSessionId === "parent") {
+							expect(JSON.parse(await readFile(lease.paths.lease, "utf8")).token).toBe(lease.token)
+						} else {
+							await expect(stat(lease.paths.lease)).rejects.toMatchObject({ code: "ENOENT" })
+						}
+					}
+				} finally {
+					unbind()
+					for (const id of ids) await releaseParentLeaseFor(workspace.cwd, id)
+				}
+			})
+		}
+	})
+
 	test("interrupts stale Bash once without reviving processes, and skips resident Bash across reload", async () => {
 		await withTempWorkspace(async workspace => {
 			const stale = await createTask(workspace.cwd, "parent", "b_00000001", "", "running")
@@ -57,7 +123,7 @@ describe("task lifecycle recovery", () => {
 		})
 	})
 
-	test("stops mixed descendants through the main resident registry and archives Bash output without session files", async () => {
+	test("stops mixed descendants and discards in place, retaining Bash output without session files", async () => {
 		await withTempWorkspace(async workspace => {
 			const agent = await createTask(workspace.cwd, "parent", "a_00000001", "child", "running")
 			const bash = await createTask(workspace.cwd, "child", "b_00000001", "", "running")
@@ -87,10 +153,14 @@ describe("task lifecycle recovery", () => {
 			}
 			await discardTask(agent)
 			await discardTask(agent)
-			const archived = archivedTaskStoragePaths(bash)
-			expect(await readFile(archived.output, "utf8")).toBe("retained output")
-			expect((await readdir(archived.taskDirectory)).sort()).toEqual(["history.md", "metadata.json", "output.log"])
-			expect(await readTaskMetadata(bash)).toMatchObject({ status: "invalid" })
+			expect(await readFile(bash.output, "utf8")).toBe("retained output")
+			expect((await readdir(bash.taskDirectory)).sort()).toEqual(["history.md", "metadata.json", "output.log"])
+			for (const paths of [agent, bash]) {
+				expect(await readTaskMetadata(paths)).toMatchObject({ status: "ok", metadata: { discardedAt: expect.any(Number) } })
+				await expect(readlink(join(paths.parentDirectory, "active", paths.taskRef))).rejects.toMatchObject({ code: "ENOENT" })
+			}
+			expect(await reconcileParentTasks(workspace.cwd, "parent")).toEqual({ interrupted: 0, diagnostics: [] })
+			await releaseParentLeaseFor(workspace.cwd, "parent")
 		})
 	})
 

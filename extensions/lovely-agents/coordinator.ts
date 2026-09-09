@@ -39,6 +39,7 @@ export type ResidentAgent = {
 export type ResidentInputOptions = { background?: boolean; signal?: AbortSignal; eof?: boolean }
 
 export type ResidentInputResult = {
+	run: number
 	delivery: "followup" | "steer" | "stdin"
 	queuePosition: number | null
 	queuedFollowUps: number

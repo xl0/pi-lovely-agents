@@ -27,6 +27,7 @@ import {
 	taskSchedulingStatus,
 	taskStoragePaths
 } from "./state.js"
+import { readTaskDiscardMarker } from "./storage.js"
 
 const TASK_STATE_ORDER: Record<TaskMetadata["state"], number> = {
 	running: 0,
@@ -293,14 +294,15 @@ export function registerTaskTools(
 		name: "task_output",
 		label: "Task Output",
 		description:
-			"Read a task's latest reply or Bash output tail, run status, last activity, queue reason, and its execution capacity. Snapshots are capped at 2,000 lines/50 KiB; full agent replies are in history.md and full Bash output in output.log.",
+			"Read a task's current reply or select a 1-based run, including completed and discarded tasks. Snapshots are capped at 2,000 lines/50 KiB; full agent replies are in history.md and full Bash output in output.log.",
 		promptSnippet: "Read a task's latest reply, progress, and current run status",
 		promptGuidelines: [
-			"task_output returns a snapshot, not history. With waitMs, wait for the current run to end or suspend, or for the timeout; activity and partial output do not end the wait. Omit waitMs for an immediate snapshot."
+			"task_output returns one run's snapshot, not history. With waitMs, wait for the selected/current run to end or suspend, or for the timeout; later Follow-ups do not replace its result. Omit waitMs for an immediate snapshot. Prefer completion notices while doing other work, or one meaningful bounded wait when blocked on a result—not repeated short polling."
 		],
 		parameters: Type.Object(
 			{
 				id: Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" }),
+				run: Type.Optional(Type.Integer({ minimum: 1, description: "1-based run index; omit for the current run" })),
 				waitMs: Type.Optional(
 					Type.Integer({ minimum: 0, maximum: 600_000, description: "Maximum wait for the current run to end or suspend" })
 				)
@@ -308,7 +310,7 @@ export function registerTaskTools(
 			{ additionalProperties: false }
 		),
 		renderCall(args, theme) {
-			const range = args.waitMs ? `wait=${args.waitMs}ms` : ""
+			const range = [args.run ? `run=${args.run}` : "", args.waitMs ? `wait=${args.waitMs}ms` : ""].filter(Boolean).join(" ")
 			return new Text(
 				`${theme.fg("toolTitle", theme.bold("task_output"))}${args.id ? ` ${theme.fg("muted", args.id)}` : ""}${range ? ` ${theme.fg("dim", range)}` : ""}`,
 				0,
@@ -327,10 +329,9 @@ export function registerTaskTools(
 			if (loaded.status === "invalid") {
 				throw new Error(`${loaded.diagnostic.message}: ${displayWorkspacePath(ctx.cwd, loaded.diagnostic.path)}`)
 			}
-			if (loaded.metadata.discardedAt !== null) throw new Error(`Task ${params.id} has been discarded`)
-
 			const readOutput = () =>
 				readRetainedOutput(paths, {
+					...(params.run !== undefined ? { run: params.run } : {}),
 					...(params.waitMs !== undefined ? { waitMs: params.waitMs } : {}),
 					...(signal ? { signal } : {})
 				})
@@ -384,7 +385,7 @@ export function buildTaskOutputToolResult(
 } {
 	const result: TaskOutputResult = { id, ...output }
 	const lines = [
-		`task_output state=${result.state} outcome=${result.latestOutcome ?? "none"} streaming=${result.streaming} queued=${result.queuedFollowUps}`,
+		`task_output run=${result.run ?? "unknown"} state=${result.state} outcome=${result.latestOutcome ?? "none"} streaming=${result.streaming} queued=${result.queuedFollowUps}`,
 		`capacity=${result.capacity.active}/${result.capacity.limit} execution permits${result.queueReason ? ` waiting=${result.queueReason}` : ""}`,
 		...(result.exitCode !== undefined ? [`exit_code=${result.exitCode ?? "unknown"} signal=${result.signal ?? "none"}`] : []),
 		...(result.lastActivity ? [`last_activity: ${result.lastActivity.action} (${relativeTime(result.lastActivity.at, Date.now())})`] : []),
@@ -427,6 +428,17 @@ async function scanDirectTasks(
 			continue
 		}
 		if (loaded.status === "invalid") {
+			try {
+				if (await readTaskDiscardMarker(paths)) continue
+			} catch (error) {
+				diagnostics.push({
+					code: "invalid-discard-marker",
+					message: errorMessage(error),
+					path: displayWorkspacePath(cwd, paths.taskDirectory),
+					id: entry.name
+				})
+				continue
+			}
 			diagnostics.push(metadataTaskDiagnostic(cwd, loaded.diagnostic, entry.name))
 			continue
 		}
