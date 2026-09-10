@@ -81,6 +81,16 @@ test("task rows use the full width for labels and prompt previews", async () => 
 		expect(h.lines(width).join("\n")).not.toContain("�")
 	}
 	expect(h.lines(80).join("\n")).toContain("System prompt inspection")
+	h.result.tasks = h.result.tasks.map(task => ({ ...task, progress: "Root cause found; testing 🙂" }))
+	await h.panel.refresh()
+	expect(h.lines(240).join("\n")).toContain("Root cause found; testing 🙂")
+	expect(h.lines(240).join("\n")).not.toContain("Inspect the stored system prompt.")
+	h.panel.handleInput(esc, true)
+	expect(h.lines(240).join("\n")).toContain("Root cause found; testing 🙂")
+	expect(h.lines(240).join("\n")).not.toContain("Inspect the stored system prompt.")
+	for (const task of h.result.tasks) delete task.progress
+	await h.panel.refresh()
+	expect(h.lines(240).join("\n")).toContain("Inspect the stored system prompt.")
 })
 
 test("passive and focused rows group agents then Bash and sort active statuses before idle", async () => {

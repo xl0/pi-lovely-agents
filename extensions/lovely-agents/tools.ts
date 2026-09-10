@@ -85,6 +85,8 @@ export type TaskListRow = {
 	label: string
 	/** Human-only bounded run input; omitted from ordinary tool loads. */
 	inputPreview?: string
+	/** Child-authored progress for the current/latest run; available to humans and models. */
+	progress?: string
 	definition?: string
 	state: TaskMetadata["state"]
 	latestOutcome: TaskMetadata["latestOutcome"]
@@ -401,6 +403,7 @@ export function buildTaskOutputToolResult(
 		`task_output run=${result.run ?? "unknown"} state=${result.state} outcome=${result.latestOutcome ?? "none"} streaming=${result.streaming} queued=${result.queuedFollowUps}`,
 		`capacity=${result.capacity.active}/${result.capacity.limit} execution permits${result.queueReason ? ` waiting=${result.queueReason}` : ""}`,
 		...(result.exitCode !== undefined ? [`exit_code=${result.exitCode ?? "unknown"} signal=${result.signal ?? "none"}`] : []),
+		...(result.progress ? [`progress: ${JSON.stringify(result.progress)}`] : []),
 		...(result.lastActivity ? [`last_activity: ${result.lastActivity.action} (${relativeTime(result.lastActivity.at, Date.now())})`] : []),
 		...(result.timedOut ? ["timed_out=true"] : []),
 		"",
@@ -487,6 +490,7 @@ async function taskListRow(
 		id: metadata.taskRef,
 		kind: metadata.kind,
 		label: metadata.label,
+		...(metadata.kind === "agent" && metadata.progress ? { progress: metadata.progress } : {}),
 		...(includeInputPreviews && metadata.inputPreview ? { inputPreview: metadata.inputPreview } : {}),
 		...(metadata.kind === "agent"
 			? { definition: metadata.definitionName, model: `${metadata.model.provider}/${metadata.model.id}`, thinking: metadata.thinking }
@@ -596,6 +600,7 @@ function renderTaskListResult(result: TaskListResult): string {
 			lines.push(`      queued_followups: ${task.queuedFollowUps}`)
 			lines.push(`      output_lines: ${task.outputLines ?? "unknown"}`)
 			if (task.queueReason) lines.push(`      waiting: ${task.queueReason}`)
+			if (task.progress) lines.push(`      progress: ${yamlScalar(task.progress)}`)
 			if (task.lastActivity) lines.push(`      last_activity: ${task.lastActivity.action} (${relativeTime(task.lastActivity.at, now)})`)
 			if (task.descendants.total > 0) lines.push(`      descendants: ${renderDescendantSummary(task.descendants)}`)
 			lines.push(`      created: ${relativeTime(task.createdAt, now)}`)

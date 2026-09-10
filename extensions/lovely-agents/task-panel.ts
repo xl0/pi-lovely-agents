@@ -82,7 +82,7 @@ export function createTaskPanel(
 						label: (
 							`${task.id} ${task.state}${task.latestOutcome ? `/${task.latestOutcome}` : ""} ${task.label} · ` +
 							`${task.queueReason ? `waiting: ${task.queueReason} · ` : ""}${task.kind === "bash" ? "bash" : task.model}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}` +
-							(task.inputPreview ? ` · ${JSON.stringify(task.inputPreview)}` : "")
+							(task.progress || task.inputPreview ? ` · ${JSON.stringify(task.progress ?? task.inputPreview)}` : "")
 						).replace(/[\r\n]+/g, " "),
 						group: (task.kind === "bash" ? "Bash" : "Agents") as PanelItem["group"]
 					})),
@@ -175,7 +175,7 @@ export function renderActiveTaskRows(
 		state: TaskListRow["state"]
 		queuedFollowUps: number
 	} & Pick<TaskListRow, "kind" | "createdAt"> &
-		Partial<Pick<TaskListRow, "queueReason" | "inputPreview">>)[]
+		Partial<Pick<TaskListRow, "queueReason" | "inputPreview" | "progress">>)[]
 ): string[] {
 	const sorted = [...tasks].sort(comparePanelTasks)
 	const rows: string[] = []
@@ -191,7 +191,7 @@ export function renderActiveTaskRows(
 		rows.push(
 			`↳ ${task.id} ${task.state} ${task.label.replace(/[\r\n]+/g, " ")}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}` +
 				(task.queueReason ? ` · waiting: ${task.queueReason}` : "") +
-				(task.inputPreview ? ` · ${JSON.stringify(task.inputPreview)}` : "")
+				(task.progress || task.inputPreview ? ` · ${JSON.stringify(task.progress ?? task.inputPreview)}` : "")
 		)
 		rendered++
 	}

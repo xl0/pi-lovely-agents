@@ -330,6 +330,7 @@ describe("management fixtures", () => {
 			const paths = taskStoragePaths(await ensureParentStorage(workspace.cwd, "parent-session"), id)
 			await mutateTaskMetadata(paths, metadata => ({
 				...metadata,
+				progress: "Checking the fix",
 				latestReply: { text: Array.from({ length: 40 }, (_, index) => `Agent line ${index}`).join("\n"), streaming: false }
 			}))
 			let step = 0
@@ -350,6 +351,7 @@ describe("management fixtures", () => {
 						if (current > 1) return null
 						const first = component.render(80).join("\n")
 						expect(first).toContain("Agent line 0")
+						expect(first).toContain('Progress: "Checking the fix"')
 						expect(first).not.toContain("Exit code:")
 						expect(first).not.toContain("Agent line 39")
 						expect(first).toContain("1-")

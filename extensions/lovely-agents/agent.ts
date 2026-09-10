@@ -911,7 +911,8 @@ class AgentRuntime implements ResidentAgent {
 						})
 					}
 					this.#awaitingPrimaryInput = true
-					await this.#child.session.prompt(
+					await this.#child.prompt(
+						run.id,
 						recovering ? "Continue." : run.input,
 						childPromptOptions(recovering ? false : this.#expandPromptTemplates)
 					)

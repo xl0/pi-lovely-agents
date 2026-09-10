@@ -212,9 +212,16 @@ describe("latest reply snapshots", () => {
 				state: "idle",
 				latestOutcome: "succeeded"
 			})
-			await mutateTaskMetadata(paths, metadata => ({ ...metadata, state: "idle", activeRun: null, latestOutcome: "stopped" }))
+			await mutateTaskMetadata(paths, metadata => ({
+				...metadata,
+				state: "idle",
+				activeRun: null,
+				latestOutcome: "stopped",
+				progress: "Later run"
+			}))
 			expect(await readRetainedOutput(paths)).toMatchObject({ run: 2, text: "", latestOutcome: "stopped" })
 			expect(await readRetainedOutput(paths, { run: 1 })).toMatchObject({ run: 1, text: "Old answer", latestOutcome: "succeeded" })
+			expect(await readRetainedOutput(paths, { run: 1 })).not.toHaveProperty("progress")
 			await expect(readRetainedOutput(paths, { run: 3 })).rejects.toThrow("No retained result")
 		})
 	})

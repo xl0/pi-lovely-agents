@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks"
 import { lstat, open } from "node:fs/promises"
 import {
 	type AgentSession,
@@ -12,10 +13,12 @@ import {
 	SettingsManager,
 	type Skill
 } from "@earendil-works/pi-coding-agent"
+import { Type } from "typebox"
+import { Value } from "typebox/value"
 import { MODEL_ALIASES, type ModelAliasChoice } from "./config.js"
 import { getAgentCoordinator } from "./coordinator.js"
 import type { AgentDefinition, AgentThinkingLevel } from "./definitions.js"
-import type { TaskStoragePaths } from "./state.js"
+import { mutateTaskMetadata, TaskProgressSchema, type TaskStoragePaths } from "./state.js"
 
 const PROMPT_EXTENSION_PATH = "<inline:lovely-agent-prompt>"
 const CREATION_TOOL_NAMES = new Set(["agent"])
@@ -51,6 +54,8 @@ export type ChildSessionHandle = {
 	extensionsResult: LoadExtensionsResult
 	depth: number
 	allowAgents: boolean
+	/** Binds tool execution to this immutable run, including delayed async callbacks. */
+	prompt(runId: string, text: string, options?: PromptOptions): Promise<void>
 	dispose(): void
 }
 
@@ -126,6 +131,8 @@ export async function createChildSession(options: CreateChildSessionOptions): Pr
 	const agentDir = options.agentDir ?? getAgentDir()
 	const settingsManager = SettingsManager.create(options.cwd, agentDir)
 	settingsManager.setProjectTrusted(options.projectTrusted)
+	const runContext = new AsyncLocalStorage<string>()
+	const lifetime = new AbortController()
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: options.cwd,
 		agentDir,
@@ -137,6 +144,40 @@ export async function createChildSession(options: CreateChildSessionOptions): Pr
 				name: "lovely-agent-prompt",
 				hidden: true,
 				factory(pi) {
+					pi.registerTool({
+						name: "task_update",
+						label: "Task Update",
+						description:
+							"Report a short progress line for your own current task run (up to 240 characters). Does not change its label or lifecycle state, or notify the parent.",
+						promptSnippet: "Update your task's progress in the panel and task inspection",
+						promptGuidelines: [
+							"Use task_update for meaningful phase changes or blockers: what is achieved and what remains. Do not report every tool call or invent percentages. Updates do not interrupt or wake the parent."
+						],
+						parameters: Type.Object({ progress: TaskProgressSchema }, { additionalProperties: false }),
+						async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+							const runId = runContext.getStore()
+							if (!runId) throw new Error("task_update requires a managed task run")
+							if (!Value.Check(TaskProgressSchema, params.progress)) throw new Error("progress must be 1–240 characters")
+							const progress = params.progress.replace(/\s+/g, " ").trim()
+							if (!progress || /\p{Cc}/u.test(progress)) throw new Error("progress must be nonempty text without control characters")
+							const childSessionId = ctx.sessionManager.getSessionId()
+							await mutateTaskMetadata(options.paths, metadata => {
+								signal?.throwIfAborted()
+								lifetime.signal.throwIfAborted()
+								if (
+									metadata.kind !== "agent" ||
+									metadata.childSessionId !== childSessionId ||
+									metadata.activeRun?.id !== runId ||
+									metadata.state !== "running" ||
+									metadata.discardedAt !== null
+								) {
+									throw new Error("task_update can only update its own active run")
+								}
+								return { ...metadata, progress, updatedAt: Date.now() }
+							})
+							return { content: [{ type: "text", text: "Progress updated." }], details: { progress } }
+						}
+					})
 					pi.on("before_agent_start", event => ({
 						systemPrompt: buildDefinitionSystemPrompt(event.systemPromptOptions)
 					}))
@@ -173,7 +214,6 @@ export async function createChildSession(options: CreateChildSessionOptions): Pr
 		throw new Error(`Child session identity mismatch: expected ${options.expectedSessionId}, found ${result.session.sessionId}`)
 	}
 
-	const lifetime = new AbortController()
 	const unbindContext = getAgentCoordinator().bindSessionContext(result.session.sessionId, {
 		depth: policy.depth,
 		allowAgents: policy.allowAgents,
@@ -193,6 +233,7 @@ export async function createChildSession(options: CreateChildSessionOptions): Pr
 		extensionsResult: result.extensionsResult,
 		depth: policy.depth,
 		allowAgents: policy.allowAgents,
+		prompt: (runId, text, promptOptions) => runContext.run(runId, () => result.session.prompt(text, promptOptions)),
 		dispose() {
 			if (disposed) return
 			disposed = true

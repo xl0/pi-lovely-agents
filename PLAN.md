@@ -1,5 +1,18 @@
 # Lovely Agents design
 
+## [x] Child-authored progress
+
+Child-only `task_update({ progress })` reports up to 240 characters, bound to its
+own run. Labels/state stay unchanged; no parent notifications. Inspection and
+the panel show progress instead of the initial-input preview. Explicit tool
+allowlists remain strict. New runs clear reports; indexed results retain them.
+Regression coverage verifies availability, cancellation/disposal and stale-run
+fencing, reset/retention, non-notification, and UI rendering.
+236 tests, typecheck and scoped Biome pass. Live two-run testing after reload
+confirms successful progress calls, reset on Follow-up, per-run retention,
+stable labels, and completion-only notifications.
+An existing Bash startup-timing test failed once and passed on rerun.
+
 ## Field-feedback follow-up
 
 Sources: the CAD build session's `SUBAGENTS-FEEDBACK.md` and
@@ -55,7 +68,7 @@ cleanup. Old archive directories are left untouched.
 
 ### [x] Final verification
 
-235 tests pass, including promotion/retrieval, queued run waits, UTF-8 tails,
+236 tests pass, including promotion/retrieval, queued run waits, UTF-8 tails,
 scrolling/grouped navigation, live exit status (unknown, 0, 7, SIGTERM),
 post-discard notices, pruning guards, and failed cleanup lease retention.
 Typecheck, scoped Biome and npm pack dry-run pass.

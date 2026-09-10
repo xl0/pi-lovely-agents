@@ -290,7 +290,8 @@ function parseTools(value: unknown, knownTools: readonly string[]): { value?: st
 	const tools = raw.map(tool => (tool as string).trim())
 	const duplicate = tools.find((tool, index) => tools.indexOf(tool) !== index)
 	if (duplicate) return { error: `duplicate tool "${duplicate}"` }
-	const unknown = tools.filter(tool => !knownTools.includes(tool))
+	// This tool is registered only inside managed children, not in the parent's roster.
+	const unknown = tools.filter(tool => tool !== "task_update" && !knownTools.includes(tool))
 	if (unknown.length > 0) return { error: `unknown tools: ${unknown.sort(compareText).join(", ")}` }
 	return { value: tools }
 }
