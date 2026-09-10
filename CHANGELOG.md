@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-10
+
 ### Breaking Changes
 
 - Keep discarded task files at their original paths and return `taskDirectory` with `state: "discarded"` from `task_discard`.
