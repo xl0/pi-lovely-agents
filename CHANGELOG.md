@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Keep discarded task files at their original paths and return `taskDirectory` with `state: "discarded"` from `task_discard`.
+
+### Added
+
+- Retrieve retained results by run index with `task_output(run: N)`, including after discard, and identify runs in results and completion notices.
+- Browse non-discarded tasks through an `active/` index and safely prune discarded tasks with the dry-run-first `scripts/prune-tasks.ts` command.
+- Report child progress in task inspection and the panel with `task_update` without notifying the parent.
+- Scroll live output with keyboard navigation, Bash tail-following, and visible exit codes or termination signals.
+- Read shorter Bash output tails with `task_output(lines: N)`.
+
+### Changed
+
+- Group Agents and Bash separately and list active tasks first.
+- Show the latest Bash output in UTF-8-safe completion previews.
+- Clarify Steer acceptance and Follow-up conversion, and expose process-wide capacity and Bash queue reasons.
+- Guide agents to delegate independent implementation work and keep coupled changes in the parent.
+
+### Fixed
+
+- Keep output waits attached to the selected run across Follow-ups.
+- Deliver pending completion notifications for discarded tasks.
+- Prevent another Pi process from claiming tasks whose cleanup failed.
+
 ## [0.1.1] - 2026-09-06
 
 - Publish through GitHub Actions with npm provenance.
