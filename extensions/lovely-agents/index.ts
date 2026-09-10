@@ -16,6 +16,7 @@ import {
 	reconcileParentNotifications
 } from "./notifications.js"
 import { renderAgentNotification } from "./rendering.js"
+import { acquireParentLease, ParentLeaseConflictError } from "./state.js"
 import { createTaskPanel } from "./task-panel.js"
 import { loadTaskList, registerRosterTool, registerTaskTools } from "./tools.js"
 import { bindTaskUpdateRoute } from "./updates.js"
@@ -38,6 +39,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	let toolSession = 0
 	let agentInputEnabled = true
 	let bashInputEnabled = false
+	let ownershipWarning: string | undefined
 	const hiddenTools = new Set<string>()
 
 	pi.registerMessageRenderer(NOTIFICATION_CUSTOM_TYPE, renderAgentNotification)
@@ -192,6 +194,32 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		const parentSessionId = ctx.sessionManager.getSessionId()
 		disposeBindings()
+		taskPanel?.dispose()
+		taskPanel = undefined
+		ownershipWarning = undefined
+		if (ctx.mode === "tui") ctx.ui.setStatus("lovely-agents", undefined)
+		// Do not bind routes or reconcile notifications without owning this partition.
+		try {
+			await acquireParentLease(ctx.cwd, parentSessionId)
+		} catch (error) {
+			if (!(error instanceof ParentLeaseConflictError)) throw error
+			ownershipWarning = `Session already open in Pi PID ${error.ownerPid}. Lovely Agents is disabled here; use /resume to choose another session.`
+			if (ctx.mode === "tui") {
+				ctx.ui.setStatus(
+					"lovely-agents",
+					ctx.ui.theme.fg("warning", `⚠ Session in use by PID ${error.ownerPid} — /resume to choose another`)
+				)
+			}
+			pi.setActiveTools(
+				pi.getActiveTools().filter(name => {
+					if (!CREATION_TOOLS.has(name) && !TASK_TOOLS.has(name) && name !== "bash_bg") return true
+					hiddenTools.add(name)
+					return false
+				})
+			)
+			ctx.ui.notify(ownershipWarning, "warning")
+			return
+		}
 		const toolSessionId = ++toolSession
 		const disposeSignal = getAgentCoordinator().getSessionContext(parentSessionId)?.disposeSignal
 		if (disposeSignal) {
@@ -212,8 +240,6 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 				{ triggerTurn: true, deliverAs: "steer" }
 			)
 		})
-		taskPanel?.dispose()
-		taskPanel = undefined
 		if (ctx.mode === "tui") {
 			const options = managementOptions(ctx)
 			taskPanel = createTaskPanel(ctx, {
@@ -279,6 +305,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	})
 
 	pi.on("message_end", async (event, ctx) => {
+		if (ownershipWarning) return
 		if (event.message.role !== "custom" || event.message.customType !== NOTIFICATION_CUSTOM_TYPE) return
 		const details = notificationDetails(event.message.details)
 		if (!details) return
@@ -298,6 +325,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		taskPanel?.dispose()
 		taskPanel = undefined
 		if (ctx.mode === "tui") {
+			ctx.ui.setStatus("lovely-agents", undefined)
 			if (ctx.ui.getEditorComponent() === taskEditorFactory) ctx.ui.setEditorComponent(previousEditorFactory)
 			taskEditorFactory = undefined
 			previousEditorFactory = undefined
@@ -314,6 +342,10 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		description: "Manage Lovely Agent definitions, tasks, and settings",
 		async handler(_args, ctx) {
 			if (ctx.mode !== "tui") return
+			if (ownershipWarning) {
+				ctx.ui.notify(ownershipWarning, "warning")
+				return
+			}
 			try {
 				await openManagementUi(ctx, managementOptions(ctx))
 			} catch (error) {
@@ -325,6 +357,10 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	pi.registerCommand("continue", {
 		description: "Retry the latest errored or aborted turn",
 		handler: async (_args, ctx) => {
+			if (ownershipWarning) {
+				ctx.ui.notify(ownershipWarning, "warning")
+				return
+			}
 			if (!ctx.isIdle()) {
 				ctx.ui.notify("Agent is still running", "warning")
 				return
@@ -360,6 +396,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	registerInputs()
 	registerTaskTools(pi, {
 		beforeParentLeaseRelease: async (cwd, parentSessionId) => {
+			if (ownershipWarning) return
 			try {
 				await stopFixtureTimersFor(cwd, parentSessionId)
 			} finally {

@@ -1,5 +1,15 @@
 # Lovely Agents design
 
+## [x] Conflicting-session warning
+
+Acquire ownership before startup recovery or route registration. On conflict,
+show one warning plus a persistent footer with the owner PID and `/resume` hint;
+hide Lovely tools and skip notification observation and foreign-task cleanup.
+Regression coverage verifies retained bytes, disabled controls, warning cleanup,
+reload allowlists and independent sessions in the same workspace.
+Full `bun run check` passes: 237 tests, typecheck and Biome.
+Pi-level conversation locking remains outside this extension's scope.
+
 ## [x] Child-authored progress
 
 Child-only `task_update({ progress })` reports up to 240 characters, bound to its
