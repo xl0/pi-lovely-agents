@@ -31,7 +31,7 @@ describe("Agent Definition discovery", () => {
 			)
 			await workspace.write(
 				"agent/agents/scout.md",
-				"---\nname: scout\ndescription: Finds code\ntools: [read, agent_roster]\nexclude_agents_md: false\n---\nFind relevant files.\n"
+				"---\nname: scout\ndescription: Finds code\ntools: [read, agent_roster, task_update]\nexclude_agents_md: false\n---\nFind relevant files.\n"
 			)
 			await workspace.write("agent/agents/unicode.md", definitionSource("unicode", "💥".repeat(125)))
 
@@ -47,6 +47,7 @@ describe("Agent Definition discovery", () => {
 				source: "user"
 			})
 			expect(result.definitions[0]?.displayPath).toBe("~/agent/agents/reviewer.md")
+			expect(result.definitions[1]?.tools).toEqual(["read", "agent_roster", "task_update"])
 		})
 	})
 

@@ -1667,6 +1667,7 @@ function fakeChild(runPrompt: (child: FakeChild) => Promise<void>, deliverSteers
 			}
 		},
 		handle: {
+			prompt: (_runId: string, text: string, options?: { expandPromptTemplates?: boolean }) => result.handle.session.prompt(text, options),
 			session: {
 				get systemPrompt() {
 					return result.systemPrompt

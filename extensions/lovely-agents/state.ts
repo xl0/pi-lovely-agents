@@ -9,6 +9,8 @@ import { readTaskDiscardMarker, syncActiveTaskLink } from "./storage.js"
 import { publishTaskUpdate } from "./updates.js"
 
 export const TASK_METADATA_VERSION = 3
+/** One child-authored status line, independent of scheduler state and observed activity. */
+export const TaskProgressSchema = Type.String({ minLength: 1, maxLength: 240 })
 export const TASK_REFERENCE_PATTERN = /^[ab]_[0-9a-f]{8}$/
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
 export const STORAGE_GITIGNORE = "*\n"
@@ -154,6 +156,7 @@ export const AgentTaskMetadataSchema = Type.Object(
 		),
 		// Pi's composed prompt at agent start, distinct from the immutable Definition recipe.
 		effectiveSystemPrompt: Type.Optional(Type.String()),
+		progress: Type.Optional(TaskProgressSchema),
 		lastRunSequence: Type.Integer({ minimum: 0 }),
 		// Last settled run, distinct from the highest accepted (possibly queued) sequence.
 		lastSettledRun: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -220,6 +223,7 @@ const RunResultSchema = Type.Object(
 		state: Type.Union([Type.Literal("idle"), Type.Literal("interrupted")]),
 		outcome: Type.Union([RunOutcome, Type.Null()]),
 		text: Type.String(),
+		progress: Type.Optional(TaskProgressSchema),
 		lastActivity: Type.Union([Type.Object({ at: Timestamp, action: Type.String() }, { additionalProperties: false }), Type.Null()])
 	},
 	{ additionalProperties: false }
@@ -284,6 +288,7 @@ export type RetainedOutputRead = {
 	state: Static<typeof TaskState>
 	latestOutcome: Static<typeof RunOutcome> | null
 	streaming: boolean
+	progress?: string
 	queuedFollowUps: number
 	lastActivity: NonNullable<TaskMetadata["lastActivity"]> | null
 	queueReason: "capacity" | "provider-limit" | "starting" | null
@@ -640,6 +645,8 @@ export async function readRetainedOutput(paths: TaskStoragePaths, options: Retai
 	) {
 		return retainedOutputSnapshot(paths, metadata, timedOut, options.lines)
 	}
+	// A different run must never inherit the current run's progress report.
+	if (metadata.kind === "agent") delete metadata.progress
 	const queued = metadata.queuedFollowUps.find(input => input.sequence === run)
 	if (queued) {
 		return retainedOutputSnapshot(
@@ -688,6 +695,7 @@ export async function readRetainedOutput(paths: TaskStoragePaths, options: Retai
 			state: saved.state,
 			activeRun: null,
 			lastSettledRun: run,
+			...(saved.progress ? { progress: saved.progress } : {}),
 			latestOutcome: saved.outcome,
 			latestReply: { text: saved.text, streaming: false }
 		},
@@ -714,6 +722,7 @@ export function retainedOutputSnapshot(
 	const truncated = snapshotTruncated || (metadata.kind === "bash" && metadata.latestReply?.truncated === true)
 	return {
 		run: metadata.activeRun?.sequence ?? metadata.lastSettledRun ?? (metadata.lastRunSequence === 1 ? 1 : null),
+		...(metadata.kind === "agent" && metadata.progress ? { progress: metadata.progress } : {}),
 		text:
 			metadata.kind === "bash"
 				? `${snapshotTruncated ? text : fullText}\n\n[${truncated ? "Output truncated; showing tail. " : ""}Full output: ${retainedPaths(paths).output}]`
@@ -831,6 +840,7 @@ export function mutateTaskMetadata(
 					state: updated.state === "interrupted" ? "interrupted" : "idle",
 					outcome: updated.latestOutcome,
 					text: updated.latestReply?.text ?? "",
+					...(updated.progress ? { progress: updated.progress } : {}),
 					lastActivity: updated.lastActivity ?? null
 				}
 				// Publish the reply before clearing it for a promoted run. A crash can leave
@@ -841,6 +851,7 @@ export function mutateTaskMetadata(
 		}
 		if (updated.activeRun && updated.activeRun.id !== loaded.metadata.activeRun?.id) {
 			updated.latestReply = null
+			if (updated.kind === "agent") delete updated.progress
 			updated.lastActivity = { at: updated.updatedAt, action: updated.state }
 			updated.inputPreview = historyPreview(updated.activeRun.input, 512)
 			if (updated.kind === "agent") delete updated.effectiveSystemPrompt

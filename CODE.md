@@ -122,6 +122,9 @@ not bookkeeping timestamps: start, thinking, reply, or tool activity, without
 reasoning/tool payloads. Thinking and tool-update heartbeats are event-driven,
 capped at one per second. New runs reset activity as well as the reply. Earlier
 metadata versions are rejected rather than cold-loaded with wider capabilities.
+Optional agent `progress` is a child-authored line (up to 240 characters),
+separate from observed `lastActivity`. New runs clear it; settlement retains it
+in the indexed run result. Other-run reads never inherit the current report.
 Optional `effectiveSystemPrompt` captures Pi's composed string at `agent_start`,
 after `before_agent_start` hooks, and clears on a new run. It excludes
 provider-payload rewrites and stays out of model-visible inspection results.
@@ -271,6 +274,13 @@ built-ins and extensions. Delegation is removed unless both `allowAgents` and
 remaining depth permit it. A hidden first extension composes the Definition
 body with active tool metadata, Pi guidelines, append resources, optional
 AGENTS/CLAUDE context, skills, and cwd before ordinary extension hooks.
+That extension also registers child-only `task_update({ progress })`. Explicit
+tool allowlists must include it; discovery recognizes this child-only name.
+The child handle's prompt method binds an immutable run ID through async-local
+storage, so delayed callbacks cannot adopt a later run. Updates validate the
+child identity, active run, lifecycle and abort/disposal signals inside the
+metadata mutation lane. They normalize whitespace, reject control characters,
+and neither change labels/state nor enqueue parent notifications.
 Session-scoped depth is registered before extension startup and removed on
 disposal. A managed lifetime signal aborts before SDK disposal, which does not
 emit `session_shutdown`. It removes task/notification subscriptions and fences
@@ -362,6 +372,8 @@ editor focuses that same panel, exposing all direct tasks and diagnostics in a
 five-row scrolling list. `/lovely-agents` → Tasks hands off to the panel rather
 than opening another selector. Task rows use the full available width for labels,
 model/status, and prompt previews, avoiding SelectList's fixed primary column.
+Child progress replaces the input preview when present; it also appears in
+task details, live output, and model-facing `task_list`/`task_output`.
 UI rows group Agents then Bash with nonselectable group headings. Within each
 group, running/suspended/queued precede interrupted/idle; creation time is newest
 first within a status, with task ID breaking ties. Selection follows task identity

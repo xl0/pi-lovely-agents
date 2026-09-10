@@ -380,6 +380,7 @@ async function showLiveTaskOutput(ctx: ExtensionContext, task: TaskListRow): Pro
 				)
 				const progressLines = [
 					`Capacity: ${output.capacity.active}/${output.capacity.limit} execution permits`,
+					...(output.progress ? [`Progress: ${JSON.stringify(output.progress)}`] : []),
 					...(output.queueReason ? [`Waiting: ${output.queueReason}`] : []),
 					...(output.lastActivity ? [`${output.lastActivity.action} · ${relativeTime(output.lastActivity.at, Date.now())}`] : [])
 				]
@@ -647,6 +648,7 @@ function renderTask(task: TaskListRow): string {
 		`Task: ${task.id}`,
 		`State: ${task.state}`,
 		`Outcome: ${task.latestOutcome ?? "none"}`,
+		...(task.progress ? [`Progress: ${JSON.stringify(task.progress)}`] : []),
 		...(task.kind === "bash"
 			? [
 					`Command: ${task.command}`,

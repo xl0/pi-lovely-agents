@@ -107,6 +107,14 @@ You can also ask Pi directly:
 Tool calls and notifications are compact by default. **Ctrl+O** expands their
 full contents.
 
+Children can call `task_update({ progress: "Root cause found; testing the fix" })`
+to report meaningful milestones or blockers in up to 240 characters. Progress
+replaces the initial-input preview in the panel and appears in task inspection.
+It does not rename the task, change its lifecycle state, notify or wake the parent.
+Each new run clears the report; earlier reports remain with their run's result.
+Default-tool children get this tool automatically. If a Definition has an explicit
+`tools` list, include `task_update` to allow progress reporting.
+
 ## Background Bash
 
 Ask Pi to run a long command in the background:
