@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Show a persistent session-ownership warning and disable Lovely Agents initialization when another Pi process owns the session's tasks.
+
 ## [0.1.2] - 2026-09-10
 
 ### Breaking Changes

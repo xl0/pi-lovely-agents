@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { readFile, writeFile } from "node:fs/promises"
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -9,10 +10,122 @@ import {
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
 import lovelyAgentsExtension, { latestReplyWasInterrupted, successfulTurnTuple } from "../../extensions/lovely-agents/index.js"
 import { seedFixtureTasks } from "../../extensions/lovely-agents/management.js"
-import { notificationRouteKey } from "../../extensions/lovely-agents/notifications.js"
-import { ensureParentStorage, releaseParentLeaseFor, taskStoragePaths } from "../../extensions/lovely-agents/state.js"
+import { NOTIFICATION_CUSTOM_TYPE, notificationRouteKey } from "../../extensions/lovely-agents/notifications.js"
+import { ensureParentStorage, mutateTaskMetadata, releaseParentLeaseFor, taskStoragePaths } from "../../extensions/lovely-agents/state.js"
 import { publishSchedulerUpdate, publishTaskUpdate } from "../../extensions/lovely-agents/updates.js"
 import { withTempWorkspace } from "./test-helpers.js"
+
+test("lease conflicts show a persistent warning without recovering, notifying, or stopping foreign tasks", async () => {
+	await withTempWorkspace(async workspace => {
+		const [id] = await seedFixtureTasks(workspace.cwd, "parent")
+		if (!id) throw new Error("Missing fixture task")
+		const parent = await ensureParentStorage(workspace.cwd, "parent")
+		const paths = taskStoragePaths(parent, id)
+		await mutateTaskMetadata(paths, metadata => ({
+			...metadata,
+			notifications: ["seen", "pending"].map(id => ({
+				id,
+				type: "completion",
+				runId: "r_0000000000000001",
+				content: "Foreign completion",
+				createdAt: Date.now()
+			}))
+		}))
+		await releaseParentLeaseFor(workspace.cwd, "parent")
+		const lease = JSON.stringify({ version: 1, pid: process.ppid, token: "e".repeat(32), createdAt: Date.now() })
+		await writeFile(parent.lease, lease, { mode: 0o600 })
+		const originalMetadata = await readFile(paths.metadata, "utf8")
+		const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>()
+		const commands = new Map<string, (args: string, ctx: ExtensionContext) => unknown>()
+		const errors: string[] = []
+		const messages: unknown[] = []
+		let active = ["read", "other_tool", "agent", "bash_bg", "task_list", "task_output"]
+		let status: string | undefined
+		let sessionId = "parent"
+		lovelyAgentsExtension({
+			registerMessageRenderer() {},
+			registerTool() {},
+			registerCommand(name: string, command: { handler: (args: string, ctx: ExtensionContext) => unknown }) {
+				commands.set(name, command.handler)
+			},
+			getActiveTools: () => [...active],
+			setActiveTools: (names: string[]) => {
+				active = names
+			},
+			on(name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) {
+				handlers.set(name, [...(handlers.get(name) ?? []), handler])
+			},
+			sendMessage: (message: unknown) => messages.push(message)
+		} as unknown as ExtensionAPI)
+		const ctx = {
+			cwd: workspace.cwd,
+			mode: "tui",
+			modelRegistry: { getAvailable: () => [] },
+			sessionManager: {
+				getSessionId: () => sessionId,
+				getBranch: () => [{ type: "custom_message", customType: NOTIFICATION_CUSTOM_TYPE, details: { notificationId: "seen" } }]
+			},
+			ui: {
+				theme: { fg: (_color: string, text: string) => text },
+				setStatus: (_key: string, value: string | undefined) => {
+					status = value
+				},
+				setWidget() {},
+				getEditorComponent: () => undefined,
+				setEditorComponent() {},
+				notify: (message: string) => errors.push(message)
+			}
+		} as unknown as ExtensionContext
+		const emit = async (name: string, event: unknown) => {
+			for (const handler of handlers.get(name) ?? []) await handler(event, ctx)
+		}
+		const agentDirVariable = "PI_CODING_AGENT_DIR"
+		const previousAgentDir = process.env[agentDirVariable]
+		process.env[agentDirVariable] = workspace.agentDir
+		try {
+			await emit("session_start", { reason: "startup" })
+			expect(status).toContain(`Session in use by PID ${process.ppid}`)
+			expect(status).toContain("/resume")
+			expect(errors).toHaveLength(1)
+			expect(errors[0]).toContain("Lovely Agents is disabled")
+			expect(active).toEqual(["read", "other_tool"])
+			expect(getAgentCoordinator().getNotificationRoute(notificationRouteKey(workspace.cwd, "parent"))).toBeUndefined()
+			publishSchedulerUpdate()
+			publishTaskUpdate(workspace.cwd, "parent")
+			await Bun.sleep(0)
+			expect(errors).toHaveLength(1)
+			expect(status).toContain("/resume")
+			await emit("message_end", {
+				message: { role: "custom", customType: NOTIFICATION_CUSTOM_TYPE, details: { notificationId: "pending", taskRef: id } }
+			})
+			await commands.get("continue")?.("", ctx)
+			await commands.get("lovely-agents")?.("", ctx)
+			await emit("session_shutdown", { reason: "reload" })
+			expect(status).toBeUndefined()
+			expect(active).toContain("agent")
+			await emit("session_start", { reason: "reload" })
+			await emit("session_shutdown", { reason: "resume" })
+			expect(messages).toEqual([])
+			expect(await readFile(paths.metadata, "utf8")).toBe(originalMetadata)
+			expect(await readFile(parent.lease, "utf8")).toBe(lease)
+
+			// A different session in the same workspace is unaffected, including its tool allowlist.
+			sessionId = "independent"
+			active = ["read", "other_tool", "agent", "bash_bg", "task_list", "task_output"]
+			await emit("session_start", { reason: "reload" })
+			expect(status).toBeUndefined()
+			expect(active).toContain("agent")
+			expect(active).not.toContain("task_stop")
+			await emit("session_shutdown", { reason: "quit" })
+			expect(await readFile(paths.metadata, "utf8")).toBe(originalMetadata)
+			expect(await readFile(parent.lease, "utf8")).toBe(lease)
+		} finally {
+			if (previousAgentDir === undefined) delete process.env[agentDirVariable]
+			else process.env[agentDirVariable] = previousAgentDir
+			await emit("session_shutdown", { reason: "quit" })
+		}
+	})
+})
 
 test("capability schemas and tool visibility follow config without hiding controls for retained tasks", async () => {
 	await withTempWorkspace(async workspace => {

@@ -139,6 +139,13 @@ absent is reclaimed. Simultaneous stale reclamation is best-effort; fresh and
 live-owner acquisition remains atomic. Release verifies the ownership token
 before unlinking.
 
+Startup acquires ownership before binding UI/update/notification routes or
+running recovery. A live-owner conflict shows one warning and a persistent
+footer with the owning PID and `/resume` guidance. Lovely tools are hidden
+without widening allowlists; management, notification observation and shutdown
+cleanup stay disabled for that instance until reload/session replacement.
+This protects Lovely task storage, not Pi's shared conversation file.
+
 Agent `history.md` retains runs as a flat tagged input/assistant event stream, with
 compact tool argument/result summaries and outcomes. No reasoning or full tool
 payloads are copied; Pi's `session.jsonl` remains the authoritative transcript.
