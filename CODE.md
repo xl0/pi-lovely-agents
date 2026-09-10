@@ -399,6 +399,8 @@ or `aborted`.
 
 TypeScript is strict and checks `extensions/` and `tests/`; Bun runs the test
 suite; Biome handles formatting and linting. `bun run check` runs all three.
+Biome explicitly includes `extensions/`, `tests/`, `scripts/`, and the root
+package, TypeScript and Biome JSON configs; editor/runtime files stay out of scope.
 Tests prioritize lifecycle/ownership safety and reported regressions. Avoid
 duplicating dependency tests, UI descriptor checks, and exact presentation text.
 

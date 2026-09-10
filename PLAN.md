@@ -8,7 +8,7 @@ the panel show progress instead of the initial-input preview. Explicit tool
 allowlists remain strict. New runs clear reports; indexed results retain them.
 Regression coverage verifies availability, cancellation/disposal and stale-run
 fencing, reset/retention, non-notification, and UI rendering.
-236 tests, typecheck and scoped Biome pass. Live two-run testing after reload
+236 tests, typecheck and Biome pass. Live two-run testing after reload
 confirms successful progress calls, reset on Follow-up, per-run retention,
 stable labels, and completion-only notifications.
 An existing Bash startup-timing test failed once and passed on rerun.
@@ -71,9 +71,8 @@ cleanup. Old archive directories are left untouched.
 236 tests pass, including promotion/retrieval, queued run waits, UTF-8 tails,
 scrolling/grouped navigation, live exit status (unknown, 0, 7, SIGTERM),
 post-discard notices, pruning guards, and failed cleanup lease retention.
-Typecheck, scoped Biome and npm pack dry-run pass.
-Full `bun run check` reaches Biome but fails only on the pre-existing
-`.vscode/settings.json` formatting; that unrelated file is untouched.
+Typecheck, Biome and npm pack dry-run pass. Biome uses an explicit allowlist
+for source, tests, scripts and root JSON configs, excluding editor/runtime files.
 Restart Pi before trying the branch so process-resident runtimes use the new code.
 Live smoke testing after reload also passed: three indexed agent runs, Steer
 conversion, post-discard reads/input rejection, stable active links, Bash
@@ -728,8 +727,6 @@ need OS supervision. Windows is explicitly unsupported.
 
 Work in order. A section is complete only when its focused tests, typecheck, and
 targeted Biome check pass. Keep `CODE.md` synchronized with implemented state.
-Do not mix the unrelated `.vscode/settings.json` formatting issue into these
-changes.
 
 Expected module split, adjusted only when a file stays too small to justify
 itself:
@@ -1001,8 +998,6 @@ Stage-only trust is configured for `xl0/pi-lovely-agents`, `publish.yml`, and
 environment `npm`. Verify it with the `0.1.1` release; the first tag's CI run
 skipped the already-published version and did not exercise OIDC.
 Publishing/pushing needs explicit approval.
-The local release checks still include unrelated `.vscode/settings.json`;
-format or exclude it before using the local release command.
 
 #### [ ] Intermittent Bash test failure
 
