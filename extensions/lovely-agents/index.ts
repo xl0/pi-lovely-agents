@@ -19,11 +19,9 @@ import { renderAgentNotification } from "./rendering.js"
 import { acquireParentLease, ParentLeaseConflictError } from "./state.js"
 import { createTaskPanel } from "./task-panel.js"
 import { loadTaskList, registerRosterTool, registerTaskTools } from "./tools.js"
-import { bindTaskUpdateRoute } from "./updates.js"
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>
-const CREATION_TOOLS = new Set(["agent", "agent_roster"])
-const TASK_TOOLS = new Set(["task_list", "task_output", "task_input", "task_stop", "task_discard"])
+const LOVELY_TOOLS = new Set(["agent", "agent_roster", "bash_bg", "task_list", "task_output", "task_input", "task_stop", "task_discard"])
 
 export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	let configValue = defaultAgentsConfig
@@ -33,83 +31,19 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	let taskPanel: ReturnType<typeof createTaskPanel> | undefined
 	let previousEditorFactory: EditorFactory | undefined
 	let taskEditorFactory: EditorFactory | undefined
-	let unbindToolUpdates: (() => void) | undefined
 	let unbindDisposal: (() => void) | undefined
-	let toolRevision = 0
-	let toolSession = 0
-	let agentInputEnabled = true
-	let bashInputEnabled = false
 	let ownershipWarning: string | undefined
+	/** Hidden only on a lease conflict; tool limits are otherwise enforced at execution. */
 	const hiddenTools = new Set<string>()
 
 	pi.registerMessageRenderer(NOTIFICATION_CUSTOM_TYPE, renderAgentNotification)
 
 	const disposeBindings = () => {
-		toolRevision++
-		toolSession++
-		unbindToolUpdates?.()
-		unbindToolUpdates = undefined
 		unbindNotificationRoute?.()
 		unbindNotificationRoute = undefined
 		unbindDisposal?.()
 		unbindDisposal = undefined
 	}
-
-	const refreshToolVisibility = async (ctx: ExtensionContext) => {
-		const revision = ++toolRevision
-		const session = getAgentCoordinator().getSessionContext(ctx.sessionManager.getSessionId())
-		const active = pi.getActiveTools()
-		const canCreateAgent =
-			session?.allowAgents !== false &&
-			(session?.depth ?? 0) < configValue.maxDepth &&
-			(active.includes("agent") || hiddenTools.has("agent"))
-		const canCreateBash = configValue.backgroundBash && (active.includes("bash_bg") || hiddenTools.has("bash_bg"))
-		const owned = (await loadTaskList(ctx.cwd, ctx.sessionManager.getSessionId())).details
-		if (revision !== toolRevision) return
-		const agentInput = canCreateAgent || owned.tasks.some(task => task.kind === "agent")
-		const bashInput = canCreateBash || owned.tasks.some(task => task.kind === "bash")
-		if (agentInput !== agentInputEnabled || bashInput !== bashInputEnabled) {
-			agentInputEnabled = agentInput
-			bashInputEnabled = bashInput
-			registerInputs()
-		}
-		const canControl = canCreateAgent || canCreateBash || owned.total > 0 || owned.diagnostics.length > 0
-		const current = pi.getActiveTools()
-		const allowed = (name: string) =>
-			CREATION_TOOLS.has(name)
-				? canCreateAgent
-				: name === "bash_bg"
-					? canCreateBash
-					: name === "task_input"
-						? agentInput || bashInput
-						: TASK_TOOLS.has(name)
-							? canControl
-							: true
-		const next = current.filter(name => {
-			if (allowed(name)) return true
-			hiddenTools.add(name)
-			return false
-		})
-		// Restore only tools this extension hid, never bypass an SDK/Definition allowlist.
-		for (const name of hiddenTools) {
-			if (!allowed(name)) continue
-			if (!next.includes(name)) next.push(name)
-			hiddenTools.delete(name)
-		}
-		if (next.join("\0") !== current.join("\0")) pi.setActiveTools(next)
-	}
-	const updateTools = (ctx: ExtensionContext) => {
-		const revision = toolRevision + 1
-		void refreshToolVisibility(ctx).catch(error => {
-			if (revision === toolRevision) ctx.ui.notify(`Lovely Agents tool visibility: ${errorMessage(error)}`, "error")
-		})
-	}
-	const registerInputs = () =>
-		registerTaskInputTool(pi, {
-			getConfig: () => configValue,
-			agentInputEnabled: () => agentInputEnabled,
-			bashInputEnabled: () => bashInputEnabled
-		})
 
 	const applyConfig = (value: AgentsConfig, warnings: AgentsConfigWarning[], ctx: ExtensionContext) => {
 		configValue = value
@@ -117,9 +51,6 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		getAgentCoordinator(value.maxConcurrency).setMaxConcurrency(value.maxConcurrency)
 		getBashCoordinator(value.maxBashConcurrency).setMaxConcurrency(value.maxBashConcurrency)
 		notifyConfigWarnings(ctx, warnings)
-		registerAgentTool(pi, { getConfig: () => configValue, canDelegate: () => currentDepth + 1 < configValue.maxDepth })
-		registerInputs()
-		updateTools(ctx)
 	}
 	const loadConfig = (ctx: ExtensionContext) => {
 		const config = createAgentsConfigSpec(ctx).load(ctx.cwd)
@@ -212,7 +143,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			}
 			pi.setActiveTools(
 				pi.getActiveTools().filter(name => {
-					if (!CREATION_TOOLS.has(name) && !TASK_TOOLS.has(name) && name !== "bash_bg") return true
+					if (!LOVELY_TOOLS.has(name)) return true
 					hiddenTools.add(name)
 					return false
 				})
@@ -220,15 +151,11 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			ctx.ui.notify(ownershipWarning, "warning")
 			return
 		}
-		const toolSessionId = ++toolSession
 		const disposeSignal = getAgentCoordinator().getSessionContext(parentSessionId)?.disposeSignal
 		if (disposeSignal) {
 			disposeSignal.addEventListener("abort", disposeBindings, { once: true })
 			unbindDisposal = () => disposeSignal.removeEventListener("abort", disposeBindings)
 		}
-		unbindToolUpdates = bindTaskUpdateRoute(ctx.cwd, parentSessionId, () => {
-			if (toolSessionId === toolSession) updateTools(ctx)
-		})
 		// Waking an idle managed child would run a turn outside its runtime's permit and
 		// provider gate; append instead, so the child sees the notice on its next run.
 		const managed = getAgentCoordinator().getSessionContext(parentSessionId) !== undefined
@@ -304,7 +231,6 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			ctx.ui.setEditorComponent(taskEditorFactory)
 		}
 		await taskPanel?.refresh().catch(error => ctx.ui.notify(`Lovely Agents status refresh failed: ${errorMessage(error)}`, "warning"))
-		await refreshToolVisibility(ctx)
 	})
 
 	pi.on("message_end", async (event, ctx) => {
@@ -407,9 +333,9 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		getConfigWarnings: () => configWarnings,
 		getDepth: () => currentDepth
 	})
-	registerAgentTool(pi, { getConfig: () => configValue, canDelegate: () => currentDepth + 1 < configValue.maxDepth })
+	registerAgentTool(pi, { getConfig: () => configValue })
 	registerBashTool(pi, { getConfig: () => configValue })
-	registerInputs()
+	registerTaskInputTool(pi, { getConfig: () => configValue })
 	registerTaskTools(pi, {
 		beforeParentLeaseRelease: async (cwd, parentSessionId) => {
 			if (ownershipWarning) return

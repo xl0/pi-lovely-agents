@@ -6,6 +6,10 @@
 
 - Ignore project Agent Definitions and workspace settings unless Pi evaluated project trust or a `/trust` decision is saved; ignored resources are reported as warnings. Ancestor `.pi/agents` directories owned by another user are skipped.
 
+### Changed
+
+- Keep Lovely tools and their schemas static instead of hiding tools and parameters as settings change; disabled Bash and depth limits are rejected when called, and `waitMs` is ignored while background agents are disabled.
+
 ### Fixed
 
 - Fix a scheduler deadlock when an agent waits on several tasks in parallel at full capacity.
