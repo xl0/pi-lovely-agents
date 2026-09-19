@@ -201,8 +201,6 @@ stop, discard. No slash-command mirror of the model tools.
 
 ### [ ] Deferred simplifications
 
-- Let the kernel write Bash output straight to `output.log`; read tails on
-  demand instead of mirroring them into metadata.
 - Drop agent `history.md` in favor of `session.jsonl`.
 
 ### [ ] Release hygiene

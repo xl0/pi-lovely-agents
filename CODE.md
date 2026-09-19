@@ -232,13 +232,18 @@ errors.
 ### Bash
 
 `bash -c` in its own process group (`detached`), inherited env, POSIX only.
-Defaults to immediate detachment. Output flows through one no-follow
-`output.log` handle with backpressure; a 2,000-line/50 KiB UTF-8-safe tail is
-mirrored into metadata with a sticky truncation flag. Stdin writes serialize
+Defaults to immediate detachment. Stdout and stderr share one no-follow,
+append-only `output.log` descriptor handed to the child, so the kernel writes
+the log and keeps the two streams in order (two pipes would not). Nothing
+passes through this process while the command runs: `task_output`, lists, and
+the live view read a 2,000-line/50 KiB UTF-8-safe tail from the file on
+demand, and settlement stores that tail once in metadata for notices and later
+reads. Live views refresh from a one-second size check, not `fs.watch`: Bun's
+file watcher can deadlock the process on close. Stdin writes serialize
 and log delivery; a write submitted before cancellation cannot be undone. Durable
 `running` precedes spawn, so stdin checks the durable state and then waits for
 the child to exist. The group is
-killed on stop, on shell exit (leftover jobs would hold the pipes), and on
+killed on stop, after the shell exits (containing leftover jobs), and on
 normal process exit. SIGKILL of Pi or `setsid` escapes need OS supervision;
 restart never signals a stored PID or replays a command. A failed log close
 keeps the resident reachable so stop/discard can retry.

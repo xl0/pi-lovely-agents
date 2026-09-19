@@ -19,6 +19,7 @@ import * as taskState from "../../extensions/lovely-agents/state.js"
 import {
 	type BashTaskMetadata,
 	parentStoragePaths,
+	readOutputTail,
 	readRetainedOutput,
 	readTaskMetadata,
 	releaseParentLeaseFor,
@@ -125,7 +126,7 @@ describe("bash_bg real processes", () => {
 			await execute(tool, workspace.cwd, { command: "sleep 0.05", label: "Unrelated task", waitMs: 1_000 })
 			expect(await Promise.race([pending, Bun.sleep(30).then(() => "waiting")])).toBe("waiting")
 			await runtime(paths).input("first\n", "stdin")
-			await until(async () => (await metadata(paths)).latestReply?.text === "partial\n")
+			await until(async () => (await readOutputTail(paths.output)).text === "partial\n")
 			expect(await Promise.race([pending, Bun.sleep(30).then(() => "waiting")])).toBe("waiting")
 			await runtime(paths).input("second\n", "stdin", { eof: true })
 			expect((await pending).details).toMatchObject({
@@ -295,7 +296,7 @@ describe("bash_bg real processes", () => {
 				label: "Sticky truncation"
 			})
 			const paths = pathsFor(workspace.cwd, result.details.id)
-			await until(async () => (await metadata(paths)).latestReply?.truncated === true)
+			await until(async () => (await readOutputTail(paths.output)).truncated)
 			await runtime(paths).input("\n".repeat(2100), "stdin", { eof: true })
 			const saved = await finished(paths)
 			expect(saved.latestReply?.truncated).toBe(true)
@@ -353,26 +354,6 @@ describe("bash_bg real processes", () => {
 		})
 	})
 
-	test("actual output-handle failure stops both pipes and retains a failure without leaking permits", async () => {
-		await fixture(async (workspace, tool) => {
-			const result = await execute(tool, workspace.cwd, {
-				command: "read -r go; while :; do printf output; printf error >&2; done",
-				label: "Output failure"
-			})
-			const paths = pathsFor(workspace.cwd, result.details.id)
-			await until(async () => (await metadata(paths)).state === "running")
-			const resident = runtime(paths)
-			await resident.log.close()
-			await resident.input("go\n", "stdin")
-			const saved = await finished(paths)
-			expect(saved.latestOutcome).toBe("failed")
-			expect(saved.latestReply?.text).toMatch(/closed|EBADF|file descriptor/i)
-			expect(saved.notifications).toHaveLength(1)
-			expect(resident.log.fd).toBe(-1)
-			expect(getBashCoordinator().activeCount).toBe(0)
-		})
-	})
-
 	test("stdin history I/O failure still retains failed metadata and kills the waiting process", async () => {
 		await fixture(async (workspace, tool) => {
 			const result = await execute(tool, workspace.cwd, { command: "cat", label: "History failure" })
@@ -391,17 +372,14 @@ describe("bash_bg real processes", () => {
 		})
 	})
 
-	test("fsync, close, and progress failures settle as failed while cleanup and metadata remain available", async () => {
+	test("fsync and close failures settle as failed while cleanup and metadata remain available", async () => {
 		await fixture(async (workspace, tool) => {
-			for (const operation of ["sync", "close", "progress"] as const) {
+			for (const operation of ["sync", "close"] as const) {
 				const result = await execute(tool, workspace.cwd, { command: "cat", label: `${operation} failure` })
 				const paths = pathsFor(workspace.cwd, result.details.id)
 				await until(async () => (await metadata(paths)).state === "running")
 				const resident = runtime(paths)
-				const failure =
-					operation === "progress"
-						? spyOn(resident, "flushProgress").mockRejectedValueOnce(new Error("progress I/O failed"))
-						: spyOn(resident.log, operation).mockRejectedValueOnce(new Error(`${operation} I/O failed`))
+				const failure = spyOn(resident.log, operation).mockRejectedValueOnce(new Error(`${operation} I/O failed`))
 				try {
 					await resident.input("output\n", "stdin", { eof: true })
 					const saved = await finished(paths)
@@ -439,20 +417,6 @@ describe("bash_bg real processes", () => {
 			expect(getAgentCoordinator().getResident(paths.taskDirectory)).toBeUndefined()
 			await discardTask(paths)
 			expect((await metadata(paths)).latestOutcome).toBe("failed")
-		})
-	})
-
-	test("coalesced output flushes the final burst even while the process is silent", async () => {
-		await fixture(async (workspace, tool) => {
-			const result = await execute(tool, workspace.cwd, {
-				command: "printf first; sleep 0.02; printf second; sleep 30",
-				label: "Burst output"
-			})
-			const paths = pathsFor(workspace.cwd, result.details.id)
-			await until(async () => (await metadata(paths)).latestReply?.text === "firstsecond")
-			expect((await metadata(paths)).state).toBe("running")
-			await stopTask(paths)
-			expect((await metadata(paths)).latestReply?.streaming).toBe(false)
 		})
 	})
 
@@ -505,8 +469,7 @@ describe("bash_bg real processes", () => {
 				const entries = await readdir(parent.parentDirectory).catch(() => [])
 				id = entries.find(entry => entry.startsWith("b_")) ?? ""
 				if (!id) return false
-				const loaded = await readTaskMetadata(pathsFor(workspace.cwd, id))
-				return loaded.status === "ok" && loaded.metadata.latestReply?.text.includes("ready") === true
+				return (await readOutputTail(pathsFor(workspace.cwd, id).output).catch(() => ({ text: "" }))).text.includes("ready")
 			})
 			abort.abort(new Error("Parent cancelled"))
 			await expect(pending).rejects.toThrow("Parent cancelled")
@@ -611,14 +574,14 @@ describe("bash_bg real processes", () => {
 		})
 	})
 
-	test("stop kills shell grandchildren; archival waits for pipes/log closure and fences late progress", async () => {
+	test("stop kills shell grandchildren; the log stops growing and late progress is fenced", async () => {
 		await fixture(async (workspace, tool) => {
 			const result = await execute(tool, workspace.cwd, {
 				command: "trap '' TERM; (trap '' TERM; while :; do printf 'still-running\\n'; sleep 0.01; done) & echo $! > grandchild; wait",
 				label: "Process group"
 			})
 			const paths = pathsFor(workspace.cwd, result.details.id)
-			await until(async () => (await metadata(paths)).latestReply?.text.includes("still-running") === true)
+			await until(async () => (await readOutputTail(paths.output)).text.includes("still-running"))
 			const runId = (await metadata(paths)).activeRun?.id
 			if (!runId) throw new Error("Missing live run")
 			const pid = Number(await readFile(join(workspace.cwd, "grandchild"), "utf8"))

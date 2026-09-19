@@ -1,10 +1,9 @@
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process"
+import { type ChildProcessByStdio, spawn } from "node:child_process"
 import { randomBytes } from "node:crypto"
 import { constants } from "node:fs"
 import { type FileHandle, open, rm, stat } from "node:fs/promises"
 import { resolve } from "node:path"
-import type { Readable } from "node:stream"
-import { StringDecoder } from "node:string_decoder"
+import type { Writable } from "node:stream"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Container, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui"
 import { type Static, Type } from "typebox"
@@ -27,17 +26,16 @@ import {
 	MAX_AGENT_INPUT_BYTES,
 	MAX_AGENT_LABEL_BYTES,
 	mutateTaskMetadata,
-	RETAINED_OUTPUT_MAX_BYTES,
-	RETAINED_OUTPUT_MAX_LINES,
 	RETAINED_OUTPUT_MAX_WAIT_MS,
+	readOutputTail,
 	readRetainedOutput,
 	readTaskMetadata,
 	reserveTaskStorage,
 	TASK_METADATA_VERSION,
 	type TaskStoragePaths,
-	writeTaskMetadata,
-	writeTaskProgress
+	writeTaskMetadata
 } from "./state.js"
+import { publishTaskUpdate } from "./updates.js"
 
 const BashParameters = Type.Object(
 	{
@@ -209,18 +207,13 @@ class BashRuntime implements ResidentAgent {
 	readonly #unbind: () => void
 	readonly #run: NonNullable<BashTaskMetadata["activeRun"]>
 	#done: Promise<void> | undefined
-	#child: ChildProcessWithoutNullStreams | undefined
+	#child: ChildProcessByStdio<Writable, null, null> | undefined
 	#stopRequested = false
 	#detached = false
 	#stdinClosed = false
 	#spawned = Promise.withResolvers<void>()
 	#inputLane: Promise<unknown> = Promise.resolve()
-	#outputLane: Promise<void> = Promise.resolve()
-	#progressTimer: ReturnType<typeof setTimeout> | undefined
-	#tail = ""
-	#truncated = false
 	#failure: string | undefined
-	#lastProgress = 0
 	#exitCode: number | null = null
 	#signal: string | null = null
 
@@ -408,12 +401,6 @@ class BashRuntime implements ResidentAgent {
 			} catch (error) {
 				if (error !== this.#abort.signal.reason) this.fail(error)
 			}
-			if (this.#progressTimer) clearTimeout(this.#progressTimer)
-			try {
-				await this.#outputLane
-			} catch (error) {
-				this.fail(error)
-			}
 			await this.#inputLane
 			try {
 				await this.log.sync()
@@ -443,12 +430,20 @@ class BashRuntime implements ResidentAgent {
 					outcome = this.#stopRequested ? "stopped" : "failed"
 					reason = this.#failure ?? reason
 				}
-				if (this.#failure) this.appendOutput(`\n[Bash error: ${this.#failure}]`)
+				// One final bounded tail, so settled tasks and notices read from metadata alone.
+				const tail = await readOutputTail(this.paths.output).catch((error: unknown) => {
+					this.fail(error)
+					return { text: "", truncated: false }
+				})
+				if (this.#failure) {
+					outcome = this.#stopRequested ? "stopped" : "failed"
+					tail.text += `\n[Bash error: ${this.#failure}]`
+				}
 				const completed = {
 					...metadata,
 					exitCode: this.#exitCode,
 					signal: this.#signal,
-					latestReply: { text: this.#tail || (outcome === "failed" ? reason : ""), streaming: false, truncated: this.#truncated }
+					latestReply: { text: tail.text || (outcome === "failed" ? reason : ""), streaming: false, truncated: tail.truncated }
 				}
 				const notification =
 					outcome !== "stopped" && metadata.activeRun.detachedAt !== undefined
@@ -478,7 +473,12 @@ class BashRuntime implements ResidentAgent {
 	}
 
 	private async process(): Promise<void> {
-		const child = spawn("bash", ["-c", this.metadata.command], { cwd: this.metadata.cwd, detached: true, stdio: "pipe" })
+		// Both streams share one append descriptor: the kernel writes the log and keeps their order.
+		const child = spawn("bash", ["-c", this.metadata.command], {
+			cwd: this.metadata.cwd,
+			detached: true,
+			stdio: ["pipe", this.log.fd, this.log.fd]
+		}) as ChildProcessByStdio<Writable, null, null>
 		this.#child = child
 		this.#spawned.resolve()
 		const groups = liveGroups()
@@ -491,14 +491,19 @@ class BashRuntime implements ResidentAgent {
 		child.stdin.on("error", () => {
 			this.#stdinClosed = true
 		})
-		// Jobs the shell left behind hold the pipes open; reap them so settlement isn't deferred to their exit.
-		child.once("exit", () => {
-			try {
-				this.kill()
-			} catch (error) {
-				this.#failure ??= `process-group cleanup failed: ${error instanceof Error ? error.message : String(error)}`
-			}
-		})
+		// Output bypasses this process, so live views refresh from the log's growth. A size
+		// check per second, not fs.watch: Bun's file watcher can deadlock the process on close.
+		let size = 0
+		const refresh = setInterval(() => {
+			void this.log
+				.stat()
+				.then(stats => {
+					if (stats.size === size) return
+					size = stats.size
+					publishTaskUpdate(this.paths.workspace, this.paths.parentSessionId)
+				})
+				.catch(() => {})
+		}, 1_000).unref()
 		const closed = new Promise<void>(resolve => {
 			child.once("close", (code, signal) => {
 				this.#exitCode = spawnError ? null : (code ?? null)
@@ -508,85 +513,20 @@ class BashRuntime implements ResidentAgent {
 			})
 		})
 		try {
-			const readers = await Promise.allSettled(
-				[child.stdout, child.stderr].map(stream =>
-					this.consume(stream).catch(error => {
-						this.fail(error)
-						throw error
-					})
-				)
-			)
 			await closed
 			if (spawnError) {
-				// Failed spawn can close pipes prematurely; retain its cause, not that symptom.
 				this.#failure = spawnError.message
 				throw spawnError
 			}
-			for (const result of readers) if (result.status === "rejected") throw result.reason
 		} finally {
-			// Also reap shell-launched jobs that redirected their pipes before the shell exited.
+			clearInterval(refresh)
+			// Contain jobs the shell left behind.
 			this.kill()
 			await closed
 			if (child.pid) groups.delete(child.pid)
 			this.#child = undefined
 		}
 	}
-
-	private async consume(stream: Readable): Promise<void> {
-		const decoder = new StringDecoder("utf8")
-		for await (const chunk of stream) {
-			const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-			const text = decoder.write(bytes)
-			// At most one pending chunk per pipe. Disk latency backpressures both producers.
-			this.#outputLane = this.#outputLane.then(async () => {
-				let offset = 0
-				while (offset < bytes.length) {
-					const { bytesWritten } = await this.log.write(bytes, offset, bytes.length - offset)
-					if (!bytesWritten) throw new Error("Bash output.log write made no progress")
-					offset += bytesWritten
-				}
-				this.appendOutput(text)
-				if (Date.now() - this.#lastProgress >= 100) await this.flushProgress(true)
-				else if (!this.#progressTimer) {
-					this.#progressTimer = setTimeout(() => {
-						this.#progressTimer = undefined
-						this.#outputLane = this.#outputLane.then(() => this.flushProgress(true))
-						void this.#outputLane.catch(error => this.fail(error))
-					}, 100)
-					this.#progressTimer.unref()
-				}
-			})
-			await this.#outputLane
-		}
-		const remainder = decoder.end()
-		if (remainder) {
-			this.#outputLane = this.#outputLane.then(() => {
-				this.appendOutput(remainder)
-			})
-			await this.#outputLane
-		}
-	}
-
-	private async flushProgress(streaming: boolean): Promise<void> {
-		this.#lastProgress = Date.now()
-		await writeTaskProgress(this.paths, this.#run.id, {
-			latestReply: { text: this.#tail, streaming, truncated: this.#truncated },
-			lastActivity: { at: this.#lastProgress, action: "output" }
-		})
-	}
-
-	private appendOutput(text: string): void {
-		const combined = this.#tail + text
-		this.#tail = outputTail(combined)
-		this.#truncated ||= this.#tail.length !== combined.length
-	}
-}
-
-function outputTail(text: string): string {
-	const bytes = Buffer.from(text)
-	let start = Math.max(0, bytes.length - RETAINED_OUTPUT_MAX_BYTES)
-	while (start < bytes.length && ((bytes[start] ?? 0) & 0xc0) === 0x80) start++
-	return bytes.subarray(start).toString("utf8").split("\n").slice(-RETAINED_OUTPUT_MAX_LINES).join("\n")
 }
 
 const LIVE_GROUPS = Symbol.for("@xl0/pi-lovely-agents/bash-process-groups/v1")
