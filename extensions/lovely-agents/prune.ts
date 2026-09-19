@@ -1,8 +1,8 @@
-#!/usr/bin/env bun
-import { lstat, readdir, readFile, rm } from "node:fs/promises"
+import { lstat, readdir, rm } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import {
 	acquireParentLease,
+	holdsParentLease,
 	type ParentLease,
 	parentStoragePaths,
 	readTaskMetadata,
@@ -12,14 +12,15 @@ import {
 	type TaskMetadata,
 	type TaskStoragePaths,
 	taskStoragePaths
-} from "../extensions/lovely-agents/state.js"
-import { errorMessage, hasCode, isRealDirectory } from "../extensions/lovely-agents/utils.js"
+} from "./state.js"
+import { errorMessage, hasCode, isRealDirectory } from "./utils.js"
 
 export type PruneResult = { apply: boolean; candidates: string[]; deleted: string[]; diagnostics: string[] }
 type RecordEntry = { paths: TaskStoragePaths; metadata?: TaskMetadata; reason?: string }
 
 /**
- * Explicit maintenance only. Coarse workspace-wide leases deliberately trade
+ * Explicit maintenance only, dry-run unless `apply`. Runs inside Pi: partitions
+ * this process already owns are used as-is and stay leased afterwards. Coarse workspace-wide leases deliberately trade
  * availability for safety; narrow locking only if offline pruning becomes a bottleneck.
  */
 export async function pruneTasks(cwd: string, apply = false): Promise<PruneResult> {
@@ -48,17 +49,10 @@ export async function pruneTasks(cwd: string, apply = false): Promise<PruneResul
 			}
 		}
 		for (const id of [...lockIds].sort()) {
-			const parent = parentStoragePaths(cwd, id)
-			try {
-				// acquireParentLease intentionally reuses in-process leases; maintenance must not.
-				const stats = await lstat(parent.lease)
-				if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Unsafe parent lease: ${parent.lease}`)
-				const current = JSON.parse(await readFile(parent.lease, "utf8"))
-				if (current?.pid === process.pid) throw new Error(`Parent partition is already open in this process: ${parent.parentDirectory}`)
-			} catch (error) {
-				if (!hasCode(error, "ENOENT")) throw error
-			}
-			leases.push(await acquireParentLease(cwd, id))
+			const _parent = parentStoragePaths(cwd, id)
+			const held = await holdsParentLease(cwd, id)
+			const lease = await acquireParentLease(cwd, id)
+			if (!held) leases.push(lease)
 		}
 		if ((await parentIds()).some(id => !lockIds.has(id))) throw new Error("Parent partitions changed during lease acquisition; retry")
 
@@ -198,20 +192,5 @@ async function validateTree(directory: string): Promise<void> {
 async function assertStorageDirectory(parent: { root: string; parentDirectory: string }): Promise<void> {
 	for (const directory of [dirname(parent.root), parent.root, parent.parentDirectory]) {
 		if (!(await isRealDirectory(directory))) throw new Error(`Unsafe or missing storage directory: ${directory}`)
-	}
-}
-
-if (import.meta.main) {
-	const args = process.argv.slice(2)
-	const apply = args.includes("--apply")
-	const positional = args.filter(arg => arg !== "--apply")
-	if (positional.length > 1 || positional.some(arg => arg.startsWith("-")) || args.filter(arg => arg === "--apply").length > 1) {
-		console.error("Usage: bun scripts/prune-tasks.ts [workspace] [--apply]")
-		process.exitCode = 1
-	} else {
-		const result = await pruneTasks(positional[0] ?? process.cwd(), apply)
-		for (const diagnostic of result.diagnostics) console.error(`Retained: ${diagnostic}`)
-		for (const path of apply ? result.deleted : result.candidates) console.log(`${apply ? "Deleted" : "Would delete"}: ${path}`)
-		console.log(`${apply ? "Applied" : "Dry run"}: ${apply ? result.deleted.length : result.candidates.length} task(s)`)
 	}
 }

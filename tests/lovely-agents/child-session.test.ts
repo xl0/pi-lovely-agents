@@ -3,9 +3,9 @@ import { stat } from "node:fs/promises"
 import { join } from "node:path"
 import { createSyntheticSourceInfo, ModelRuntime, type ScopedModel, type Skill } from "@earendil-works/pi-coding-agent"
 import {
-	buildDefinitionSystemPrompt,
 	childPromptOptions,
 	createChildSession,
+	definitionPromptSections,
 	resolveChildSessionSelection,
 	resolveChildToolPolicy
 } from "../../extensions/lovely-agents/child-session.js"
@@ -162,26 +162,20 @@ describe("child tools and prompt", () => {
 		expect(() => resolveChildToolPolicy({ parentDepth: 2, maximumDepth: 2, allowAgents: false })).toThrow("exceeds configured maximum")
 	})
 
-	test("composes the Definition body with active tools and Pi resources", () => {
-		const prompt = buildDefinitionSystemPrompt({
+	test("adds Pi's tool list and deduplicated tool/prompt rules as sections", () => {
+		const sections = definitionPromptSections({
 			customPrompt: "Own the review role.",
 			selectedTools: ["bash", "review"],
 			toolSnippets: { bash: "Run commands", review: "Record a finding" },
+			toolGuidelines: { review: ["Cite file paths"], hidden: ["Never shown"] },
 			promptGuidelines: ["Verify every claim", "Verify every claim"],
-			appendSystemPrompt: "Appended policy",
-			contextFiles: [{ path: "/workspace/AGENTS.md", content: "Project policy" }],
-			skills: [skill("audit", "Audit changes", "/skills/audit/SKILL.md")],
-			cwd: "C:\\workspace"
+			cwd: "/workspace"
 		})
-		expect(prompt.startsWith("Own the review role.\n\nAvailable tools:")).toBe(true)
-		expect(prompt).toContain("- review: Record a finding")
-		expect(prompt.match(/Verify every claim/g)).toHaveLength(1)
-		expect(prompt).toContain("Appended policy")
-		expect(prompt).toContain('<project_instructions path="/workspace/AGENTS.md">')
-		expect(prompt).toContain("Use bash to load a skill")
-		expect(prompt).toContain("Current working directory: C:/workspace")
+		expect(sections.tools).toContain("- review: Record a finding")
+		expect(sections.rules.match(/Verify every claim/g)).toHaveLength(1)
+		expect(sections.rules).toContain("- Cite file paths")
+		expect(sections.rules).not.toContain("Never shown")
 		expect(childPromptOptions(false)).toEqual({ expandPromptTemplates: false })
-		expect(childPromptOptions(true)).toEqual({ expandPromptTemplates: true })
 	})
 })
 
@@ -430,7 +424,7 @@ function model(provider: string, id: string): ScopedModel["model"] {
 	return { provider, id, name: id } as ScopedModel["model"]
 }
 
-function skill(name: string, description: string, filePath: string): Skill {
+function _skill(name: string, description: string, filePath: string): Skill {
 	return {
 		name,
 		description,

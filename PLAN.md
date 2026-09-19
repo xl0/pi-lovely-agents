@@ -204,8 +204,6 @@ stop, discard. No slash-command mirror of the model tools.
 - Let the kernel write Bash output straight to `output.log`; read tails on
   demand instead of mirroring them into metadata.
 - Drop agent `history.md` in favor of `session.jsonl`.
-- Compose the child prompt through Pi's prompt `sections` once a Pi release
-  ships that API.
 
 ### [ ] Release hygiene
 
@@ -213,8 +211,8 @@ stop, discard. No slash-command mirror of the model tools.
   already-published version. Publishing needs explicit approval.
 - Decide on committing a lockfile for the publish job; `bun.lock` is ignored
   because local Pi packages are linked.
-- The pruner cannot run from a Pi-managed install (peer `typebox` is omitted);
-  either document checkout-only use permanently or stop shipping it.
+- Release only after a Pi newer than 0.85.1 ships: the child prompt uses its
+  prompt `sections` API.
 
 ### [ ] Cache-preserving context forks
 

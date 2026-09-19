@@ -118,7 +118,7 @@ that is how task trees are walked (stop, discard, prune, descendant counts).
 - `config.ts`, `definitions.ts`: settings/models; Definition discovery and trust
 - `management.ts`, `task-panel.ts`, `rendering.ts`: TUI
 - `updates.ts`, `utils.ts`: refresh routes; shared helpers
-- `scripts/prune-tasks.ts`: offline, dry-run-first deletion of discarded trees
+- `prune.ts`: dry-run-first deletion of discarded trees, from `/lovely-agents`
 - `skills/`: delegation guidance and Definition authoring; `README.md` is for humans
 
 ESM; Pi discovers `./extensions` and `./skills` from the manifest. Pi packages
@@ -167,11 +167,12 @@ delegation, `agent` and `agent_roster` are excluded in the SDK registry. Depth
 and `allowAgents` are registered per session in the coordinator before child
 extensions start.
 
-A hidden first extension composes the prompt (Definition body, tool list, tool
-and prompt guidelines, append text, context files, skills, cwd) and registers
-child-only `task_update({ progress })`. It re-implements Pi's builder because
-released Pi has no way to add sections to a custom prompt; switch to
-`systemPromptOptions.sections` once that ships. The handle's `prompt` binds the
+The Definition body is Pi's custom prompt, so Pi renders append text, context
+files, skills, and cwd itself. Pi omits its tool list and rules for custom
+prompts; a hidden first extension adds them back through
+`systemPromptOptions.sections` (needs Pi newer than 0.85.1; Pi does not export
+its rule builder, so `definitionPromptSections` mirrors it). The same extension
+registers child-only `task_update({ progress })`. The handle's `prompt` binds the
 run ID through async-local storage, so late callbacks cannot adopt a later run.
 A lifetime signal aborts before SDK disposal (which emits no
 `session_shutdown`) so the child's extension instance unbinds its routes.
@@ -265,8 +266,10 @@ through one path in `lifecycle.ts`, shared with startup reconciliation.
 Quit/new/resume/fork stop the owned tree before releasing leases; failed
 cleanup keeps its leases for retry. Reload skips all of this.
 
-The pruner takes every partition lease, refuses live owners, and deletes only
-discarded, settled, fully-notified trees, descendants first. Unknown or
+The pruner (`/lovely-agents` → Prune discarded tasks: dry run, confirm, apply)
+takes every partition lease in the workspace, refuses another process's live
+lease, leaves leases this process already held, and deletes only discarded,
+settled, fully-notified trees, descendants first. Unknown or
 malformed records, symlinks, ambiguous ownership, and retained descendants
 block removal.
 

@@ -2,7 +2,8 @@ import { lstat, readFile } from "node:fs/promises"
 import { DynamicBorder, type ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Container, Key, matchesKey, type SelectItem, SelectList, Text, truncateToWidth } from "@earendil-works/pi-tui"
 import type { AgentDefinition, DefinitionDiagnostic, DefinitionDiscoveryResult } from "./definitions.js"
-import { parentStoragePaths, readRetainedOutput, readTaskMetadata, taskStoragePaths } from "./state.js"
+import { type PruneResult, pruneTasks } from "./prune.js"
+import { displayWorkspacePath, parentStoragePaths, readRetainedOutput, readTaskMetadata, taskStoragePaths } from "./state.js"
 import { relativeTime, type TaskListResult, type TaskListRow } from "./tools.js"
 import { bindTaskUpdateRoute } from "./updates.js"
 import { hasCode } from "./utils.js"
@@ -28,7 +29,8 @@ export async function openManagementUi(ctx: ExtensionContext, options: Managemen
 				description: `${definitions.diagnostics.length} diagnostics`
 			},
 			{ value: "tasks", label: `Tasks (${tasks.tasks.length})`, description: "Inspect durable direct children" },
-			{ value: "config", label: "Configuration", description: "Edit user and workspace settings" }
+			{ value: "config", label: "Configuration", description: "Edit user and workspace settings" },
+			{ value: "prune", label: "Prune discarded tasks", description: "Permanently delete discarded task files in this workspace" }
 		])
 		if (!choice) return
 
@@ -42,8 +44,27 @@ export async function openManagementUi(ctx: ExtensionContext, options: Managemen
 			case "config":
 				await options.openConfig()
 				break
+			case "prune":
+				await pruneDiscardedTasks(ctx)
+				break
 		}
 	}
+}
+
+/** Dry-run first; deletion needs an explicit confirmation of the exact candidate list. */
+async function pruneDiscardedTasks(ctx: ExtensionContext): Promise<void> {
+	const dry = await pruneTasks(ctx.cwd)
+	const report = (result: PruneResult, paths: string[], verb: string) =>
+		[
+			`${verb}: ${paths.length} task(s)`,
+			...paths.map(path => `  ${displayWorkspacePath(ctx.cwd, path)}`),
+			...(result.diagnostics.length > 0 ? ["", "Retained:", ...result.diagnostics.map(line => `  ${line}`)] : [])
+		].join("\n")
+	await showText(ctx, "Prune discarded tasks (dry run)", report(dry, dry.candidates, "Would delete"))
+	if (dry.candidates.length === 0) return
+	if (!(await ctx.ui.confirm("Prune discarded tasks", `Permanently delete ${dry.candidates.length} discarded task(s)?`))) return
+	const applied = await pruneTasks(ctx.cwd, true)
+	await showText(ctx, "Prune discarded tasks", report(applied, applied.deleted, "Deleted"))
 }
 
 export async function openTaskManagementUi(ctx: ExtensionContext, options: ManagementUiOptions, selection: string): Promise<void> {

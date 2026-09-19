@@ -459,12 +459,15 @@ export async function releaseParentLease(lease: ParentLease): Promise<void> {
 	await removeIfPresent(lease.paths.lease)
 }
 
+export async function holdsParentLease(cwd: string, parentSessionId: string): Promise<boolean> {
+	const loaded = await loadParentLease(parentStoragePaths(cwd, parentSessionId).lease)
+	return loaded.status === "ok" && loaded.lease.pid === process.pid && loaded.lease.token === processToken()
+}
+
 /** Releases this process's lease by identity after a semantic parent close. */
 export async function releaseParentLeaseFor(cwd: string, parentSessionId: string): Promise<boolean> {
-	const path = parentStoragePaths(cwd, parentSessionId).lease
-	const loaded = await loadParentLease(path)
-	if (loaded.status !== "ok" || loaded.lease.pid !== process.pid || loaded.lease.token !== processToken()) return false
-	await removeIfPresent(path)
+	if (!(await holdsParentLease(cwd, parentSessionId))) return false
+	await removeIfPresent(parentStoragePaths(cwd, parentSessionId).lease)
 	return true
 }
 

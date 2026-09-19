@@ -197,15 +197,11 @@ them as potentially sensitive. Each task keeps its original
 Keep tasks until dependent work is integrated, then discard what is no longer
 needed.
 
-There is no automatic deletion. From a package checkout with dependencies installed
-(`bun install`; Pi-managed installs omit the peer dependencies the script needs):
+There is no automatic deletion. **`/lovely-agents` → Prune discarded tasks**
+shows what would be deleted in this workspace and asks before deleting.
 
-```bash
-bun scripts/prune-tasks.ts /path/to/workspace          # dry-run
-bun scripts/prune-tasks.ts /path/to/workspace --apply  # permanently delete eligible tasks
-```
-
-Pruning requires closed parent sessions and retains non-discarded tasks, pending
+Pruning skips nothing silently: it refuses while another Pi process has a
+session open here, and retains non-discarded tasks, pending
 notifications, unknown/corrupt records, and unsafe or still-needed descendants.
 Crash leftovers stay until
 their parent is reopened; abandoned sessions are not automatically collected.

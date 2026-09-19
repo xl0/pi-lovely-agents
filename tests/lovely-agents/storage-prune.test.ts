@@ -1,17 +1,19 @@
 import { expect, test } from "bun:test"
 import { lstat, mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { pruneTasks } from "../../extensions/lovely-agents/prune.js"
 import {
 	acquireParentLease,
 	ensureParentStorage,
+	holdsParentLease,
 	mutateTaskMetadata,
+	parentStoragePaths,
 	releaseParentLease,
 	reserveTaskStorage,
 	TASK_METADATA_VERSION,
 	type TaskMetadata,
 	writeTaskMetadata
 } from "../../extensions/lovely-agents/state.js"
-import { pruneTasks } from "../../scripts/prune-tasks.js"
 import { withTempWorkspace } from "./test-helpers.js"
 
 test("pruning defaults to dry-run, deletes only explicit tombstones, and is idempotent", async () => {
@@ -82,30 +84,26 @@ test("retained or corrupt descendants block owner removal; eligible trees delete
 	})
 })
 
-test("pruning refuses live parent or descendant leases without releasing another owner's lease", async () => {
+test("pruning refuses another process's live lease and keeps this process's own", async () => {
 	await withTempWorkspace(async workspace => {
 		const owner = await task(workspace.cwd, "parent", "a_11111111", { discardedAt: 2 }, "child")
 		await task(workspace.cwd, "child", "b_22222222", { discardedAt: 2 })
-		for (const id of ["parent", "child"]) {
-			const lease = await acquireParentLease(workspace.cwd, id)
-			try {
-				const original = await readFile(lease.paths.lease, "utf8")
-				const result = await pruneTasks(workspace.cwd, true)
-				expect(result.deleted).toEqual([])
-				expect(result.diagnostics.join()).toContain("already open")
-				expect(await readFile(lease.paths.lease, "utf8")).toBe(original)
-				const child = Bun.spawn(["bun", join(import.meta.dir, "../../scripts/prune-tasks.ts"), workspace.cwd, "--apply"], {
-					stdout: "pipe",
-					stderr: "pipe"
-				})
-				expect(await child.exited).toBe(0)
-				expect(await new Response(child.stderr).text()).toContain("owned by live process")
-				expect(await readFile(lease.paths.lease, "utf8")).toBe(original)
-			} finally {
-				await releaseParentLease(lease)
-			}
-		}
-		expect((await lstat(owner.taskDirectory)).isDirectory()).toBe(true)
+		const foreign = `${JSON.stringify({ version: 1, pid: process.ppid, token: "f".repeat(32), createdAt: 1 })}\n`
+		const childLease = parentStoragePaths(workspace.cwd, "child").lease
+		await writeFile(childLease, foreign, { mode: 0o600 })
+		const refused = await pruneTasks(workspace.cwd, true)
+		expect(refused.deleted).toEqual([])
+		expect(refused.diagnostics.join()).toContain("owned by live process")
+		expect(await readFile(childLease, "utf8")).toBe(foreign)
+		await unlink(childLease)
+
+		// The session running the command owns its partition; pruning must not release it.
+		const own = await acquireParentLease(workspace.cwd, "parent")
+		expect((await pruneTasks(workspace.cwd, true)).deleted).toHaveLength(2)
+		await expect(lstat(owner.taskDirectory)).rejects.toMatchObject({ code: "ENOENT" })
+		expect(await holdsParentLease(workspace.cwd, "parent")).toBe(true)
+		expect(await holdsParentLease(workspace.cwd, "child")).toBe(false)
+		await releaseParentLease(own)
 	})
 })
 
@@ -138,24 +136,6 @@ test("cyclic ownership and symlinked root storage are never pruned", async () =>
 		expect(result.deleted).toEqual([])
 		expect(result.diagnostics.join()).toContain("Unsafe storage directory")
 		expect((await lstat(owner.taskDirectory)).isDirectory()).toBe(true)
-	})
-})
-
-test("standalone pruning requires explicit --apply and rejects unknown flags", async () => {
-	await withTempWorkspace(async workspace => {
-		const paths = await task(workspace.cwd, "parent", "b_11111111", { discardedAt: 2 })
-		const script = join(import.meta.dir, "../../scripts/prune-tasks.ts")
-		for (const args of [[workspace.cwd], ["--unknown"]]) {
-			const process = Bun.spawn(["bun", script, ...args], { stdout: "pipe", stderr: "pipe" })
-			const output = await new Response(process.stdout).text()
-			expect(await process.exited).toBe(args[0] === "--unknown" ? 1 : 0)
-			if (args[0] !== "--unknown") expect(output).toContain("Would delete")
-			expect((await lstat(paths.taskDirectory)).isDirectory()).toBe(true)
-		}
-		const process = Bun.spawn(["bun", script, workspace.cwd, "--apply"], { stdout: "pipe", stderr: "pipe" })
-		expect(await process.exited).toBe(0)
-		expect(await new Response(process.stdout).text()).toContain("Deleted")
-		await expect(lstat(paths.taskDirectory)).rejects.toMatchObject({ code: "ENOENT" })
 	})
 })
 
