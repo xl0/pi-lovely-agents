@@ -728,7 +728,7 @@ class AgentRuntime implements ResidentAgent {
 					// Inputs are logged as the child session observes them: the first is the run's
 					// prompt, later ones are delivered Steers.
 					this.#sawInput = false
-					await appendHistoryLog(this.#paths, { type: "run-start", sequence: run.sequence, kind: run.kind })
+					this.queueEventWrite(() => appendHistoryLog(this.#paths, { type: "run-start", sequence: run.sequence, kind: run.kind }))
 					await this.#child.prompt(run.id, run.input, childPromptOptions(this.#expandPromptTemplates))
 					await this.#eventWrites
 					outcome = this.#stopRequested ? "stopped" : (this.#lastAssistantOutcome ?? "failed")
@@ -803,7 +803,8 @@ class AgentRuntime implements ResidentAgent {
 				updatedAt: timestamp
 			}
 		})
-		if (won) await appendHistoryLog(this.#paths, { type: "run-end", sequence: run.sequence, outcome })
+		// Observability only: a failed append must not skip notification delivery below.
+		if (won) await appendHistoryLog(this.#paths, { type: "run-end", sequence: run.sequence, outcome }).catch(() => {})
 		if (won && notification) await deliverTaskNotifications(this.#paths).catch(() => {})
 		if (run.id === this.#initialRunId) this.#initialCompletion.resolve(undefined)
 	}

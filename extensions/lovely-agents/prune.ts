@@ -19,11 +19,11 @@ export type PruneResult = { apply: boolean; candidates: string[]; deleted: strin
 type RecordEntry = { paths: TaskStoragePaths; metadata?: TaskMetadata; reason?: string }
 
 /**
- * Explicit maintenance only, dry-run unless `apply`. Runs inside Pi: partitions
+ * Explicit maintenance only, dry-run unless `apply`; `confirmed` limits deletion to reviewed candidates. Runs inside Pi: partitions
  * this process already owns are used as-is and stay leased afterwards. Coarse workspace-wide leases deliberately trade
  * availability for safety; narrow locking only if offline pruning becomes a bottleneck.
  */
-export async function pruneTasks(cwd: string, apply = false): Promise<PruneResult> {
+export async function pruneTasks(cwd: string, apply = false, confirmed?: readonly string[]): Promise<PruneResult> {
 	cwd = resolve(cwd)
 	const result: PruneResult = { apply, candidates: [], deleted: [], diagnostics: [] }
 	const root = parentStoragePaths(cwd, "prune").root
@@ -142,6 +142,8 @@ export async function pruneTasks(cwd: string, apply = false): Promise<PruneResul
 		result.candidates = ordered.map(record => record.paths.taskDirectory)
 		if (apply) {
 			for (const { paths } of ordered) {
+				// Tasks that became eligible after the reviewed dry run wait for the next one.
+				if (confirmed && !confirmed.includes(paths.taskDirectory)) continue
 				await assertStorageDirectory(paths)
 				if (!(await isRealDirectory(paths.taskDirectory))) throw new Error(`Not a task directory: ${paths.taskDirectory}`)
 				await validateTree(paths.taskDirectory)
