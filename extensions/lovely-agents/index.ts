@@ -1,11 +1,11 @@
-import { BorderedLoader, CustomEditor, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent"
+import { BorderedLoader, CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { ScopedConfigEditor } from "@xl0/pi-lovely-config"
-import { controlTaskLifecycle, recoverProviderTuple, registerAgentTool, registerTaskInputTool, sendTaskInput } from "./agent.js"
+import { controlTaskLifecycle, registerAgentTool, registerTaskInputTool, sendTaskInput } from "./agent.js"
 import { registerBashTool } from "./bash.js"
 import { type AgentsConfig, type AgentsConfigWarning, createAgentsConfigSpec, defaultAgentsConfig, resolveAgentsConfig } from "./config.js"
 import { getAgentCoordinator, getBashCoordinator } from "./coordinator.js"
 import { discoverAgentDefinitions, projectResourcesTrusted } from "./definitions.js"
-import { reconcileParentTasks, recoverOwnedTaskTree, stopOwnedTaskTree } from "./lifecycle.js"
+import { reconcileParentTasks, stopOwnedTaskTree } from "./lifecycle.js"
 import { type ManagementUiOptions, openManagementUi, openTaskManagementUi } from "./management.js"
 import {
 	clearNotificationInFlight,
@@ -19,6 +19,7 @@ import { renderAgentNotification } from "./rendering.js"
 import { acquireParentLease, ParentLeaseConflictError } from "./state.js"
 import { createTaskPanel } from "./task-panel.js"
 import { loadTaskList, registerRosterTool, registerTaskTools } from "./tools.js"
+import { errorMessage } from "./utils.js"
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>
 const LOVELY_TOOLS = new Set(["agent", "agent_roster", "bash_bg", "task_list", "task_output", "task_input", "task_stop", "task_discard"])
@@ -75,7 +76,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			const options = { getConfig: () => configValue }
 			const send = (signal?: AbortSignal) =>
 				sendTaskInput(ctx, options, id, content, delivery === "stdin" ? undefined : delivery, signal, eof === undefined ? {} : { eof })
-			if (configValue.backgroundAgents && delivery !== "stdin") {
+			if (delivery !== "stdin") {
 				await send()
 				return
 			}
@@ -275,11 +276,6 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		if (event.reason !== "reload") clearNotificationInFlight(ctx.cwd, ctx.sessionManager.getSessionId())
 	})
 
-	pi.on("turn_end", event => {
-		const tuple = successfulTurnTuple(event.message)
-		if (tuple) recoverProviderTuple(tuple)
-	})
-
 	pi.registerCommand("lovely-agents", {
 		description: "Manage Lovely Agent definitions, tasks, and settings",
 		async handler(_args, ctx) {
@@ -293,38 +289,6 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			} catch (error) {
 				ctx.ui.notify(`Lovely Agents management error: ${errorMessage(error)}`, "error")
 			}
-		}
-	})
-
-	pi.registerCommand("continue", {
-		description: "Retry the latest errored or aborted turn",
-		handler: async (_args, ctx) => {
-			if (ownershipWarning) {
-				ctx.ui.notify(ownershipWarning, "warning")
-				return
-			}
-			if (!ctx.isIdle()) {
-				ctx.ui.notify("Agent is still running", "warning")
-				return
-			}
-			if (!latestReplyWasInterrupted(ctx.sessionManager.getBranch())) return
-			try {
-				const recovered = await recoverOwnedTaskTree(ctx.cwd, ctx.sessionManager.getSessionId())
-				if (recovered.diagnostics.length > 0) {
-					ctx.ui.notify(`Lovely Agents skipped ${recovered.diagnostics.length} task(s) during recovery.`, "warning")
-				}
-			} catch (error) {
-				ctx.ui.notify(`Lovely Agents recovery failed: ${errorMessage(error)}`, "warning")
-				return
-			}
-			pi.sendMessage(
-				{
-					customType: "lovely-agents:continue",
-					content: [],
-					display: false
-				},
-				{ triggerTurn: true, deliverAs: "followUp" }
-			)
 		}
 	})
 
@@ -344,36 +308,6 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	})
 }
 
-export function successfulTurnTuple(message: {
-	role: string
-	stopReason?: string
-	provider?: string
-	model?: string
-}): { provider: string; model: string } | undefined {
-	if (
-		message.role !== "assistant" ||
-		(message.stopReason !== "stop" && message.stopReason !== "toolUse") ||
-		!message.provider ||
-		!message.model
-	) {
-		return undefined
-	}
-	return { provider: message.provider, model: message.model }
-}
-
-export function latestReplyWasInterrupted(entries: readonly SessionEntry[]): boolean {
-	for (let index = entries.length - 1; index >= 0; index--) {
-		const entry = entries[index]
-		if (entry?.type !== "message" || entry.message.role !== "assistant") continue
-		return entry.message.stopReason === "error" || entry.message.stopReason === "aborted"
-	}
-	return false
-}
-
 function notifyConfigWarnings(ctx: ExtensionContext, warnings: readonly AgentsConfigWarning[]): void {
 	for (const warning of warnings) ctx.ui.notify(`${warning.path}: ${warning.message}`, "warning")
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error)
 }

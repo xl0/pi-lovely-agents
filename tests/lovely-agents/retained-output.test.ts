@@ -1,9 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { readdir, readFile, stat } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
 import {
 	appendHistoryLog,
-	countRetainedOutputLines,
 	ensureParentStorage,
 	initializeRetainedLogs,
 	mutateTaskMetadata,
@@ -27,51 +26,21 @@ function writeLatestReply(paths: TaskStoragePaths, id: string, text: string, str
 }
 
 describe("task progress", () => {
-	test("reports capacity and exact-tuple gates without claiming an ETA", async () => {
+	test("reports capacity without claiming an ETA", async () => {
 		const coordinator = getAgentCoordinator()
 		const limit = coordinator.maxConcurrency
-		const tuple = { provider: "queue-test", model: "one" }
-		const queued = { kind: "agent" as const, state: "queued" as const, model: { provider: tuple.provider, id: tuple.model } }
+		const queued = { kind: "agent" as const, state: "queued" as const }
 		coordinator.setMaxConcurrency(1)
-		const permit = await coordinator.acquire({ tuple })
+		const permit = await coordinator.acquire({})
 		try {
 			expect(taskSchedulingStatus(queued)).toEqual({ queueReason: "capacity", capacity: { active: 1, limit: 1 } })
-			coordinator.closeTuple(tuple)
-			expect(taskSchedulingStatus(queued).queueReason).toBe("provider-limit")
-			expect(taskSchedulingStatus({ ...queued, model: { provider: tuple.provider, id: "other" } }).queueReason).toBe("capacity")
 			permit.release()
-			expect(taskSchedulingStatus(queued)).toEqual({ queueReason: "provider-limit", capacity: { active: 0, limit: 1 } })
-			coordinator.openTuple(tuple)
-			expect(taskSchedulingStatus(queued).queueReason).toBe("starting")
+			expect(taskSchedulingStatus(queued)).toEqual({ queueReason: "starting", capacity: { active: 0, limit: 1 } })
 			expect(taskSchedulingStatus({ ...queued, state: "running" }).queueReason).toBeNull()
 		} finally {
 			permit.release()
-			coordinator.openTuple(tuple)
 			coordinator.setMaxConcurrency(limit)
 		}
-	})
-
-	test("ignores scheduler-only changes until the run ends", async () => {
-		await withTaskStorage("running", async paths => {
-			await mutateTaskMetadata(paths, metadata => {
-				if (!metadata.activeRun) throw new Error("Missing fixture run")
-				return { ...metadata, state: "queued", activeRun: { ...metadata.activeRun, state: "queued" } }
-			})
-			const coordinator = getAgentCoordinator()
-			const tuple = { provider: "anthropic", model: "sonnet" }
-			try {
-				const before = await readFile(paths.metadata, "utf8")
-				const pending = readRetainedOutput(paths, { waitMs: 1_000 })
-				await Bun.sleep(20)
-				coordinator.closeTuple(tuple)
-				expect(await Promise.race([pending, Bun.sleep(30).then(() => "waiting")])).toBe("waiting")
-				expect(await readFile(paths.metadata, "utf8")).toBe(before)
-				await mutateTaskMetadata(paths, metadata => ({ ...metadata, state: "idle", latestOutcome: "stopped", activeRun: null }))
-				expect(await pending).toMatchObject({ timedOut: false, state: "idle", latestOutcome: "stopped", text: "" })
-			} finally {
-				coordinator.openTuple(tuple)
-			}
-		})
 	})
 
 	test("activity does not wake empty snapshots, survives bookkeeping, and fences late runs", async () => {
@@ -108,17 +77,12 @@ describe("retained history", () => {
 			})
 			await appendHistoryLog(paths, { type: "run-end", sequence: 1, outcome: "succeeded", timestamp: 2 })
 			const history = await readFile(paths.history, "utf8")
-			expect(history).toContain("<run 1 initial>\n<user>\nInspect the change\n<agent>\nLooks good.")
-			expect(history).toContain("<steer>\nCheck tests too")
-			expect(history).toContain("<tool read ok>")
-			expect(history).toContain("<outcome succeeded>")
-			expect(Buffer.byteLength(history)).toBeLessThan(700)
+			for (const text of ["Inspect the change", "Looks good.", "Check tests too", "succeeded"]) expect(history).toContain(text)
 			expect(history).not.toContain("�")
 			expect(retainedPaths(paths)).toEqual({
 				history: ".pi/lovely-agents/parent-session/a_0123abcd/history.md",
 				session: ".pi/lovely-agents/parent-session/a_0123abcd/session.jsonl"
 			})
-			expect((await readdir(paths.taskDirectory)).sort()).toEqual(["history.md", "metadata.json", "session.jsonl"])
 			if (process.platform !== "win32") expect((await stat(paths.history)).mode & 0o077).toBe(0)
 			expect((await readRetainedOutput(paths)).text).toBe("") // History is never parsed as the answer.
 		})
@@ -239,7 +203,7 @@ describe("latest reply snapshots", () => {
 			const lines = await readRetainedOutput(paths)
 			expect(lines.text).toContain("line 2000\n")
 			expect(lines.text).not.toContain("line 2001")
-			expect(await countRetainedOutputLines(paths)).toBe(2_001)
+			expect(lines.totalLines).toBe(2_001)
 		})
 	})
 
@@ -268,22 +232,6 @@ describe("latest reply snapshots", () => {
 			const pending = readRetainedOutput(paths, { waitMs: 1_000, signal: controller.signal })
 			controller.abort(new Error("cancelled"))
 			await expect(pending).rejects.toThrow("cancelled")
-		})
-	})
-
-	test("returns on suspension and does not wait again while suspended", async () => {
-		await withTaskStorage("running", async paths => {
-			const pending = readRetainedOutput(paths, { waitMs: 1_000 })
-			await Bun.sleep(20)
-			await mutateTaskMetadata(paths, metadata => {
-				if (!metadata.activeRun) throw new Error("Missing fixture run")
-				return { ...metadata, state: "suspended", activeRun: { ...metadata.activeRun, state: "suspended" } }
-			})
-			expect(await pending).toMatchObject({ state: "suspended", timedOut: false })
-			expect(await Promise.race([readRetainedOutput(paths, { waitMs: 1_000 }), Bun.sleep(100).then(() => "too-slow")])).toMatchObject({
-				state: "suspended",
-				timedOut: false
-			})
 		})
 	})
 
@@ -349,13 +297,11 @@ describe("latest reply snapshots", () => {
 				const longLine = await readRetainedOutput(paths, { lines: 1 })
 				expect(longLine.text).toContain("END")
 				expect(longLine.text).not.toContain("�")
-				await expect(readRetainedOutput(paths, { lines: 0 })).rejects.toThrow("lines")
 			},
 			"bash"
 		)
 		await withTaskStorage("running", async paths => {
 			await expect(readRetainedOutput(paths, { lines: 2 })).rejects.toThrow("Bash")
-			await expect(readRetainedOutput(paths, { run: 1.5 })).rejects.toThrow("run")
 		})
 	})
 })

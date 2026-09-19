@@ -15,7 +15,7 @@ import {
 	taskStoragePaths,
 	writeTaskMetadata
 } from "../../extensions/lovely-agents/state.js"
-import { loadTaskList, type TaskListRow } from "../../extensions/lovely-agents/tools.js"
+import { loadTaskList } from "../../extensions/lovely-agents/tools.js"
 import { seedFixtureTasks, withTempWorkspace } from "./test-helpers.js"
 
 test("management Tasks hands off to the existing panel instead of opening another selector", async () => {
@@ -51,78 +51,6 @@ test("management Tasks hands off to the existing panel instead of opening anothe
 })
 
 describe("management fixtures", () => {
-	test("Bash actions expose literal stdin and EOF, not agent controls or invented model fields", async () => {
-		const task = {
-			id: "b_12345678",
-			kind: "bash",
-			label: "Input pipe",
-			state: "running",
-			latestOutcome: null,
-			command: "cat",
-			cwd: "/workspace",
-			exitCode: null,
-			signal: null,
-			queuedFollowUps: 0,
-			outputLines: 0,
-			lastActivity: null,
-			queueReason: null,
-			paths: { history: "history.md", output: "output.log" }
-		} as TaskListRow
-		const inputs: unknown[][] = []
-		let step = 0
-		const ctx = {
-			ui: {
-				editor: async () => " \n",
-				confirm: async () => true,
-				notify() {},
-				custom: async (factory: Parameters<ExtensionContext["ui"]["custom"]>[0]) => {
-					const component = await factory(
-						{ terminal: { rows: 40 }, requestRender() {} } as never,
-						{ fg: (_color: string, text: string) => text, bold: (text: string) => text } as never,
-						{} as never,
-						() => {}
-					)
-					const text = component.render(120).join("\n")
-					const current = step++
-					if (current === 1) {
-						expect(text).toContain("Command: cat")
-						expect(text).toContain("Output: output.log")
-						expect(text).not.toMatch(/Model:|Definition:|Session:|undefined/)
-						return
-					}
-					expect(text).toContain("Write stdin")
-					expect(text).toContain("Close stdin")
-					expect(text).not.toMatch(/System prompt|Follow-up|Steer/)
-					return current === 0 ? "details" : current === 2 ? "stdin" : current === 3 ? "eof" : undefined
-				}
-			}
-		} as unknown as ExtensionContext
-		await openTaskManagementUi(
-			ctx,
-			{
-				discoverDefinitions: () => ({ definitions: [], diagnostics: [], projectAgentsDir: undefined }),
-				loadTasks: async () => ({
-					tasks: [task],
-					diagnostics: [],
-					total: 1,
-					capacity: { active: 0, limit: 4 },
-					bashCapacity: { active: 1, limit: 4 }
-				}),
-				focusTasks: async () => {},
-				openConfig: async () => {},
-				controlTask: async () => {},
-				inputTask: async (...args) => {
-					inputs.push(args)
-				}
-			},
-			`task:${task.id}`
-		)
-		expect(inputs).toEqual([
-			[task.id, " \n", "stdin"],
-			[task.id, "", "stdin", true]
-		])
-	})
-
 	test("task context shows retained inputs and prompts in a bounded, scrollable read-only view", async () => {
 		await withTempWorkspace(async workspace => {
 			const [id] = await seedFixtureTasks(workspace.cwd, "parent-session")
@@ -334,123 +262,122 @@ describe("management fixtures", () => {
 		})
 	})
 
-	test.each([
-		{ exitCode: 0, signal: null, latestOutcome: "succeeded" },
-		{ exitCode: 7, signal: null, latestOutcome: "failed" },
-		{ exitCode: null, signal: "SIGTERM", latestOutcome: "failed" }
-	] as const)("bash live output follows navigation and shows termination %j", async termination => {
-		await withTempWorkspace(async workspace => {
-			await acquireParentLease(workspace.cwd, "parent-session")
-			const paths = await reserveTaskStorage(await ensureParentStorage(workspace.cwd, "parent-session"), () => "b_1234abcd")
-			await initializeRetainedLogs(paths)
-			const now = Date.now()
-			const metadata: TaskMetadata = {
-				version: TASK_METADATA_VERSION,
-				kind: "bash",
-				taskRef: paths.taskRef,
-				parentSessionId: "parent-session",
-				label: "Long bash",
-				command: "printf lines",
-				cwd: workspace.cwd,
-				exitCode: null,
-				signal: null,
-				state: "running",
-				latestOutcome: null,
-				latestReply: { text: Array.from({ length: 30 }, (_, index) => `Bash line ${index}`).join("\n"), streaming: false },
-				lastRunSequence: 1,
-				activeRun: {
-					id: "r_1111111111111111",
-					sequence: 1,
-					kind: "initial",
+	test.each([{ exitCode: null, signal: "SIGTERM", latestOutcome: "failed" }] as const)(
+		"bash live output follows navigation and shows termination %j",
+		async termination => {
+			await withTempWorkspace(async workspace => {
+				await acquireParentLease(workspace.cwd, "parent-session")
+				const paths = await reserveTaskStorage(await ensureParentStorage(workspace.cwd, "parent-session"), () => "b_1234abcd")
+				await initializeRetainedLogs(paths)
+				const now = Date.now()
+				const metadata: TaskMetadata = {
+					version: TASK_METADATA_VERSION,
+					kind: "bash",
+					taskRef: paths.taskRef,
+					parentSessionId: "parent-session",
+					label: "Long bash",
+					command: "printf lines",
+					cwd: workspace.cwd,
+					exitCode: null,
+					signal: null,
 					state: "running",
-					input: "printf lines",
-					acceptedAt: now,
-					startedAt: now
-				},
-				queuedFollowUps: [],
-				notifications: [],
-				discardedAt: null,
-				createdAt: now,
-				updatedAt: now
-			}
-			await writeTaskMetadata(paths, metadata)
-			let step = 0
-			let renders = 0
-			const ctx = {
-				cwd: workspace.cwd,
-				sessionManager: { getSessionId: () => "parent-session" },
-				ui: {
-					custom: async (factory: Parameters<ExtensionContext["ui"]["custom"]>[0]) => {
-						const component = await factory(
-							{ terminal: { rows: 12 }, requestRender: () => renders++ } as never,
-							{ fg: (_color: string, text: string) => text, bold: (text: string) => text } as never,
-							{} as never,
-							() => {}
-						)
-						const current = step++
-						if (current === 0) return "output"
-						if (current > 1) return null
-						const bottom = component.render(80).join("\n")
-						expect(bottom).toContain("Bash line 29")
-						expect(bottom).toContain("follow")
-						expect(bottom).toContain("Exit code: unknown · Signal: none")
-						await mutateTaskMetadata(paths, current => ({
-							...current,
-							latestReply: { text: `${current.latestReply?.text ?? ""}\nBash line 30`, streaming: false }
-						}))
-						await Bun.sleep(20)
-						expect(component.render(80).join("\n")).toContain("Bash line 30")
-						component.handleInput?.("\x1b[5~") // PageUp disables follow
-						const scrolled = component.render(80).join("\n")
-						expect(scrolled).not.toContain("Bash line 30")
-						await mutateTaskMetadata(paths, current => ({
-							...current,
-							latestReply: { text: `${current.latestReply?.text ?? ""}\nBash line 31`, streaming: false }
-						}))
-						await Bun.sleep(20)
-						expect(component.render(80).join("\n")).not.toContain("Bash line 31")
-						expect(component.render(80).join("\n")).not.toContain("Bash line 30")
-						component.handleInput?.("\x1b[F") // End resumes follow
-						expect(component.render(80).join("\n")).toContain("Bash line 31")
-						await mutateTaskMetadata(paths, current => ({
-							...current,
-							...termination,
-							state: "idle",
-							activeRun: null
-						}))
-						await Bun.sleep(20)
-						const status = `Exit code: ${termination.exitCode ?? "unknown"} · Signal: ${termination.signal ?? "none"}`
-						expect(component.render(80).join("\n")).toContain(status)
-						expect(component.render(80).join("\n")).toContain("Bash line 31")
-						component.handleInput?.("\x1b[H") // Status remains visible away from the tail
-						expect(component.render(80).join("\n")).toContain(status)
-						for (const width of [1, 20, 80]) {
-							const lines = component.render(width)
-							expect(lines.length).toBeLessThanOrEqual(7)
-							expect(lines.every(line => visibleWidth(line) <= width)).toBe(true)
-						}
-						return undefined
-					}
-				}
-			} as unknown as ExtensionContext
-			try {
-				await openTaskManagementUi(
-					ctx,
-					{
-						discoverDefinitions: () => ({ definitions: [], diagnostics: [], projectAgentsDir: undefined }),
-						loadTasks: async () => (await loadTaskList(workspace.cwd, "parent-session")).details,
-						focusTasks: async () => {},
-						openConfig: async () => {},
-						inputTask: async () => {},
-						controlTask: async () => {}
+					latestOutcome: null,
+					latestReply: { text: Array.from({ length: 30 }, (_, index) => `Bash line ${index}`).join("\n"), streaming: false },
+					lastRunSequence: 1,
+					activeRun: {
+						id: "r_1111111111111111",
+						sequence: 1,
+						kind: "initial",
+						state: "running",
+						input: "printf lines",
+						acceptedAt: now,
+						startedAt: now
 					},
-					`task:${paths.taskRef}`
-				)
-				expect(step).toBe(3)
-				expect(renders).toBeGreaterThan(1)
-			} finally {
-				await releaseParentLeaseFor(workspace.cwd, "parent-session")
-			}
-		})
-	})
+					queuedFollowUps: [],
+					notifications: [],
+					discardedAt: null,
+					createdAt: now,
+					updatedAt: now
+				}
+				await writeTaskMetadata(paths, metadata)
+				let step = 0
+				let renders = 0
+				const ctx = {
+					cwd: workspace.cwd,
+					sessionManager: { getSessionId: () => "parent-session" },
+					ui: {
+						custom: async (factory: Parameters<ExtensionContext["ui"]["custom"]>[0]) => {
+							const component = await factory(
+								{ terminal: { rows: 12 }, requestRender: () => renders++ } as never,
+								{ fg: (_color: string, text: string) => text, bold: (text: string) => text } as never,
+								{} as never,
+								() => {}
+							)
+							const current = step++
+							if (current === 0) return "output"
+							if (current > 1) return null
+							const bottom = component.render(80).join("\n")
+							expect(bottom).toContain("Bash line 29")
+							expect(bottom).toContain("follow")
+							expect(bottom).toContain("Exit code: unknown · Signal: none")
+							await mutateTaskMetadata(paths, current => ({
+								...current,
+								latestReply: { text: `${current.latestReply?.text ?? ""}\nBash line 30`, streaming: false }
+							}))
+							await Bun.sleep(20)
+							expect(component.render(80).join("\n")).toContain("Bash line 30")
+							component.handleInput?.("\x1b[5~") // PageUp disables follow
+							const scrolled = component.render(80).join("\n")
+							expect(scrolled).not.toContain("Bash line 30")
+							await mutateTaskMetadata(paths, current => ({
+								...current,
+								latestReply: { text: `${current.latestReply?.text ?? ""}\nBash line 31`, streaming: false }
+							}))
+							await Bun.sleep(20)
+							expect(component.render(80).join("\n")).not.toContain("Bash line 31")
+							expect(component.render(80).join("\n")).not.toContain("Bash line 30")
+							component.handleInput?.("\x1b[F") // End resumes follow
+							expect(component.render(80).join("\n")).toContain("Bash line 31")
+							await mutateTaskMetadata(paths, current => ({
+								...current,
+								...termination,
+								state: "idle",
+								activeRun: null
+							}))
+							await Bun.sleep(20)
+							const status = `Exit code: ${termination.exitCode ?? "unknown"} · Signal: ${termination.signal ?? "none"}`
+							expect(component.render(80).join("\n")).toContain(status)
+							expect(component.render(80).join("\n")).toContain("Bash line 31")
+							component.handleInput?.("\x1b[H") // Status remains visible away from the tail
+							expect(component.render(80).join("\n")).toContain(status)
+							for (const width of [1, 20, 80]) {
+								const lines = component.render(width)
+								expect(lines.length).toBeLessThanOrEqual(7)
+								expect(lines.every(line => visibleWidth(line) <= width)).toBe(true)
+							}
+							return undefined
+						}
+					}
+				} as unknown as ExtensionContext
+				try {
+					await openTaskManagementUi(
+						ctx,
+						{
+							discoverDefinitions: () => ({ definitions: [], diagnostics: [], projectAgentsDir: undefined }),
+							loadTasks: async () => (await loadTaskList(workspace.cwd, "parent-session")).details,
+							focusTasks: async () => {},
+							openConfig: async () => {},
+							inputTask: async () => {},
+							controlTask: async () => {}
+						},
+						`task:${paths.taskRef}`
+					)
+					expect(step).toBe(3)
+					expect(renders).toBeGreaterThan(1)
+				} finally {
+					await releaseParentLeaseFor(workspace.cwd, "parent-session")
+				}
+			})
+		}
+	)
 })

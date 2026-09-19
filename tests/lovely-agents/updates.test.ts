@@ -39,17 +39,14 @@ test("scheduler changes refresh all parents, and a broken UI cannot break schedu
 		})
 	]
 	const coordinator = createAgentCoordinator(1)
-	const tuple = { provider: "updates", model: "one" }
 	try {
-		const permit = await coordinator.acquire({ tuple })
+		const permit = await coordinator.acquire({})
 		expect(updates).toEqual(["one", "two"])
 		updates.length = 0
 		permit.release()
-		coordinator.closeTuple(tuple)
-		coordinator.openTuple(tuple)
 		coordinator.setMaxConcurrency(2)
 		await Bun.sleep(0)
-		expect(updates).toEqual(["one", "two", "one", "two", "one", "two", "one", "two"])
+		expect(updates).toEqual(["one", "two", "one", "two"])
 	} finally {
 		for (const dispose of unbind) dispose()
 	}

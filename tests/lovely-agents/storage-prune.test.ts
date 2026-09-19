@@ -1,5 +1,5 @@
-import { expect, spyOn, test } from "bun:test"
-import { lstat, mkdir, readFile, readlink, rm, symlink, unlink, writeFile } from "node:fs/promises"
+import { expect, test } from "bun:test"
+import { lstat, mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import {
 	acquireParentLease,
@@ -11,97 +11,8 @@ import {
 	type TaskMetadata,
 	writeTaskMetadata
 } from "../../extensions/lovely-agents/state.js"
-import {
-	readTaskDiscardMarker,
-	rebuildActiveTaskLinks,
-	syncActiveTaskLink,
-	writeTaskDiscardMarker
-} from "../../extensions/lovely-agents/storage.js"
 import { pruneTasks } from "../../scripts/prune-tasks.js"
 import { withTempWorkspace } from "./test-helpers.js"
-
-test("active index includes idle tasks, rebuilds missing links and removes only index symlinks", async () => {
-	await withTempWorkspace(async workspace => {
-		const paths = await task(workspace.cwd, "parent", "b_11111111")
-		await syncActiveTaskLink(paths, false)
-		const active = join(paths.parentDirectory, "active")
-		const link = join(active, paths.taskRef)
-		expect(await readlink(link)).toBe(`../${paths.taskRef}`)
-		await syncActiveTaskLink(paths, false)
-		await unlink(link)
-		await symlink("../b_99999999", join(active, "b_99999999"))
-		await writeFile(join(active, "notes"), "not ours")
-		expect(await rebuildActiveTaskLinks(paths)).toEqual([])
-		expect(await readlink(link)).toBe(`../${paths.taskRef}`)
-		await expect(lstat(join(active, "b_99999999"))).rejects.toMatchObject({ code: "ENOENT" })
-		await mutateTaskMetadata(paths, metadata => ({ ...metadata, discardedAt: 2 }))
-		expect(await rebuildActiveTaskLinks(paths)).toEqual([])
-		await expect(lstat(link)).rejects.toMatchObject({ code: "ENOENT" })
-		expect(await readFile(join(active, "notes"), "utf8")).toBe("not ours")
-		expect((await lstat(paths.taskDirectory)).isDirectory()).toBe(true)
-	})
-})
-
-test("index repair never follows symlinks or replaces non-link evidence", async () => {
-	await withTempWorkspace(async workspace => {
-		const paths = await task(workspace.cwd, "parent", "b_11111111")
-		await syncActiveTaskLink(paths, false)
-		const link = join(paths.parentDirectory, "active", paths.taskRef)
-		await unlink(link)
-		await symlink(workspace.agentDir, link)
-		await syncActiveTaskLink(paths, false)
-		expect(await readlink(link)).toBe(`../${paths.taskRef}`)
-		await unlink(link)
-		await writeFile(link, "evidence")
-		expect(await syncActiveTaskLink(paths, true)).toContain("not a symlink")
-		expect(await readFile(link, "utf8")).toBe("evidence")
-	})
-})
-
-test("ancillary index failure cannot turn committed metadata acceptance into failure", async () => {
-	await withTempWorkspace(async workspace => {
-		const parent = await ensureParentStorage(workspace.cwd, "parent")
-		await writeFile(join(parent.parentDirectory, "active"), "keep this evidence")
-		const warning = spyOn(console, "warn").mockImplementation(() => {})
-		try {
-			const paths = await task(workspace.cwd, "parent", "b_11111111")
-			await mutateTaskMetadata(paths, metadata => ({ ...metadata, discardedAt: 2 }))
-			expect(JSON.parse(await readFile(paths.metadata, "utf8")).discardedAt).toBe(2)
-			expect(warning).toHaveBeenCalled()
-			expect(await readFile(join(parent.parentDirectory, "active"), "utf8")).toBe("keep this evidence")
-		} finally {
-			warning.mockRestore()
-		}
-	})
-})
-
-test("discard markers reject symlinks and changed ownership without rewriting unknown schemas", async () => {
-	await withTempWorkspace(async workspace => {
-		const paths = await task(workspace.cwd, "parent", "b_11111111")
-		const original = JSON.stringify({ version: 99, kind: "bash", taskRef: paths.taskRef, parentSessionId: "parent" })
-		await writeFile(paths.metadata, original)
-		await rm(join(paths.parentDirectory, "active"), { recursive: true })
-		expect((await rebuildActiveTaskLinks(paths)).join()).toContain("Unsupported metadata version")
-		expect(await readlink(join(paths.parentDirectory, "active", paths.taskRef))).toBe(`../${paths.taskRef}`)
-		await writeTaskDiscardMarker(paths)
-		await writeTaskDiscardMarker(paths)
-		expect(await readTaskDiscardMarker(paths)).toBe(true)
-		expect(await rebuildActiveTaskLinks(paths)).toEqual([])
-		await expect(lstat(join(paths.parentDirectory, "active", paths.taskRef))).rejects.toMatchObject({ code: "ENOENT" })
-		expect(await readFile(paths.metadata, "utf8")).toBe(original)
-		await writeFile(paths.metadata, original.replace('"parent"', '"foreign"'))
-		await expect(readTaskDiscardMarker(paths)).rejects.toThrow("identity")
-		await writeFile(paths.metadata, original)
-		const marker = join(paths.taskDirectory, ".discarded.json")
-		const source = await readFile(marker, "utf8")
-		await unlink(marker)
-		const outside = join(workspace.agentDir, "marker")
-		await writeFile(outside, source)
-		await symlink(outside, marker)
-		await expect(readTaskDiscardMarker(paths)).rejects.toThrow()
-		expect(await readFile(outside, "utf8")).toBe(source)
-	})
-})
 
 test("pruning defaults to dry-run, deletes only explicit tombstones, and is idempotent", async () => {
 	await withTempWorkspace(async workspace => {
@@ -120,21 +31,17 @@ test("pruning defaults to dry-run, deletes only explicit tombstones, and is idem
 			}
 		})
 		await writeFile(discarded.output, "retained output")
-		const archive = join(discarded.root, "archive")
-		await mkdir(archive)
-		await writeFile(join(archive, "legacy-evidence"), "untouched")
+		// Browsing index left by 0.1.2 must not block pruning.
+		await mkdir(join(discarded.parentDirectory, "active"))
 		const dry = await pruneTasks(workspace.cwd)
 		expect(dry.candidates).toEqual([discarded.taskDirectory])
 		expect(dry.deleted).toEqual([])
 		expect(await readFile(discarded.output, "utf8")).toBe("retained output")
-		const [applied, overlapping] = await Promise.all([pruneTasks(workspace.cwd, true), pruneTasks(workspace.cwd, true)])
+		const applied = await pruneTasks(workspace.cwd, true)
 		expect(applied.deleted).toEqual([discarded.taskDirectory])
-		expect(overlapping.deleted).toEqual([])
-		expect(overlapping.diagnostics.join()).toContain("already running")
 		await expect(lstat(discarded.taskDirectory)).rejects.toMatchObject({ code: "ENOENT" })
 		for (const paths of [idle, stale]) expect((await lstat(paths.taskDirectory)).isDirectory()).toBe(true)
 		expect((await pruneTasks(workspace.cwd, true)).deleted).toEqual([])
-		expect(await readFile(join(archive, "legacy-evidence"), "utf8")).toBe("untouched")
 	})
 })
 
@@ -149,7 +56,6 @@ test("pruning retains pending notices, unknown schemas, corrupt metadata and sym
 			unsupported.metadata,
 			JSON.stringify({ version: 99, kind: "bash", taskRef: unsupported.taskRef, parentSessionId: "parent" })
 		)
-		await writeTaskDiscardMarker(unsupported)
 		const corrupt = await task(workspace.cwd, "parent", "b_33333333", { discardedAt: 2 })
 		await writeFile(corrupt.metadata, "{broken")
 		const unsafe = await task(workspace.cwd, "parent", "b_44444444", { discardedAt: 2 })

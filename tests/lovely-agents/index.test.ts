@@ -1,14 +1,8 @@
-import { describe, expect, test } from "bun:test"
+import { expect, test } from "bun:test"
 import { readFile, writeFile } from "node:fs/promises"
-import {
-	type ExtensionAPI,
-	type ExtensionContext,
-	initTheme,
-	type SessionEntry,
-	type ToolDefinition
-} from "@earendil-works/pi-coding-agent"
+import { type ExtensionAPI, type ExtensionContext, initTheme, type ToolDefinition } from "@earendil-works/pi-coding-agent"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
-import lovelyAgentsExtension, { latestReplyWasInterrupted, successfulTurnTuple } from "../../extensions/lovely-agents/index.js"
+import lovelyAgentsExtension from "../../extensions/lovely-agents/index.js"
 import { NOTIFICATION_CUSTOM_TYPE, notificationRouteKey } from "../../extensions/lovely-agents/notifications.js"
 import { ensureParentStorage, mutateTaskMetadata, releaseParentLeaseFor, taskStoragePaths } from "../../extensions/lovely-agents/state.js"
 import { publishSchedulerUpdate, publishTaskUpdate } from "../../extensions/lovely-agents/updates.js"
@@ -129,7 +123,7 @@ test("lease conflicts show a persistent warning without recovering, notifying, o
 
 test("tools stay visible regardless of config, and SDK idle disposal unbinds without stale context calls", async () => {
 	await withTempWorkspace(async workspace => {
-		await workspace.write("workspace/.pi/xl0-pi-lovely-agents.json", JSON.stringify({ backgroundAgents: false, backgroundBash: false }))
+		await workspace.write("workspace/.pi/xl0-pi-lovely-agents.json", JSON.stringify({ backgroundBash: false }))
 		// A trust-requiring resource: Pi evaluated trust, so its answer covers the workspace config.
 		await workspace.write("workspace/.pi/settings.json", "{}")
 		const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>()
@@ -211,12 +205,10 @@ test("tools stay visible regardless of config, and SDK idle disposal unbinds wit
 	})
 })
 
-test("manual controls cancel foreground input and notify only successful discard", async () => {
+test("manual discard notifies the parent only after it succeeds", async () => {
 	initTheme("dark")
 	await withTempWorkspace(async workspace => {
-		await workspace.write("workspace/.pi/xl0-pi-lovely-agents.json", JSON.stringify({ backgroundAgents: false }))
-		await workspace.write("workspace/.pi/settings.json", "{}")
-		const ids = await seedFixtureTasks(workspace.cwd, "parent")
+		await seedFixtureTasks(workspace.cwd, "parent")
 		const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>()
 		const messages: Array<{ content: string; options: unknown }> = []
 		const errors: string[] = []
@@ -237,31 +229,6 @@ test("manual controls cancel foreground input and notify only successful discard
 		let factory = () => editor
 		let confirmed = false
 		let choice: string | undefined = "discard"
-		let inputSignal: AbortSignal | undefined
-		let inputStopped = false
-		let inputDialog = false
-		const parent = await ensureParentStorage(workspace.cwd, "parent")
-		const unbindResidents = ids.map(id =>
-			getAgentCoordinator().bindResident(taskStoragePaths(parent, id).taskDirectory, {
-				stop() {},
-				dispose() {},
-				async input(_content, _delivery, options) {
-					expect(options?.background).toBe(false)
-					inputSignal = options?.signal
-					if (!inputSignal) throw new Error("Missing UI cancellation signal")
-					return new Promise((_resolve, reject) =>
-						inputSignal?.addEventListener(
-							"abort",
-							() => {
-								inputStopped = true
-								reject(inputSignal?.reason)
-							},
-							{ once: true }
-						)
-					)
-				}
-			})
-		)
 		const ctx = {
 			cwd: workspace.cwd,
 			isProjectTrusted: () => true,
@@ -280,29 +247,9 @@ test("manual controls cancel foreground input and notify only successful discard
 				},
 				confirm: async () => confirmed,
 				editor: async () => "Follow-up",
-				custom: async (create: Parameters<ExtensionContext["ui"]["custom"]>[0]) => {
-					if (inputDialog) {
-						inputDialog = false
-						return new Promise((resolve, reject) => {
-							let component: { dispose?(): void } | undefined
-							void Promise.resolve(
-								create({ requestRender() {} } as never, { fg: (_color: string, text: string) => text } as never, {} as never, result => {
-									component?.dispose?.()
-									resolve(result)
-								})
-							)
-								.then(async created => {
-									component = created
-									for (let i = 0; i < 200 && !inputSignal; i++) await Bun.sleep(5)
-									expect(inputSignal).toBeDefined()
-									created.handleInput?.("\x1b")
-								})
-								.catch(reject)
-						})
-					}
+				custom: async () => {
 					const value = choice
 					choice = undefined
-					if (value === "followup") inputDialog = true
 					return value
 				}
 			}
@@ -317,15 +264,6 @@ test("manual controls cancel foreground input and notify only successful discard
 			wrapped.handleInput("\r")
 			await Bun.sleep(30)
 			expect(messages).toHaveLength(0)
-			choice = "followup"
-			wrapped.handleInput("\r")
-			for (let i = 0; i < 200 && !inputStopped && errors.length === 0; i++) await Bun.sleep(5)
-			expect(errors).toEqual([])
-			expect(inputStopped).toBe(true)
-			await Bun.sleep(30)
-			expect(errors).toEqual([])
-			expect(messages).toHaveLength(0)
-			for (const unbind of unbindResidents) unbind()
 			confirmed = true
 			choice = "discard"
 			wrapped.handleInput("\r")
@@ -335,41 +273,9 @@ test("manual controls cancel foreground input and notify only successful discard
 			expect(messages[0]?.content).toContain("User manually discarded task a_")
 			expect(messages[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: false })
 		} finally {
-			for (const unbind of unbindResidents) unbind()
 			if (previousAgentDir === undefined) delete process.env[agentDirVariable]
 			else process.env[agentDirVariable] = previousAgentDir
 			for (const handler of handlers.get("session_shutdown") ?? []) await handler({ reason: "quit" }, ctx)
 		}
 	})
 })
-
-describe("/continue eligibility", () => {
-	test("accepts only the latest errored or aborted assistant reply", () => {
-		expect(latestReplyWasInterrupted([])).toBe(false)
-		expect(latestReplyWasInterrupted(branch("stop"))).toBe(false)
-		expect(latestReplyWasInterrupted(branch("length"))).toBe(false)
-		expect(latestReplyWasInterrupted(branch("error"))).toBe(true)
-		expect(latestReplyWasInterrupted(branch("aborted"))).toBe(true)
-	})
-})
-
-describe("automatic tuple recovery", () => {
-	test("uses only successful assistant turns with an exact model identity", () => {
-		expect(successfulTurnTuple({ role: "assistant", stopReason: "stop", provider: "provider", model: "model" })).toEqual({
-			provider: "provider",
-			model: "model"
-		})
-		expect(successfulTurnTuple({ role: "assistant", stopReason: "error", provider: "provider", model: "model" })).toBeUndefined()
-		expect(successfulTurnTuple({ role: "assistant", stopReason: "aborted", provider: "provider", model: "model" })).toBeUndefined()
-		expect(successfulTurnTuple({ role: "assistant", stopReason: "length", provider: "provider", model: "model" })).toBeUndefined()
-		expect(successfulTurnTuple({ role: "user", provider: "provider", model: "model" })).toBeUndefined()
-		expect(successfulTurnTuple({ role: "assistant", stopReason: "stop" })).toBeUndefined()
-	})
-})
-
-function branch(stopReason: string): SessionEntry[] {
-	return [
-		{ type: "message", message: { role: "assistant", stopReason } },
-		{ type: "custom", customType: "later", data: {} }
-	] as SessionEntry[]
-}

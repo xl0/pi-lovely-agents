@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto"
-import { constants, watch } from "node:fs"
-import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises"
+import { constants, type Dirent, watch } from "node:fs"
+import { chmod, link, lstat, mkdir, open, readdir, readFile, realpath, rename, unlink } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { type Static, Type } from "typebox"
 import { Value } from "typebox/value"
 import { getAgentCoordinator, getBashCoordinator } from "./coordinator.js"
-import { readTaskDiscardMarker, syncActiveTaskLink } from "./storage.js"
 import { publishTaskUpdate } from "./updates.js"
+import { errorMessage, hasCode } from "./utils.js"
 
 export const TASK_METADATA_VERSION = 3
 /** One child-authored status line, independent of scheduler state and observed activity. */
@@ -34,13 +34,7 @@ const TASK_QUEUE_STATE_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/task-queues/v1
 
 const RunId = Type.String({ pattern: "^r_[0-9a-f]{16}$" })
 const Timestamp = Type.Integer({ minimum: 0 })
-const TaskState = Type.Union([
-	Type.Literal("idle"),
-	Type.Literal("queued"),
-	Type.Literal("running"),
-	Type.Literal("suspended"),
-	Type.Literal("interrupted")
-])
+const TaskState = Type.Union([Type.Literal("idle"), Type.Literal("queued"), Type.Literal("running"), Type.Literal("interrupted")])
 const RunOutcome = Type.Union([Type.Literal("succeeded"), Type.Literal("failed"), Type.Literal("stopped"), Type.Literal("interrupted")])
 const ThinkingLevel = Type.Union([
 	Type.Literal("off"),
@@ -56,10 +50,10 @@ const ActiveRun = Type.Object(
 		id: RunId,
 		sequence: Type.Integer({ minimum: 1 }),
 		acceptanceOrder: Type.Optional(Type.Integer({ minimum: 1 })),
-		// Acceptance policy, not current config. Missing means foreground.
+		// Written by 0.1.x; ignored.
 		background: Type.Optional(Type.Boolean()),
 		kind: Type.Union([Type.Literal("initial"), Type.Literal("followup")]),
-		state: Type.Union([Type.Literal("queued"), Type.Literal("running"), Type.Literal("suspended")]),
+		state: Type.Union([Type.Literal("queued"), Type.Literal("running")]),
 		input: Type.String(),
 		acceptedAt: Timestamp,
 		startedAt: Type.Optional(Timestamp),
@@ -81,6 +75,7 @@ const QueuedFollowUp = Type.Object(
 const Notification = Type.Object(
 	{
 		id: Type.String({ minLength: 1 }),
+		// "suspension" is no longer produced; retained 0.1.x records may carry delivered ones.
 		type: Type.Union([Type.Literal("completion"), Type.Literal("suspension"), Type.Literal("interruption")]),
 		runId: RunId,
 		content: Type.String({ minLength: 1 }),
@@ -291,7 +286,7 @@ export type RetainedOutputRead = {
 	progress?: string
 	queuedFollowUps: number
 	lastActivity: NonNullable<TaskMetadata["lastActivity"]> | null
-	queueReason: "capacity" | "provider-limit" | "starting" | null
+	queueReason: "capacity" | "starting" | null
 	/** Held process-wide execution permits, not the number of tasks in running state. */
 	capacity: { active: number; limit: number }
 	exitCode?: number | null
@@ -373,38 +368,20 @@ export function taskStoragePaths(parent: ParentStoragePaths, taskRef: string): T
 	}
 }
 
-/** Only ownership is decoded across versions. Unsupported execution recipes stay unreadable. */
-export async function readTaskIdentity(
-	paths: TaskStoragePaths
-): Promise<{ kind: "agent"; childSessionId: string } | { kind: "bash" } | undefined> {
+/** Real task directories of one parent partition, sorted; a missing partition is empty. */
+export async function directTaskPaths(cwd: string, parentSessionId: string): Promise<TaskStoragePaths[]> {
+	const parent = parentStoragePaths(cwd, parentSessionId)
+	let entries: Dirent[]
 	try {
-		await assertRegularDirectory(dirname(paths.parentDirectory))
-		await assertRegularDirectory(paths.parentDirectory)
-		await assertRegularDirectory(paths.taskDirectory)
+		entries = await readdir(parent.parentDirectory, { withFileTypes: true })
 	} catch (error) {
-		if (hasCode(error, "ENOENT")) return undefined
+		if (hasCode(error, "ENOENT")) return []
 		throw error
 	}
-	const stats = await lstat(paths.metadata)
-	if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Task metadata is not a regular file: ${paths.metadata}`)
-	const value: unknown = JSON.parse(await readFile(paths.metadata, "utf8"))
-	if (!isRecord(value) || property(value, "taskRef") !== paths.taskRef || property(value, "parentSessionId") !== paths.parentSessionId) {
-		throw new Error("Metadata identity does not match its parent/task path")
-	}
-	const kind = property(value, "kind")
-	if (kind === "bash" && paths.taskRef.startsWith("b_")) {
-		if (property(value, "childSessionId") !== undefined) throw new Error("Bash task cannot own a child session")
-		return { kind }
-	}
-	// Older agent identities did not require kind; decode ownership only, never their recipe.
-	const legacyAgent =
-		kind === undefined && typeof property(value, "version") === "number" && property(value, "version") !== TASK_METADATA_VERSION
-	if ((kind !== "agent" && !legacyAgent) || !paths.taskRef.startsWith("a_")) throw new Error("Task kind does not match its reference")
-	const childSessionId = property(value, "childSessionId")
-	if (typeof childSessionId !== "string" || !SESSION_ID_PATTERN.test(childSessionId) || childSessionId === paths.parentSessionId) {
-		throw new Error("Invalid child session identity")
-	}
-	return { kind: "agent", childSessionId }
+	return entries
+		.filter(entry => entry.isDirectory() && TASK_REFERENCE_PATTERN.test(entry.name))
+		.map(entry => taskStoragePaths(parent, entry.name))
+		.sort((a, b) => a.taskDirectory.localeCompare(b.taskDirectory))
 }
 
 export function createTaskReference(kind: TaskMetadata["kind"] = "agent"): string {
@@ -475,13 +452,8 @@ export async function acquireParentLease(cwd: string, parentSessionId: string): 
 		try {
 			for (let attempt = 0; attempt < MAX_LEASE_ACQUIRE_ATTEMPTS; attempt++) {
 				try {
+					// A liveness lock needs no fsync: after power loss its PID is gone anyway.
 					await link(candidate, paths.lease)
-					try {
-						await syncDirectory(paths.parentDirectory)
-					} catch (error) {
-						await removeIfPresent(paths.lease)
-						throw error
-					}
 					const lease = Object.freeze({ ...leaseFile, paths: Object.freeze({ ...paths }) })
 					state.leases.set(paths.lease, lease)
 					return lease
@@ -499,16 +471,8 @@ export async function acquireParentLease(cwd: string, parentSessionId: string): 
 					throw new ParentLeaseConflictError(paths.lease, loaded.lease.pid)
 				}
 
-				const confirmed = await loadParentLease(paths.lease)
-				if (confirmed.status !== "ok" || confirmed.lease.pid !== loaded.lease.pid || confirmed.lease.token !== loaded.lease.token) {
-					continue
-				}
-				try {
-					await unlink(paths.lease)
-					await syncDirectory(paths.parentDirectory)
-				} catch (error) {
-					if (!hasCode(error, "ENOENT")) throw error
-				}
+				// Simultaneous stale reclamation is best-effort; the no-overwrite link stays atomic.
+				await removeIfPresent(paths.lease)
 			}
 			throw new ParentLeaseError(`Unable to acquire changing parent lease: ${paths.lease}`)
 		} finally {
@@ -535,7 +499,6 @@ export async function releaseParentLease(lease: ParentLease): Promise<void> {
 
 		await unlink(lease.paths.lease)
 		state.leases.delete(lease.paths.lease)
-		await syncDirectory(lease.paths.parentDirectory)
 	})
 }
 
@@ -580,19 +543,10 @@ export async function writeTaskProgress(
 }
 
 /** Explain queued work without pretending to know its ETA or FIFO position. */
-export function taskSchedulingStatus(
-	metadata: Pick<AgentTaskMetadata, "kind" | "state" | "model"> | Pick<BashTaskMetadata, "kind" | "state">
-): Pick<RetainedOutputRead, "queueReason" | "capacity"> {
+export function taskSchedulingStatus(metadata: Pick<TaskMetadata, "kind" | "state">): Pick<RetainedOutputRead, "queueReason" | "capacity"> {
 	const coordinator = metadata.kind === "bash" ? getBashCoordinator() : getAgentCoordinator()
 	const capacity = { active: coordinator.activeCount, limit: coordinator.maxConcurrency }
-	const queueReason =
-		metadata.state !== "queued"
-			? null
-			: metadata.kind === "agent" && !coordinator.isTupleOpen({ provider: metadata.model.provider, model: metadata.model.id })
-				? "provider-limit"
-				: capacity.active >= capacity.limit
-					? "capacity"
-					: "starting"
+	const queueReason = metadata.state !== "queued" ? null : capacity.active >= capacity.limit ? "capacity" : "starting"
 	return { queueReason, capacity }
 }
 
@@ -605,26 +559,12 @@ export function retainedPaths(paths: TaskStoragePaths): RetainedPaths {
 	}
 }
 
-export async function countRetainedOutputLines(paths: TaskStoragePaths): Promise<number> {
-	return splitCompleteLines((await requireTaskMetadata(paths)).latestReply?.text ?? "").length
-}
-
 /**
  * Returns one run's snapshot, never transcript pages. A timed read stays pinned
  * to the selected/observed run through promotion, ignoring partial progress.
  */
 export async function readRetainedOutput(paths: TaskStoragePaths, options: RetainedOutputReadOptions = {}): Promise<RetainedOutputRead> {
 	const waitMs = options.waitMs ?? 0
-	if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > RETAINED_OUTPUT_MAX_WAIT_MS) {
-		throw new Error(`waitMs must be an integer from 0 to ${RETAINED_OUTPUT_MAX_WAIT_MS}`)
-	}
-	if (options.run !== undefined && (!Number.isSafeInteger(options.run) || options.run < 1)) {
-		throw new Error("run must be a positive integer (1-based)")
-	}
-	if (options.lines !== undefined && (!Number.isInteger(options.lines) || options.lines < 1 || options.lines > RETAINED_OUTPUT_MAX_LINES)) {
-		throw new Error(`lines must be an integer from 1 to ${RETAINED_OUTPUT_MAX_LINES}`)
-	}
-
 	if (options.signal?.aborted) throw abortReason(options.signal)
 	let metadata = await requireTaskMetadata(paths)
 	if (options.lines !== undefined && metadata.kind !== "bash") throw new Error("lines is only supported for Bash output tails")
@@ -634,7 +574,7 @@ export async function readRetainedOutput(paths: TaskStoragePaths, options: Retai
 	const selected =
 		metadata.activeRun?.sequence === run ? metadata.activeRun : metadata.queuedFollowUps.find(input => input.sequence === run)
 	let timedOut = false
-	if (waitMs > 0 && selected && !(metadata.activeRun?.sequence === run && metadata.state === "suspended")) {
+	if (waitMs > 0 && selected) {
 		const settled = await waitForRunEnd(paths, selected.id, waitMs, options.signal)
 		timedOut = settled === undefined
 		metadata = settled ?? (await requireTaskMetadata(paths))
@@ -789,12 +729,6 @@ export async function readTaskMetadata(paths: TaskStoragePaths): Promise<Metadat
 	}
 	const version = isRecord(value) ? property(value, "version") : undefined
 	if (typeof version === "number" && version !== TASK_METADATA_VERSION) {
-		try {
-			if (await readTaskDiscardMarker(paths))
-				return invalidMetadata(paths.metadata, "unreadable", `Task ${paths.taskRef} has been discarded; unsupported metadata is retained`)
-		} catch (error) {
-			return invalidMetadata(paths.metadata, "unreadable", errorMessage(error))
-		}
 		return invalidMetadata(paths.metadata, "unsupported-version", `Unsupported metadata version ${version}`)
 	}
 	const validated = validateTaskMetadata(value)
@@ -811,9 +745,6 @@ export function writeTaskMetadata(paths: TaskStoragePaths, metadata: TaskMetadat
 		assertMetadataForPath(paths, metadata)
 		const snapshot = metadata.activeRun ? { ...metadata, inputPreview: historyPreview(metadata.activeRun.input, 512) } : metadata
 		await atomicWriteJson(paths.metadata, snapshot)
-		// Index failure must not turn durable acceptance into a producer cleanup/delete.
-		const warning = await syncActiveTaskLink(paths, snapshot.discardedAt !== null)
-		if (warning) console.warn(`Lovely Agents active index: ${warning}`)
 		publishTaskUpdate(paths.workspace, paths.parentSessionId)
 	})
 }
@@ -864,10 +795,6 @@ export function mutateTaskMetadata(
 		if (updated.state !== "running" && updated.latestReply) updated.latestReply.streaming = false
 		assertMetadataForPath(paths, updated)
 		await atomicWriteJson(paths.metadata, updated)
-		if (updated.discardedAt !== loaded.metadata.discardedAt) {
-			const warning = await syncActiveTaskLink(paths, updated.discardedAt !== null)
-			if (warning) console.warn(`Lovely Agents active index: ${warning}`)
-		}
 		publishTaskUpdate(paths.workspace, paths.parentSessionId)
 		return updated
 	})
@@ -892,12 +819,10 @@ function taskMetadataSemanticError(value: TaskMetadata): string | undefined {
 		const commandError = inputValidationError(value.command, "/command")
 		if (commandError) return commandError
 		if (!isAbsolute(value.cwd)) return "/cwd must be absolute"
-		if (value.state === "suspended") return "Bash tasks cannot be suspended"
 		if (value.queuedFollowUps.length > 0) return "Bash tasks cannot queue Follow-ups"
 		if (value.lastRunSequence > 1 || (value.activeRun && (value.activeRun.kind !== "initial" || value.activeRun.sequence !== 1))) {
 			return "Bash tasks support only an initial run"
 		}
-		if (value.notifications.some(notification => notification.type === "suspension")) return "Bash tasks cannot suspend"
 	}
 	if (!value.label.trim()) return "/label must be nonblank"
 	if (Buffer.byteLength(value.label, "utf8") > MAX_AGENT_LABEL_BYTES) {
@@ -909,7 +834,7 @@ function taskMetadataSemanticError(value: TaskMetadata): string | undefined {
 	)
 		return "/lastSettledRun must not exceed accepted runs or include the active run"
 	if ((value.activeRun === null) !== (value.state === "idle" || value.state === "interrupted")) {
-		return "/activeRun must exist exactly while state is queued, running, or suspended"
+		return "/activeRun must exist exactly while state is queued or running"
 	}
 	if (value.activeRun) {
 		if (value.activeRun.state !== value.state) return "/activeRun/state must match /state"
@@ -984,7 +909,7 @@ function historyPreview(content: string, maximumBytes: number): string {
 	return truncateUtf8(singleLine, maximumBytes)
 }
 
-function truncateUtf8(content: string, maximumBytes: number): string {
+export function truncateUtf8(content: string, maximumBytes: number): string {
 	const bytes = Buffer.from(content)
 	if (bytes.length <= maximumBytes) return content
 	let end = maximumBytes - 3
@@ -1055,9 +980,7 @@ async function waitForRunEnd(
 			try {
 				const current = await requireTaskMetadata(paths)
 				// A later Follow-up must not extend a wait for the run we observed.
-				const active = current.activeRun?.id === runId
-				if ((!active && !current.queuedFollowUps.some(input => input.id === runId)) || (active && current.state === "suspended"))
-					finish(current)
+				if (current.activeRun?.id !== runId && !current.queuedFollowUps.some(input => input.id === runId)) finish(current)
 			} catch (error) {
 				fail(error)
 			} finally {
@@ -1069,13 +992,18 @@ async function waitForRunEnd(
 			}
 		}
 
-		watcher.once("error", fail)
+		// Bun's directory watcher reports ENOENT for atomic-write temp files that were
+		// already renamed away; only losing the task directory itself ends the wait.
+		watcher.on("error", error => {
+			if (hasCode(error, "ENOENT") && (error as NodeJS.ErrnoException).path !== paths.taskDirectory) requestCheck()
+			else fail(error)
+		})
 		signal?.addEventListener("abort", onAbort, { once: true })
 		requestCheck()
 	})
 }
 
-function splitCompleteLines(content: string): string[] {
+export function splitCompleteLines(content: string): string[] {
 	if (!content) return []
 	const lines = content.split("\n")
 	if (content.endsWith("\n")) lines.pop()
@@ -1297,18 +1225,10 @@ async function removeIfPresent(path: string): Promise<void> {
 	}
 }
 
-function hasCode(error: unknown, code: string): boolean {
-	return isRecord(error) && property(error, "code") === code
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null
 }
 
 function property(record: Record<string, unknown>, key: string): unknown {
 	return record[key]
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error)
 }

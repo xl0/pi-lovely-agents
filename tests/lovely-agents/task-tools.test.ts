@@ -13,14 +13,7 @@ import {
 	type TaskStoragePaths,
 	writeTaskMetadata
 } from "../../extensions/lovely-agents/state.js"
-import {
-	buildTaskListToolResult,
-	loadTaskList,
-	registerTaskTools,
-	type TaskListResult,
-	type TaskListRow,
-	type TaskOutputResult
-} from "../../extensions/lovely-agents/tools.js"
+import { loadTaskList, registerTaskTools, type TaskListResult, type TaskOutputResult } from "../../extensions/lovely-agents/tools.js"
 import { withTempWorkspace } from "./test-helpers.js"
 
 describe("read-only task tools", () => {
@@ -54,14 +47,14 @@ describe("read-only task tools", () => {
 			expect(await readFile(bash.history, "utf8")).toContain("<stdin>\nliteral\n<stdin EOF>")
 			if (process.platform !== "win32") expect((await stat(bash.output)).mode & 0o077).toBe(0)
 			const pool = getBashCoordinator()
-			const permit = await pool.acquire({ tuple: { provider: "bash", model: "process" } })
+			const permit = await pool.acquire({})
 			const captured = captureTaskTools()
 			try {
 				const list = await loadTaskList(workspace.cwd, "parent-session")
 				expect(list.details.tasks.map(task => task.id)).toEqual(["a_00000001", "b_00000001"])
-				expect(list.details.tasks[0]?.descendants.total).toBe(1)
+				expect(list.details.tasks[0]?.descendants).toBe(1)
 				const row = list.details.tasks[1]
-				expect(row).toMatchObject({ kind: "bash", exitCode: 7, signal: null, descendants: { total: 0 } })
+				expect(row).toMatchObject({ kind: "bash", exitCode: 7, signal: null, descendants: 0 })
 				expect(row).not.toHaveProperty("model")
 				expect(row).not.toHaveProperty("thinking")
 				expect(row).not.toHaveProperty("definition")
@@ -105,7 +98,7 @@ describe("read-only task tools", () => {
 		})
 	})
 
-	test("lists every direct task in stable order with diagnostics and descendant summaries", async () => {
+	test("lists every direct task in stable order with diagnostics and descendant counts", async () => {
 		await withTempWorkspace(async workspace => {
 			await createTask(workspace.cwd, "parent-session", {
 				id: "a_00000001",
@@ -130,13 +123,6 @@ describe("read-only task tools", () => {
 				label: "Tie-break running",
 				state: "running",
 				updatedAt: 10
-			})
-			await createTask(workspace.cwd, "parent-session", {
-				id: "a_00000002",
-				childSessionId: "child-two",
-				label: "Suspended",
-				state: "suspended",
-				updatedAt: 30
 			})
 			await createTask(workspace.cwd, "parent-session", {
 				id: "a_00000003",
@@ -175,8 +161,8 @@ describe("read-only task tools", () => {
 			await createTask(workspace.cwd, "child-one", {
 				id: "a_10000001",
 				childSessionId: "grandchild-one",
-				label: "Nested suspended",
-				state: "suspended",
+				label: "Nested queued",
+				state: "queued",
 				updatedAt: 10
 			})
 			await createTask(workspace.cwd, "grandchild-one", {
@@ -196,12 +182,10 @@ describe("read-only task tools", () => {
 				"a_00000006",
 				"a_00000000",
 				"a_00000001",
-				"a_00000002",
 				"a_00000003",
 				"a_00000004",
 				"a_00000005"
 			])
-			expect(details.total).toBe(7)
 			expect(details.tasks[0]?.lastActivity).toEqual({ at: 20, action: "thinking" })
 			expect(details.diagnostics).toHaveLength(1)
 			expect(details.diagnostics[0]?.id).toBe("a_00000008")
@@ -209,13 +193,7 @@ describe("read-only task tools", () => {
 			const parent = details.tasks.find(task => task.id === "a_00000001")
 			expect(parent?.queuedFollowUps).toBe(1)
 			expect(parent?.outputLines).toBe(2)
-			expect(parent?.descendants).toEqual({
-				total: 2,
-				states: { idle: 0, queued: 0, running: 1, suspended: 1, interrupted: 0 },
-				outcomes: { succeeded: 0, failed: 0, stopped: 0, interrupted: 0 },
-				activeLabels: ["Nested running", "Nested suspended"]
-			})
-			expect(JSON.stringify(parent?.descendants)).not.toContain("a_10000001")
+			expect(parent?.descendants).toBe(2)
 			expect(full.content[0]?.text).toContain("Older running")
 			expect(full.content[0]?.text).toContain("anthropic/sonnet:high")
 
@@ -284,14 +262,6 @@ describe("read-only task tools", () => {
 		})
 	})
 
-	test("returns the complete list without pagination or truncation", () => {
-		const rows = Array.from({ length: 100 }, (_, index) => largeRow(index))
-		const result = buildTaskListToolResult({ rows, diagnostics: [] })
-		expect(result.details.tasks).toHaveLength(100)
-		expect(result.details.total).toBe(100)
-		expect(result.content[0].text).toContain(rows[99]?.id ?? "missing")
-	})
-
 	test("runs semantic shutdown cleanup for every replacement reason but not reload", async () => {
 		await withTempWorkspace(async workspace => {
 			const cleaned: string[] = []
@@ -329,7 +299,7 @@ async function createTask(cwd: string, parentSessionId: string, fixture: TaskFix
 }
 
 function taskMetadata(paths: TaskStoragePaths, fixture: TaskFixture): TaskMetadata {
-	const activeState = fixture.state === "running" || fixture.state === "queued" || fixture.state === "suspended" ? fixture.state : null
+	const activeState = fixture.state === "running" || fixture.state === "queued" ? fixture.state : null
 	const queuedFollowUps = Array.from({ length: fixture.queuedFollowUps ?? 0 }, (_, index) => ({
 		id: `r_${String(index + 2).padStart(16, "0")}`,
 		sequence: index + 2,
@@ -384,7 +354,7 @@ function taskMetadata(paths: TaskStoragePaths, fixture: TaskFixture): TaskMetada
 		queuedFollowUps,
 		notifications: [],
 		discardedAt: fixture.discarded ? fixture.updatedAt : null,
-		createdAt: 1,
+		createdAt: fixture.updatedAt,
 		updatedAt: fixture.updatedAt
 	}
 }
@@ -427,35 +397,4 @@ function taskContext(cwd: string): ExtensionContext {
 		cwd,
 		sessionManager: { getSessionId: () => "parent-session" }
 	} as unknown as ExtensionContext
-}
-
-function largeRow(index: number): TaskListRow {
-	const id = `a_${index.toString(16).padStart(8, "0")}`
-	const longPath = `.pi/lovely-agents/parent-session/${id}/${"p".repeat(1_000)}`
-	return {
-		id,
-		kind: "agent",
-		label: "l".repeat(80),
-		definition: "reviewer",
-		state: "idle",
-		latestOutcome: "succeeded",
-		model: "anthropic/sonnet",
-		thinking: "high",
-		createdAt: index,
-		updatedAt: index,
-		acceptedAt: null,
-		startedAt: null,
-		detachedAt: null,
-		queuedFollowUps: 0,
-		outputLines: 1,
-		lastActivity: null,
-		queueReason: null,
-		paths: { history: `${longPath}/history.md`, session: `${longPath}/session.jsonl` },
-		descendants: {
-			total: 0,
-			states: { idle: 0, queued: 0, running: 0, suspended: 0, interrupted: 0 },
-			outcomes: { succeeded: 0, failed: 0, stopped: 0, interrupted: 0 },
-			activeLabels: []
-		}
-	}
 }

@@ -1,17 +1,10 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Key, matchesKey, type SelectItem, truncateToWidth } from "@earendil-works/pi-tui"
-import type { TaskListResult, TaskListRow } from "./tools.js"
+import { isActiveState, type TaskListResult } from "./tools.js"
 import { bindTaskUpdateRoute } from "./updates.js"
 
 const PANEL_ID = "lovely-agents"
-const TASK_STATE_ORDER: Record<TaskListRow["state"], number> = {
-	running: 0,
-	suspended: 1,
-	queued: 2,
-	interrupted: 3,
-	idle: 4
-}
-type PanelItem = SelectItem & { group: "Agents" | "Bash" | "Diagnostics" }
+type PanelItem = SelectItem & { group: "Agents" | "Bash" | "Diagnostics"; active: boolean }
 
 /** One below-editor surface: passive active rows, or a focused list of all direct tasks. */
 export function createTaskPanel(
@@ -31,7 +24,7 @@ export function createTaskPanel(
 
 	function draw() {
 		if (disposed) return
-		const active = tasks.filter(task => task.state === "queued" || task.state === "running" || task.state === "suspended")
+		const active = tasks.filter(task => isActiveState(task.state))
 		const bashCount = active.filter(task => task.kind === "bash").length
 		const agentCount = active.length - bashCount
 		ctx.ui.setStatus(
@@ -51,9 +44,17 @@ export function createTaskPanel(
 			PANEL_ID,
 			(_tui, theme) => ({
 				render(width) {
-					if (!focused) return renderActiveTaskRows(active).map(line => truncateToWidth(line, width))
+					// Passive mode is the same list restricted to active rows, without a selection.
+					if (!focused) {
+						return renderItems(
+							items.filter(item => item.active),
+							undefined,
+							width,
+							theme
+						).map(line => truncateToWidth(line, width))
+					}
 					return [
-						...(items.length > 0 ? renderFocusedItems(items, selected, width, theme) : ["No durable tasks for this session."]),
+						...(items.length > 0 ? renderItems(items, selected, width, theme) : ["No durable tasks for this session."]),
 						theme.fg("dim", "↑↓ navigate · Enter actions · Esc/↑ at top editor · type to edit")
 					].map(line => truncateToWidth(line, width))
 				},
@@ -72,7 +73,7 @@ export function createTaskPanel(
 				const result = await options.loadTasks()
 				if (disposed) return
 				const oldIndex = items.findIndex(item => item.value === selected)
-				tasks = [...result.tasks].sort(comparePanelTasks)
+				tasks = result.tasks
 				capacity = result.capacity
 				bashCapacity = result.bashCapacity
 				items = [
@@ -84,13 +85,15 @@ export function createTaskPanel(
 							`${task.queueReason ? `waiting: ${task.queueReason} · ` : ""}${task.kind === "bash" ? "bash" : task.model}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}` +
 							(task.progress || task.inputPreview ? ` · ${JSON.stringify(task.progress ?? task.inputPreview)}` : "")
 						).replace(/[\r\n]+/g, " "),
-						group: (task.kind === "bash" ? "Bash" : "Agents") as PanelItem["group"]
+						group: (task.kind === "bash" ? "Bash" : "Agents") as PanelItem["group"],
+						active: isActiveState(task.state)
 					})),
 					...result.diagnostics.map(diagnostic => ({
 						value: `diagnostic:${diagnostic.path}`,
 						label: `[error] ${diagnostic.id ?? diagnostic.code}`,
 						description: diagnostic.message,
-						group: "Diagnostics" as const
+						group: "Diagnostics" as const,
+						active: false
 					}))
 				]
 				// Keep identity across live reordering; on removal select the nearest remaining row.
@@ -168,38 +171,7 @@ export function createTaskPanel(
 	}
 }
 
-export function renderActiveTaskRows(
-	tasks: readonly ({
-		id: string
-		label: string
-		state: TaskListRow["state"]
-		queuedFollowUps: number
-	} & Pick<TaskListRow, "kind" | "createdAt"> &
-		Partial<Pick<TaskListRow, "queueReason" | "inputPreview" | "progress">>)[]
-): string[] {
-	const sorted = [...tasks].sort(comparePanelTasks)
-	const rows: string[] = []
-	let rendered = 0
-	let group: "Agents" | "Bash" | undefined
-	for (const task of sorted) {
-		if (rendered >= 5) break
-		const nextGroup = task.kind === "bash" ? "Bash" : "Agents"
-		if (nextGroup !== group) {
-			rows.push(nextGroup)
-			group = nextGroup
-		}
-		rows.push(
-			`↳ ${task.id} ${task.state} ${task.label.replace(/[\r\n]+/g, " ")}${task.queuedFollowUps ? ` (+${task.queuedFollowUps})` : ""}` +
-				(task.queueReason ? ` · waiting: ${task.queueReason}` : "") +
-				(task.progress || task.inputPreview ? ` · ${JSON.stringify(task.progress ?? task.inputPreview)}` : "")
-		)
-		rendered++
-	}
-	if (sorted.length > rendered) rows.push(`  … ${sorted.length - rendered} more active`)
-	return rows
-}
-
-function renderFocusedItems(
+function renderItems(
 	items: readonly PanelItem[],
 	selected: string | undefined,
 	width: number,
@@ -226,16 +198,4 @@ function renderFocusedItems(
 	}
 	if (start > 0 || start + visible.length < items.length) lines.push(theme.fg("dim", `  (${selectedIndex + 1}/${items.length})`))
 	return lines
-}
-
-function comparePanelTasks(
-	left: Pick<TaskListRow, "kind" | "state" | "createdAt" | "id">,
-	right: Pick<TaskListRow, "kind" | "state" | "createdAt" | "id">
-): number {
-	return (
-		(left.kind === "agent" ? 0 : 1) - (right.kind === "agent" ? 0 : 1) ||
-		TASK_STATE_ORDER[left.state] - TASK_STATE_ORDER[right.state] ||
-		right.createdAt - left.createdAt ||
-		left.id.localeCompare(right.id)
-	)
 }

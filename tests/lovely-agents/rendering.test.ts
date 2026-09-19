@@ -4,7 +4,7 @@ import { type ExtensionAPI, initTheme, type Theme, type ToolDefinition } from "@
 import { type Component, visibleWidth } from "@earendil-works/pi-tui"
 import { registerAgentTool } from "../../extensions/lovely-agents/agent.js"
 import { defaultAgentsConfig } from "../../extensions/lovely-agents/config.js"
-import { renderAgentNotification, renderExpandableResult } from "../../extensions/lovely-agents/rendering.js"
+import { renderExpandableResult } from "../../extensions/lovely-agents/rendering.js"
 
 initTheme("dark")
 
@@ -19,61 +19,6 @@ function renderText(component: Component): string {
 		.map(line => line.trimEnd())
 		.join("\n")
 }
-
-test("notifications use a distinct header and hide even short bodies until expanded", () => {
-	const styles: string[] = []
-	const notificationTheme = {
-		bold: (text: string) => {
-			styles.push("bold")
-			return text
-		},
-		fg: (color: string, text: string) => {
-			styles.push(color)
-			return text
-		},
-		bg: (color: string, text: string) => {
-			styles.push(color)
-			return text
-		}
-	} as unknown as Theme
-	for (const summary of ['Task a_12345678 "Review 界🙂" completed: succeeded', 'Task b_12345678 "Build 界🙂" interrupted']) {
-		const id = summary.slice(5, 15)
-		const content = `[Lovely ${id.startsWith("b_") ? "Bash" : "Agent"} ${id}:r_0000000000000001:completion]\n${summary}\nOutput:\nShort reply`
-		const message = { role: "custom" as const, timestamp: 0, customType: "lovely-agents:notification", content, display: true }
-		for (const outputPad of [0, 2]) {
-			const collapsed = renderAgentNotification(message, { expanded: false, outputPad }, notificationTheme)
-			const expanded = renderAgentNotification(message, { expanded: true, outputPad }, notificationTheme)
-			if (!collapsed || !expanded) throw new Error("Missing notification renderer")
-			expect(collapsed.render(140)).toHaveLength(1)
-			expect(renderText(collapsed)).toContain(summary)
-			expect(renderText(collapsed)).not.toContain("Short reply")
-			expect(renderText(collapsed)).not.toContain("r_0000000000000001")
-			expect(renderText(collapsed).startsWith(`${" ".repeat(outputPad)}▸`)).toBe(true)
-			expect(renderText(expanded)).toContain("Short reply")
-			expect(renderText(expanded)).toContain("r_0000000000000001")
-			for (const width of [1, 8, 40, 140]) {
-				expect(collapsed.render(width).every(line => visibleWidth(line) <= width)).toBe(true)
-				expect(expanded.render(width).every(line => visibleWidth(line) <= width)).toBe(true)
-			}
-			expect(message.content).toBe(content)
-		}
-	}
-	const manual = renderAgentNotification(
-		{
-			role: "custom",
-			timestamp: 0,
-			customType: "lovely-agents:notification",
-			display: true,
-			content: [{ type: "text", text: "User manually discarded task a_12345678." }]
-		},
-		{ expanded: false, outputPad: 0 },
-		notificationTheme
-	)
-	if (!manual) throw new Error("Missing manual notification")
-	expect(renderText(manual)).toContain("Lovely Agents · User manually discarded task a_12345678.")
-	expect(styles).toContain("bold")
-	expect(styles).toContain("customMessageBg")
-})
 
 describe("expandable tool results", () => {
 	test("agent rows show ID and one-line input by default, expanding input and result together", () => {

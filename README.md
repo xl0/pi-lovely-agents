@@ -92,7 +92,7 @@ Agents and Bash appear in separate groups, active tasks first within each group.
 - **Inputs / history** shows earlier requests and results.
 - **Follow-up** adds another request after the agent's current work.
 - **Steer** queues input for a live streaming run. Without a live target it becomes
-  a Follow-up; foreground busy tasks reject it. Queued input can be lost on stop.
+  a Follow-up. Queued input can be lost on stop.
 - **Stop** cancels the work but keeps its files. An agent can take a new request later.
 - **Discard** stops it and removes it from active work. Files stay in place and
   results remain readable, but it cannot receive new input.
@@ -139,9 +139,8 @@ Background Bash currently supports Linux and macOS, not Windows.
 Open **`/lovely-agents` → Configuration**. Settings can apply to all projects or
 just this workspace; workspace settings win.
 
-**Background agents** and **Background Bash** are both on by default. Turn off
-Background agents if you want Pi to wait for agents to finish instead of leaving
-work running. Turning either switch off does not stop tasks already accepted.
+**Background Bash** is on by default. Turning it off does not stop tasks already
+accepted.
 
 Agent work and Bash jobs have separate concurrency limits, both initially 4.
 Extra work queues until a slot is free. Pi initially waits up to 30 seconds for
@@ -177,8 +176,8 @@ Each agent assignment has a 1-based run index, shown in tool results and notices
 Omit `run` for the current snapshot; `lines: 20` requests a shorter Bash tail.
 Older runs completed before this feature may require reading `history.md`.
 
-If Pi asks to wait for a result, the wait ends when the run finishes, pauses on
-a provider limit, or reaches the requested timeout. A timeout returns the
+If Pi asks to wait for a result, the wait ends when the run finishes or reaches
+the requested timeout. A timeout returns the
 latest output—it does not stop the task.
 The wait stays attached to the selected run; a later Follow-up cannot replace
 its answer. Prefer completion notices or a meaningful wait over short polling.
@@ -188,18 +187,15 @@ running; quitting or switching conversations stops it.** After a crash, lost
 work is marked interrupted rather than silently restarted. Agent conversations
 can receive a new request; Bash commands must be started again.
 
-Background agents pause on provider quota or rate limits. A successful request
-using the affected model can resume them. If your main conversation ended with
-an error or was aborted, **`/continue`** resumes it and eligible paused agents.
+An agent that hits a provider quota or rate limit fails like any other provider
+error; Pi is notified and can send it a Follow-up once the limit clears.
 
 Task files live in `.pi/lovely-agents/` under your working directory and are
 ignored by Git. They include conversation history and command output, so treat
 them as potentially sensitive. Each task keeps its original
-`<parent-session>/<task-id>/` path. The parent's `active/` directory links to all
-non-discarded tasks, including idle specialists. It is a browsing index, rebuilt
-when that parent is reopened—not the authority for execution or deletion.
+`<parent-session>/<task-id>/` path.
 Keep tasks until dependent work is integrated, then discard what is no longer
-needed. Existing old `archive/` contents are left untouched.
+needed.
 
 There is no automatic deletion. From a package checkout with dependencies installed
 (`bun install`; Pi-managed installs omit the peer dependencies the script needs):
@@ -211,7 +207,7 @@ bun scripts/prune-tasks.ts /path/to/workspace --apply  # permanently delete elig
 
 Pruning requires closed parent sessions and retains non-discarded tasks, pending
 notifications, unknown/corrupt records, and unsafe or still-needed descendants.
-Missing `active/` links never authorize deletion. Crash leftovers stay until
+Crash leftovers stay until
 their parent is reopened; abandoned sessions are not automatically collected.
 
 ## Development

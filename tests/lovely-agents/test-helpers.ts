@@ -52,7 +52,6 @@ export async function seedFixtureTasks(cwd: string, parentSessionId: string): Pr
 	await acquireParentLease(cwd, parentSessionId)
 	const fixtures: Array<{ label: string; state: TaskMetadata["state"]; outcome: TaskMetadata["latestOutcome"] }> = [
 		{ label: "Running", state: "running", outcome: null },
-		{ label: "Suspended", state: "suspended", outcome: null },
 		{ label: "Queued", state: "queued", outcome: null },
 		{ label: "Interrupted", state: "interrupted", outcome: "interrupted" },
 		{ label: "Succeeded", state: "idle", outcome: "succeeded" },
@@ -77,7 +76,7 @@ export async function createFixtureTask(
 	const paths = await reserveTaskStorage(await ensureParentStorage(cwd, parentSessionId))
 	await initializeRetainedLogs(paths)
 	const now = Date.now()
-	const active = state === "queued" || state === "running" || state === "suspended"
+	const active = state === "queued" || state === "running"
 	const metadata: TaskMetadata = {
 		version: TASK_METADATA_VERSION,
 		kind: "agent",

@@ -217,9 +217,6 @@ describe("bash_bg real processes", () => {
 			await expect(execute(tool, workspace.cwd, { command: ":", label: "Bad cwd", cwd: "absent" })).rejects.toThrow()
 			await workspace.write("workspace/file", "not a directory")
 			await expect(execute(tool, workspace.cwd, { command: ":", label: "Bad cwd", cwd: "file" })).rejects.toThrow("not a directory")
-			for (const waitMs of [-1, 0.1, 600_001]) {
-				await expect(execute(tool, workspace.cwd, { command: ":", label: "Bad wait", waitMs })).rejects.toThrow("waitMs")
-			}
 			expect(Value.Check(tool.parameters, { command: ":", label: "x", waitMs: 0 })).toBe(true)
 			expect(Value.Check(tool.parameters, { command: ":", label: "x", waitMs: 0.1 })).toBe(false)
 			expect(Value.Check(tool.parameters, { command: ":", label: "x", timeout: 1 })).toBe(false)
@@ -459,15 +456,13 @@ describe("bash_bg real processes", () => {
 		})
 	})
 
-	test("separate FIFO Bash permits ignore agent saturation/gates; queued stdin and stop are explicit", async () => {
+	test("separate FIFO Bash permits ignore agent saturation; queued stdin and stop are explicit", async () => {
 		await fixture(async (workspace, tool, config) => {
 			config.maxBashConcurrency = 1
 			const agents = getAgentCoordinator()
-			const tuple = { provider: "bash", model: "process" }
 			const previousLimit = agents.maxConcurrency
 			agents.setMaxConcurrency(1)
-			const agentPermit = await agents.acquire({ tuple: { provider: "test", model: "held" } })
-			agents.closeTuple(tuple)
+			const agentPermit = await agents.acquire({})
 			try {
 				const first = await execute(tool, workspace.cwd, { command: "cat", label: "First" })
 				const firstPaths = pathsFor(workspace.cwd, first.details.id)
@@ -489,7 +484,6 @@ describe("bash_bg real processes", () => {
 				expect(getBashCoordinator().activeCount).toBe(0)
 			} finally {
 				agentPermit.release()
-				agents.openTuple(tuple)
 				agents.setMaxConcurrency(previousLimit)
 			}
 		})

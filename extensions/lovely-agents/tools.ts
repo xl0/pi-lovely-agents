@@ -12,26 +12,28 @@ import { renderExpandableResult } from "./rendering.js"
 import {
 	type AgentTaskMetadata,
 	acquireParentLease,
-	countRetainedOutputLines,
+	directTaskPaths,
 	displayWorkspacePath,
 	type MetadataDiagnostic,
 	parentStoragePaths,
+	RETAINED_OUTPUT_MAX_LINES,
+	RETAINED_OUTPUT_MAX_WAIT_MS,
 	type RetainedPaths,
 	readRetainedOutput,
 	readTaskMetadata,
 	releaseParentLeaseFor,
 	retainedPaths,
+	splitCompleteLines,
 	TASK_REFERENCE_PATTERN,
 	type TaskMetadata,
 	type TaskStoragePaths,
 	taskSchedulingStatus,
 	taskStoragePaths
 } from "./state.js"
-import { readTaskDiscardMarker } from "./storage.js"
+import { hasCode } from "./utils.js"
 
 const TASK_STATE_ORDER: Record<TaskMetadata["state"], number> = {
 	running: 0,
-	suspended: 1,
 	queued: 2,
 	interrupted: 3,
 	idle: 4
@@ -72,13 +74,6 @@ export type AgentRosterResult = {
 	bashCapacity: { active: number; limit: number }
 }
 
-export type DescendantSummary = {
-	total: number
-	states: Record<TaskMetadata["state"], number>
-	outcomes: Record<NonNullable<TaskMetadata["latestOutcome"]>, number>
-	activeLabels: string[]
-}
-
 export type TaskListRow = {
 	id: string
 	kind: TaskMetadata["kind"]
@@ -98,16 +93,13 @@ export type TaskListRow = {
 	signal?: string | null
 	createdAt: number
 	updatedAt: number
-	acceptedAt: number | null
-	startedAt: number | null
-	detachedAt: number | null
 	queuedFollowUps: number
-	outputLines: number | null
+	outputLines: number
 	lastActivity: NonNullable<TaskMetadata["lastActivity"]> | null
 	queueReason: ReturnType<typeof taskSchedulingStatus>["queueReason"]
-	capacity?: ReturnType<typeof taskSchedulingStatus>["capacity"]
 	paths: RetainedPaths
-	descendants: DescendantSummary
+	/** Non-discarded tasks anywhere below this agent. */
+	descendants: number
 }
 
 export type TaskDiagnostic = {
@@ -120,7 +112,6 @@ export type TaskDiagnostic = {
 export type TaskListResult = {
 	tasks: TaskListRow[]
 	diagnostics: TaskDiagnostic[]
-	total: number
 	capacity: ReturnType<typeof taskSchedulingStatus>["capacity"]
 	bashCapacity: ReturnType<typeof taskSchedulingStatus>["capacity"]
 }
@@ -306,17 +297,21 @@ export function registerTaskTools(
 			"Read a task's current reply or select a 1-based run, including completed and discarded tasks. Bash lines selects the last N output lines. Snapshots are capped at 2,000 lines/50 KiB; full agent replies are in history.md and full Bash output in output.log.",
 		promptSnippet: "Read a task's latest reply, progress, and current run status",
 		promptGuidelines: [
-			"task_output returns one run's snapshot, not history. With waitMs, wait for the selected/current run to end or suspend, or for the timeout; later Follow-ups do not replace its result. Omit waitMs for an immediate snapshot. Prefer completion notices while doing other work, or one meaningful bounded wait when blocked on a result—not repeated short polling."
+			"task_output returns one run's snapshot, not history. With waitMs, wait for the selected/current run to end, or for the timeout; later Follow-ups do not replace its result. Omit waitMs for an immediate snapshot. Prefer completion notices while doing other work, or one meaningful bounded wait when blocked on a result—not repeated short polling."
 		],
 		parameters: Type.Object(
 			{
 				id: Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" }),
 				run: Type.Optional(Type.Integer({ minimum: 1, description: "1-based run index; omit for the current run" })),
 				lines: Type.Optional(
-					Type.Integer({ minimum: 1, maximum: 2_000, description: "Bash only: last N output lines (status and log path are kept)" })
+					Type.Integer({
+						minimum: 1,
+						maximum: RETAINED_OUTPUT_MAX_LINES,
+						description: "Bash only: last N output lines (status and log path are kept)"
+					})
 				),
 				waitMs: Type.Optional(
-					Type.Integer({ minimum: 0, maximum: 600_000, description: "Maximum wait for the current run to end or suspend" })
+					Type.Integer({ minimum: 0, maximum: RETAINED_OUTPUT_MAX_WAIT_MS, description: "Maximum wait for the current run to end" })
 				)
 			},
 			{ additionalProperties: false }
@@ -384,7 +379,6 @@ export function buildTaskListToolResult(options: { rows: readonly TaskListRow[];
 	const result: TaskListResult = {
 		tasks,
 		diagnostics: [...options.diagnostics],
-		total: tasks.length,
 		capacity: { active: coordinator.activeCount, limit: coordinator.maxConcurrency },
 		bashCapacity: { active: bashCoordinator.activeCount, limit: bashCoordinator.maxConcurrency }
 	}
@@ -444,34 +438,12 @@ async function scanDirectTasks(
 			continue
 		}
 		if (loaded.status === "invalid") {
-			try {
-				if (await readTaskDiscardMarker(paths)) continue
-			} catch (error) {
-				diagnostics.push({
-					code: "invalid-discard-marker",
-					message: errorMessage(error),
-					path: displayWorkspacePath(cwd, paths.taskDirectory),
-					id: entry.name
-				})
-				continue
-			}
 			diagnostics.push(metadataTaskDiagnostic(cwd, loaded.diagnostic, entry.name))
 			continue
 		}
 		if (loaded.metadata.discardedAt !== null) continue
 
-		let outputLines: number | null = null
-		try {
-			outputLines = await countRetainedOutputLines(paths)
-		} catch (error) {
-			diagnostics.push({
-				code: "unreadable-output",
-				message: errorMessage(error),
-				path: displayWorkspacePath(cwd, paths.metadata),
-				id: entry.name
-			})
-		}
-		rows.push(await taskListRow(cwd, paths, loaded.metadata, outputLines, includeInputPreviews))
+		rows.push(await taskListRow(cwd, paths, loaded.metadata, includeInputPreviews))
 	}
 	return { rows, diagnostics }
 }
@@ -480,12 +452,8 @@ async function taskListRow(
 	cwd: string,
 	paths: TaskStoragePaths,
 	metadata: TaskMetadata,
-	outputLines: number | null,
 	includeInputPreviews: boolean
 ): Promise<TaskListRow> {
-	const descendants = emptyDescendantAccumulator()
-	if (metadata.kind === "agent") await collectDescendants(cwd, metadata.childSessionId, new Set([metadata.parentSessionId]), descendants)
-	const activeRun = metadata.activeRun
 	return {
 		id: metadata.taskRef,
 		kind: metadata.kind,
@@ -499,65 +467,25 @@ async function taskListRow(
 		latestOutcome: metadata.latestOutcome,
 		createdAt: metadata.createdAt,
 		updatedAt: metadata.updatedAt,
-		acceptedAt: activeRun?.acceptedAt ?? null,
-		startedAt: activeRun?.startedAt ?? null,
-		detachedAt: activeRun?.detachedAt ?? null,
 		queuedFollowUps: metadata.queuedFollowUps.length,
-		outputLines,
+		outputLines: splitCompleteLines(metadata.latestReply?.text ?? "").length,
 		lastActivity: metadata.lastActivity ?? null,
-		...taskSchedulingStatus(metadata),
+		queueReason: taskSchedulingStatus(metadata).queueReason,
 		paths: retainedPaths(paths),
-		descendants: {
-			total: descendants.total,
-			states: descendants.states,
-			outcomes: descendants.outcomes,
-			activeLabels: descendants.active
-				.sort(
-					(left, right) =>
-						TASK_STATE_ORDER[left.state] - TASK_STATE_ORDER[right.state] ||
-						right.updatedAt - left.updatedAt ||
-						left.label.localeCompare(right.label)
-				)
-				.slice(0, 3)
-				.map(item => item.label)
-		}
+		descendants: metadata.kind === "agent" ? await countDescendants(cwd, metadata.childSessionId, new Set([metadata.parentSessionId])) : 0
 	}
 }
-
-type DescendantAccumulator = Omit<DescendantSummary, "activeLabels"> & {
-	active: Array<{ label: string; state: TaskMetadata["state"]; updatedAt: number }>
-}
-
-async function collectDescendants(
-	cwd: string,
-	parentSessionId: string,
-	visited: Set<string>,
-	summary: DescendantAccumulator
-): Promise<void> {
-	if (visited.has(parentSessionId)) return
+async function countDescendants(cwd: string, parentSessionId: string, visited: Set<string>): Promise<number> {
+	if (visited.has(parentSessionId)) return 0
 	visited.add(parentSessionId)
-	const parent = parentStoragePaths(cwd, parentSessionId)
-	for (const entry of await readTaskDirectory(parent.parentDirectory)) {
-		if (!entry.isDirectory() || entry.isSymbolicLink() || !TASK_REFERENCE_PATTERN.test(entry.name)) continue
-		const loaded = await readTaskMetadata(taskStoragePaths(parent, entry.name))
+	let count = 0
+	for (const paths of await directTaskPaths(cwd, parentSessionId)) {
+		const loaded = await readTaskMetadata(paths)
 		if (loaded.status !== "ok" || loaded.metadata.discardedAt !== null) continue
-		summary.total++
-		summary.states[loaded.metadata.state]++
-		if (loaded.metadata.latestOutcome) summary.outcomes[loaded.metadata.latestOutcome]++
-		if (isActiveState(loaded.metadata.state)) {
-			summary.active.push({ label: loaded.metadata.label, state: loaded.metadata.state, updatedAt: loaded.metadata.updatedAt })
-		}
-		if (loaded.metadata.kind === "agent") await collectDescendants(cwd, loaded.metadata.childSessionId, visited, summary)
+		count++
+		if (loaded.metadata.kind === "agent") count += await countDescendants(cwd, loaded.metadata.childSessionId, visited)
 	}
-}
-
-function emptyDescendantAccumulator(): DescendantAccumulator {
-	return {
-		total: 0,
-		states: { idle: 0, queued: 0, running: 0, suspended: 0, interrupted: 0 },
-		outcomes: { succeeded: 0, failed: 0, stopped: 0, interrupted: 0 },
-		active: []
-	}
+	return count
 }
 
 async function readTaskDirectory(path: string): Promise<Dirent[]> {
@@ -573,8 +501,18 @@ function metadataTaskDiagnostic(cwd: string, diagnostic: MetadataDiagnostic, id:
 	return { code: diagnostic.code, message: diagnostic.message, path: displayWorkspacePath(cwd, diagnostic.path), id }
 }
 
-function compareTaskRows(left: TaskListRow, right: TaskListRow): number {
-	return TASK_STATE_ORDER[left.state] - TASK_STATE_ORDER[right.state] || right.updatedAt - left.updatedAt || left.id.localeCompare(right.id)
+export function isActiveState(state: TaskMetadata["state"]): boolean {
+	return state === "running" || state === "queued"
+}
+
+/** The one task ordering: Agents before Bash, active states first, newest created first. */
+export function compareTaskRows(left: TaskListRow, right: TaskListRow): number {
+	return (
+		(left.kind === "agent" ? 0 : 1) - (right.kind === "agent" ? 0 : 1) ||
+		TASK_STATE_ORDER[left.state] - TASK_STATE_ORDER[right.state] ||
+		right.createdAt - left.createdAt ||
+		left.id.localeCompare(right.id)
+	)
 }
 
 function renderTaskListResult(result: TaskListResult): string {
@@ -598,11 +536,11 @@ function renderTaskListResult(result: TaskListResult): string {
 				lines.push(`      output: ${yamlScalar(task.paths.output ?? "")}`)
 			}
 			lines.push(`      queued_followups: ${task.queuedFollowUps}`)
-			lines.push(`      output_lines: ${task.outputLines ?? "unknown"}`)
+			lines.push(`      output_lines: ${task.outputLines}`)
 			if (task.queueReason) lines.push(`      waiting: ${task.queueReason}`)
 			if (task.progress) lines.push(`      progress: ${yamlScalar(task.progress)}`)
 			if (task.lastActivity) lines.push(`      last_activity: ${task.lastActivity.action} (${relativeTime(task.lastActivity.at, now)})`)
-			if (task.descendants.total > 0) lines.push(`      descendants: ${renderDescendantSummary(task.descendants)}`)
+			if (task.descendants > 0) lines.push(`      descendants: ${task.descendants}`)
 			lines.push(`      created: ${relativeTime(task.createdAt, now)}`)
 			lines.push(`      updated: ${relativeTime(task.updatedAt, now)}`)
 			lines.push(`      dir: ${yamlScalar(dirname(task.paths.history))}`)
@@ -633,28 +571,7 @@ export function relativeTime(timestamp: number, now: number): string {
 	return `${days}d${remainingHours ? `${remainingHours}h` : ""} ago`
 }
 
-function renderDescendantSummary(summary: DescendantSummary): string {
-	const counts = [
-		...Object.entries(summary.states)
-			.filter(([, count]) => count > 0)
-			.map(([name, count]) => `state.${name}=${count}`),
-		...Object.entries(summary.outcomes)
-			.filter(([, count]) => count > 0)
-			.map(([name, count]) => `outcome.${name}=${count}`)
-	]
-	const active = summary.activeLabels.length > 0 ? `, active=[${summary.activeLabels.map(yamlScalar).join(", ")}]` : ""
-	return `{total=${summary.total}${counts.length > 0 ? `, ${counts.join(", ")}` : ""}${active}}`
-}
-
-function isActiveState(state: TaskMetadata["state"]): boolean {
-	return state === "running" || state === "suspended" || state === "queued"
-}
-
-function hasCode(error: unknown, code: string): boolean {
-	return typeof error === "object" && error !== null && "code" in error && error.code === code
-}
-
-function errorMessage(error: unknown): string {
+function _errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error)
 }
 

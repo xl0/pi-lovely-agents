@@ -36,7 +36,6 @@ describe("durable notifications", () => {
 			expect(notice.content).not.toContain("Early shell output")
 			expect(notice.content).toContain("Final summary")
 			expect(notice.content).toContain('task_output(id: "b_12345678", run: 1)')
-			expect(notice.content).toContain("Output preview:\n...")
 			expect(notice.content).toContain("output.log")
 			expect(notice.content).not.toContain("Model:")
 			expect(notice.content).not.toContain("session.jsonl")
@@ -126,16 +125,13 @@ describe("durable notifications", () => {
 	test("bounds the latest reply preview without inputs or history dependency", async () => {
 		await withTempWorkspace(async workspace => {
 			const { paths, metadata } = await createTask(workspace.cwd)
-			await createTask(workspace.cwd, "child", "a_87654321", "grandchild")
 			metadata.latestReply = { text: `Latest answer\n${"🙂".repeat(2_000)}`, streaming: false }
 			const run = metadata.activeRun
 			if (!run) throw new Error("fixture has no run")
-			const notification = await prepareTaskNotification(paths, metadata, run, "suspension")
+			const notification = await prepareTaskNotification(paths, metadata, run, "completion", "succeeded")
 			expect(Buffer.byteLength(notification.content)).toBeLessThanOrEqual(8 * 1024)
-			expect(notification.content).toContain("Output preview:\nLatest answer")
+			expect(notification.content).toContain("Latest answer")
 			expect(notification.content).not.toContain("Inspect")
-			expect(notification.content).not.toContain("activity.md")
-			expect(notification.content).toContain("Descendants:")
 			expect(notification.content).not.toContain("�")
 			const full = Array.from({ length: 128 }, (_, index) => ({ ...notification, id: `notice-${index}` }))
 			const bounded = appendTaskNotification(full, { ...notification, id: "notice-new" })
@@ -144,8 +140,6 @@ describe("durable notifications", () => {
 			expect(bounded.at(-1)?.id).toBe("notice-new")
 			await unlink(paths.history)
 			expect((await prepareTaskNotification(paths, metadata, run, "completion", "failed")).content).toContain("Latest answer")
-			metadata.latestReply = null
-			expect((await prepareTaskNotification(paths, metadata, run, "completion", "failed")).content).toContain("Output preview: (empty)")
 			await releaseParentLeaseFor(workspace.cwd, "parent")
 		})
 	})

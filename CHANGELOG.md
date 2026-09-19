@@ -4,10 +4,15 @@
 
 ### Breaking Changes
 
+- Remove foreground mode and the `backgroundAgents` setting: agent calls wait up to `waitMs` and then detach, and Follow-ups are always accepted without waiting for their result.
+- Remove provider-limit suspension, automatic recovery, and the `/continue` command: a run that hits a quota or rate limit fails like any other provider error and notifies the parent.
+- Remove the `active/` task index and the discard support for unsupported metadata versions; such records remain a diagnostic until deleted by hand.
 - Ignore project Agent Definitions and workspace settings unless Pi evaluated project trust or a `/trust` decision is saved; ignored resources are reported as warnings. Ancestor `.pi/agents` directories owned by another user are skipped.
 
 ### Changed
 
+- Report a single descendant count per agent task instead of per-state summaries, and omit descendants from notifications.
+- Use one task ordering everywhere: Agents before Bash, active states first, newest created first.
 - Keep Lovely tools and their schemas static instead of hiding tools and parameters as settings change; disabled Bash and depth limits are rejected when called, and `waitMs` is ignored while background agents are disabled.
 
 ### Fixed
@@ -25,6 +30,7 @@
 - Reopen a provider gate after successful tool-use turns, not only final replies.
 - Limit streaming reply snapshots to two durable writes per second.
 - Accept Bash stdin sent immediately after a task is reported running, instead of failing before the process is spawned.
+- Stop timed `task_output` waits from failing when the directory watcher reports an already-renamed temporary metadata file.
 - Keep unrelated staged changes out of the release commit.
 - Show a persistent session-ownership warning and disable Lovely Agents initialization when another Pi process owns the session's tasks.
 
