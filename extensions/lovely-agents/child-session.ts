@@ -5,7 +5,6 @@ import {
 	type BuildSystemPromptOptions,
 	createAgentSession,
 	DefaultResourceLoader,
-	formatSkillsForPrompt,
 	getAgentDir,
 	type LoadExtensionsResult,
 	type PromptOptions,
@@ -179,9 +178,11 @@ export async function createChildSession(options: CreateChildSessionOptions): Pr
 							return { content: [{ type: "text", text: "Progress updated." }], details: { progress } }
 						}
 					})
-					pi.on("before_agent_start", event => ({
-						systemPrompt: buildDefinitionSystemPrompt(event.systemPromptOptions)
-					}))
+					// Pi omits its tool list and rules for a custom prompt; add them back as sections
+					// and let Pi render the rest (append text, context files, skills, cwd).
+					pi.on("before_agent_start", event => {
+						Object.assign(event.systemPromptOptions.sections, definitionPromptSections(event.systemPromptOptions))
+					})
 				}
 			}
 		],
@@ -245,24 +246,16 @@ export async function createChildSession(options: CreateChildSessionOptions): Pr
 	}
 }
 
-export function buildDefinitionSystemPrompt(options: BuildSystemPromptOptions): string {
-	const body = options.customPrompt?.trim()
-	if (!body) throw new Error("Agent Definition body is empty")
+/** Mirrors the `tools` and `rules` sections Pi builds for its default prompt. */
+export function definitionPromptSections(options: BuildSystemPromptOptions): { tools: string; rules: string } {
 	const tools = options.selectedTools ?? []
 	const visibleTools = tools.filter(name => options.toolSnippets?.[name])
 	const toolList = visibleTools.length > 0 ? visibleTools.map(name => `- ${name}: ${options.toolSnippets?.[name]}`).join("\n") : "(none)"
-	const guidelines: string[] = []
-	const seen = new Set<string>()
-	const addGuideline = (value: string) => {
-		const guideline = value.trim()
-		if (!guideline || seen.has(guideline)) return
-		seen.add(guideline)
-		guidelines.push(guideline)
-	}
+	const rules = new Set<string>()
 	const hasBash = tools.includes("bash")
 	const hasPowerShell = tools.includes("powershell")
 	if ((hasBash || hasPowerShell) && !tools.some(name => name === "grep" || name === "find" || name === "ls")) {
-		addGuideline(
+		rules.add(
 			hasBash && hasPowerShell
 				? "Use bash or PowerShell for file operations like listing, searching, and finding files"
 				: hasPowerShell
@@ -270,26 +263,15 @@ export function buildDefinitionSystemPrompt(options: BuildSystemPromptOptions): 
 					: "Use bash for file operations like ls, rg, find"
 		)
 	}
-	for (const name of tools) for (const guideline of options.toolGuidelines?.[name] ?? []) addGuideline(guideline)
-	for (const guideline of options.promptGuidelines ?? []) addGuideline(guideline)
-	addGuideline("Be concise in your responses")
-	addGuideline("Show file paths clearly when working with files")
-
-	let prompt = `${body}\n\nAvailable tools:\n${toolList}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n\nGuidelines:\n${guidelines.map(value => `- ${value}`).join("\n")}`
-	if (options.appendSystemPrompt) prompt += `\n\n${options.appendSystemPrompt}`
-	if (options.contextFiles && options.contextFiles.length > 0) {
-		prompt += "\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n"
-		for (const file of options.contextFiles) {
-			prompt += `<project_instructions path="${file.path}">\n${file.content}\n</project_instructions>\n\n`
-		}
-		prompt += "</project_context>\n"
+	for (const name of tools) for (const rule of options.toolGuidelines?.[name] ?? []) rules.add(rule.trim())
+	for (const rule of options.promptGuidelines ?? []) rules.add(rule.trim())
+	rules.add("Be concise in your responses")
+	rules.add("Show file paths clearly when working with files")
+	rules.delete("")
+	return {
+		tools: `${toolList}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.`,
+		rules: [...rules].map(rule => `- ${rule}`).join("\n")
 	}
-	const skillReadTool = (["read", "bash"] as const).find(name => tools.includes(name))
-	if (skillReadTool && options.skills && options.skills.length > 0) {
-		prompt += formatSkillsForPrompt(options.skills, skillReadTool)
-	}
-	prompt += `\nCurrent working directory: ${options.cwd.replace(/\\/g, "/")}\n`
-	return prompt
 }
 
 function modelId(model: ScopedModel["model"]): string {
