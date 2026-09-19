@@ -11,6 +11,8 @@
 
 ### Changed
 
+- Require a Pi release newer than 0.85.1; child prompts are now rendered by Pi, with the tool list and rules added as prompt sections.
+- Replace the shipped `scripts/prune-tasks.ts` with **`/lovely-agents` → Prune discarded tasks**, which shows a dry run and asks before deleting.
 - Report a single descendant count per agent task instead of per-state summaries, and omit descendants from notifications.
 - Use one task ordering everywhere: Agents before Bash, active states first, newest created first.
 - Keep Lovely tools and their schemas static instead of hiding tools and parameters as settings change; disabled Bash and depth limits are rejected when called, and `waitMs` is ignored while background agents are disabled.
