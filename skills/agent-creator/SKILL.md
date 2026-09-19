@@ -5,7 +5,7 @@ description: Create or edit Lovely Agents definitions when the user wants a reus
 
 # Create an agent definition
 
-- Call `agent_roster` first. Reuse or edit an existing role when it fits;
+- Call `agent_roster` first. Reuse an existing role when it fits;
   don't silently overwrite or shadow one.
 - Default to the project's active `.pi/agents/` directory (nearest ancestor).
   Create one if absent. Use `~/.pi/agent/agents/` for explicitly user-wide roles.
