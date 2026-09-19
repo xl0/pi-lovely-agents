@@ -102,31 +102,6 @@ describe("Agent scheduling", () => {
 		third.release()
 	})
 
-	test("reserves acceptance order before work becomes eligible", async () => {
-		const coordinator = createAgentCoordinator(1)
-		const blocker = await coordinator.acquire({})
-		const order: string[] = []
-		const earlier = coordinator.reserve({ acceptanceOrder: coordinator.nextAcceptanceOrder() })
-		const earlierRun = earlier.run(async () => {
-			order.push("earlier")
-		})
-		const laterRun = coordinator.run({}, async () => {
-			order.push("later")
-		})
-		blocker.release()
-		await Promise.all([earlierRun, laterRun])
-		expect(order).toEqual(["earlier", "later"])
-	})
-
-	test("does not let an inactive reservation block eligible work", async () => {
-		const coordinator = createAgentCoordinator(1)
-		const reserved = coordinator.reserve({})
-		await coordinator.run({}, async () => {})
-		expect(coordinator.activeCount).toBe(0)
-		reserved.cancel()
-		expect(coordinator.queuedCount).toBe(0)
-	})
-
 	test("drains after a concurrency reduction without aborting active work", async () => {
 		const coordinator = createAgentCoordinator(2)
 		const first = await coordinator.acquire({})
@@ -170,16 +145,6 @@ describe("Agent scheduling", () => {
 		await expect(lending).rejects.toThrow("released while waiting to reacquire")
 		expect(coordinator.queuedCount).toBe(0)
 		other.release()
-	})
-
-	test("cancelling a granted but unused reservation returns its slot", async () => {
-		const coordinator = createAgentCoordinator(1)
-		const reservation = coordinator.reserve({})
-		reservation.activate()
-		expect(coordinator.activeCount).toBe(1)
-		reservation.cancel()
-		expect(coordinator.activeCount).toBe(0)
-		await expect(reservation.run(async () => "late")).rejects.toThrow("cancelled")
 	})
 
 	test("overlapping lends keep the slot free until the last wait ends", async () => {

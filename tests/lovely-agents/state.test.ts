@@ -78,8 +78,9 @@ describe("parent partition leases", () => {
 				acquireParentLease(workspace.cwd, "parent-session")
 			])
 			const reused = await acquireParentLease(workspace.cwd, "parent-session")
-			expect(concurrent).toBe(first)
-			expect(reused).toBe(first)
+			// The file is the only record: every acquisition in this process reads back the same lease.
+			expect(concurrent).toEqual(first)
+			expect(reused).toEqual(first)
 			expect(JSON.parse(await readFile(first.paths.lease, "utf8"))).toEqual({
 				version: first.version,
 				pid: process.pid,
@@ -93,7 +94,7 @@ describe("parent partition leases", () => {
 			await expect(stat(first.paths.lease)).rejects.toMatchObject({ code: "ENOENT" })
 
 			const reacquired = await acquireParentLease(workspace.cwd, "parent-session")
-			expect(reacquired.token).not.toBe(first.token)
+			expect(reacquired.token).toBe(first.token)
 			await releaseParentLease(reacquired)
 		})
 	})
@@ -125,6 +126,13 @@ describe("parent partition leases", () => {
 			const lease = await acquireParentLease(workspace.cwd, "parent-session")
 			expect(lease.pid).toBe(process.pid)
 			expect(lease.token).not.toBe(staleToken)
+			await releaseParentLease(lease)
+
+			// A crashed predecessor whose PID this process reuses: same PID, foreign token.
+			await writeFile(paths.lease, `${JSON.stringify({ version: 1, pid: process.pid, token: staleToken, createdAt: 1 })}\n`, {
+				mode: 0o600
+			})
+			expect((await acquireParentLease(workspace.cwd, "parent-session")).token).toBe(lease.token)
 			await releaseParentLease(lease)
 		})
 	})

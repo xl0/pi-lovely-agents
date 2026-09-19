@@ -213,7 +213,6 @@ class BashRuntime implements ResidentAgent {
 	#stopRequested = false
 	#detached = false
 	#stdinClosed = false
-	#running = false
 	#spawned = Promise.withResolvers<void>()
 	#inputLane: Promise<unknown> = Promise.resolve()
 	#outputLane: Promise<void> = Promise.resolve()
@@ -310,8 +309,13 @@ class BashRuntime implements ResidentAgent {
 		if (Buffer.byteLength(content) > MAX_AGENT_INPUT_BYTES) throw new Error("stdin must be at most 64 KiB")
 		const operation = this.#inputLane.then(async () => {
 			options.signal?.throwIfAborted()
+			const loaded = await readTaskMetadata(this.paths)
+			if (loaded.status !== "ok" || loaded.metadata.discardedAt !== null || loaded.metadata.state !== "running") {
+				const state = loaded.status !== "ok" ? "unreadable" : loaded.metadata.discardedAt !== null ? "discarded" : loaded.metadata.state
+				throw new Error(`Bash stdin is unavailable: task is ${state}, not running`)
+			}
 			// Durable "running" precedes spawn; a caller that saw it must not race the child's creation.
-			if (this.#running) await this.#spawned.promise
+			await this.#spawned.promise
 			const child = this.#child
 			if (
 				this.#stopRequested ||
@@ -321,14 +325,9 @@ class BashRuntime implements ResidentAgent {
 				child.signalCode !== null ||
 				child.stdin.destroyed
 			) {
-				throw new Error("Bash stdin is unavailable: task is queued, stopped, completed, or stdin is closed")
-			}
-			const loaded = await readTaskMetadata(this.paths)
-			if (loaded.status !== "ok" || loaded.metadata.discardedAt !== null || loaded.metadata.state !== "running") {
-				throw new Error("Bash stdin requires a running, non-discarded task")
+				throw new Error("Bash stdin is unavailable: task is stopped, completed, or stdin is closed")
 			}
 			options.signal?.throwIfAborted()
-			if (this.#stopRequested || this.#stdinClosed || child.stdin.destroyed) throw new Error("Bash stdin is closed")
 			if (options.eof) this.#stdinClosed = true
 			await new Promise<void>((resolve, reject) => {
 				let settled = false
@@ -397,7 +396,6 @@ class BashRuntime implements ResidentAgent {
 				await mutateTaskMetadata(this.paths, metadata => {
 					if (this.#stopRequested || metadata.discardedAt !== null || metadata.activeRun?.id !== this.#run.id) return metadata
 					running = true
-					this.#running = true
 					return {
 						...metadata,
 						state: "running",
