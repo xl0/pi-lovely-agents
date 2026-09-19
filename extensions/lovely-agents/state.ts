@@ -540,6 +540,10 @@ export async function readRetainedOutput(paths: TaskStoragePaths, options: Retai
 		metadata = settled ?? (await requireTaskMetadata(paths))
 	}
 
+	// The kernel writes a running command's output straight to output.log; read its tail on demand.
+	if (metadata.kind === "bash" && metadata.state === "running") {
+		metadata = { ...metadata, latestReply: { ...(await readOutputTail(paths.output)), streaming: true } }
+	}
 	if (
 		metadata.activeRun?.sequence === run ||
 		(!metadata.activeRun && (metadata.lastSettledRun ?? (metadata.lastRunSequence === 1 ? 1 : null)) === run)
@@ -607,6 +611,26 @@ export async function readRetainedOutput(paths: TaskStoragePaths, options: Retai
 }
 
 /** Formats an immutable run result before a later run can replace its reply. */
+/** Last 2,000 lines/50 KiB of a log, cut on a UTF-8 boundary, without following symlinks. */
+export async function readOutputTail(path: string): Promise<{ text: string; truncated: boolean }> {
+	const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+	try {
+		const { size } = await file.stat()
+		const length = Math.min(size, RETAINED_OUTPUT_MAX_BYTES)
+		const bytes = Buffer.alloc(length)
+		await file.read(bytes, 0, length, size - length)
+		let start = 0
+		if (size > length) while (start < length && isUtf8Continuation(bytes[start])) start++
+		const lines = bytes.subarray(start).toString("utf8").split("\n")
+		return {
+			text: lines.slice(-RETAINED_OUTPUT_MAX_LINES).join("\n"),
+			truncated: size > length || lines.length > RETAINED_OUTPUT_MAX_LINES
+		}
+	} finally {
+		await file.close()
+	}
+}
+
 export function retainedOutputSnapshot(
 	paths: TaskStoragePaths,
 	metadata: TaskMetadata,

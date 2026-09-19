@@ -19,6 +19,7 @@ import {
 	RETAINED_OUTPUT_MAX_LINES,
 	RETAINED_OUTPUT_MAX_WAIT_MS,
 	type RetainedPaths,
+	readOutputTail,
 	readRetainedOutput,
 	readTaskMetadata,
 	releaseParentLeaseFor,
@@ -468,7 +469,12 @@ async function taskListRow(
 		createdAt: metadata.createdAt,
 		updatedAt: metadata.updatedAt,
 		queuedFollowUps: metadata.queuedFollowUps.length,
-		outputLines: splitCompleteLines(metadata.latestReply?.text ?? "").length,
+		// A running command's output exists only in its log until settlement.
+		outputLines: splitCompleteLines(
+			metadata.kind === "bash" && metadata.state === "running"
+				? (await readOutputTail(paths.output)).text
+				: (metadata.latestReply?.text ?? "")
+		).length,
 		lastActivity: metadata.lastActivity ?? null,
 		queueReason: taskSchedulingStatus(metadata).queueReason,
 		paths: retainedPaths(paths),

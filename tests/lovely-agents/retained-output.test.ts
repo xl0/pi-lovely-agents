@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { readFile, stat } from "node:fs/promises"
+import { readFile, stat, writeFile } from "node:fs/promises"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
 import {
 	appendHistoryLog,
@@ -95,13 +95,19 @@ describe("latest reply snapshots", () => {
 			"running",
 			async paths => {
 				const tail = "remaining 🙂 output\n"
-				await writeTaskProgress(paths, runId, { latestReply: { text: tail, streaming: true, truncated: true } })
-				expect(JSON.parse(await readFile(paths.metadata, "utf8")).latestReply).toEqual({ text: tail, streaming: true, truncated: true })
+				// While running, the tail comes from output.log; settlement stores it once in metadata.
+				await writeFile(paths.output, tail)
 				const running = await readRetainedOutput(paths)
-				expect(running).toMatchObject({ truncated: true, streaming: true, totalLines: 1 })
-				expect(running.text).toBe(`${tail}\n\n[Output truncated; showing tail. Full output: ${running.paths.output}]`)
-				await mutateTaskMetadata(paths, metadata => ({ ...metadata, state: "idle", activeRun: null, latestOutcome: "succeeded" }))
-				expect(await readRetainedOutput(paths)).toMatchObject({ truncated: true, streaming: false, text: running.text })
+				expect(running).toMatchObject({ truncated: false, streaming: true, totalLines: 1 })
+				expect(running.text).toBe(`${tail}\n\n[Full output: ${running.paths.output}]`)
+				await mutateTaskMetadata(paths, metadata => ({
+					...metadata,
+					state: "idle",
+					activeRun: null,
+					latestOutcome: "succeeded",
+					latestReply: { text: tail, streaming: false, truncated: true }
+				}))
+				expect(await readRetainedOutput(paths)).toMatchObject({ truncated: true, streaming: false })
 				for (const latestReply of [
 					{ text: tail, streaming: false },
 					{ text: tail, streaming: false, truncated: false }
@@ -287,13 +293,13 @@ describe("latest reply snapshots", () => {
 		await withTaskStorage(
 			"running",
 			async paths => {
-				await writeLatestReply(paths, runId, "old\nmiddle\nfinal 🙂\n", true)
+				await writeFile(paths.output, "old\nmiddle\nfinal 🙂\n")
 				const short = await readRetainedOutput(paths, { lines: 1 })
 				expect(short).toMatchObject({ run: 1, truncated: true, streaming: true, state: "running" })
 				expect(short.text).toStartWith("final 🙂")
 				expect(short.text).not.toContain("middle")
 				expect(short.text).toContain("output.log")
-				await writeLatestReply(paths, runId, `${"🙂".repeat(20_000)}END`, true)
+				await writeFile(paths.output, `${"🙂".repeat(20_000)}END`)
 				const longLine = await readRetainedOutput(paths, { lines: 1 })
 				expect(longLine.text).toContain("END")
 				expect(longLine.text).not.toContain("�")

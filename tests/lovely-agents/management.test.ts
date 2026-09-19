@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { appendFile, readFile, writeFile } from "node:fs/promises"
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { visibleWidth } from "@earendil-works/pi-tui"
 import { openManagementUi, openTaskManagementUi } from "../../extensions/lovely-agents/management.js"
@@ -16,6 +17,7 @@ import {
 	writeTaskMetadata
 } from "../../extensions/lovely-agents/state.js"
 import { loadTaskList } from "../../extensions/lovely-agents/tools.js"
+import { publishTaskUpdate } from "../../extensions/lovely-agents/updates.js"
 import { seedFixtureTasks, withTempWorkspace } from "./test-helpers.js"
 
 test("management Tasks hands off to the existing panel instead of opening another selector", async () => {
@@ -282,7 +284,7 @@ describe("management fixtures", () => {
 					signal: null,
 					state: "running",
 					latestOutcome: null,
-					latestReply: { text: Array.from({ length: 30 }, (_, index) => `Bash line ${index}`).join("\n"), streaming: false },
+					latestReply: null,
 					lastRunSequence: 1,
 					activeRun: {
 						id: "r_1111111111111111",
@@ -300,6 +302,7 @@ describe("management fixtures", () => {
 					updatedAt: now
 				}
 				await writeTaskMetadata(paths, metadata)
+				await writeFile(paths.output, Array.from({ length: 30 }, (_, index) => `Bash line ${index}`).join("\n"))
 				let step = 0
 				let renders = 0
 				const ctx = {
@@ -320,27 +323,25 @@ describe("management fixtures", () => {
 							expect(bottom).toContain("Bash line 29")
 							expect(bottom).toContain("follow")
 							expect(bottom).toContain("Exit code: unknown · Signal: none")
-							await mutateTaskMetadata(paths, current => ({
-								...current,
-								latestReply: { text: `${current.latestReply?.text ?? ""}\nBash line 30`, streaming: false }
-							}))
+							await appendFile(paths.output, "\nBash line 30")
+							publishTaskUpdate(workspace.cwd, "parent-session")
 							await Bun.sleep(20)
 							expect(component.render(80).join("\n")).toContain("Bash line 30")
 							component.handleInput?.("\x1b[5~") // PageUp disables follow
 							const scrolled = component.render(80).join("\n")
 							expect(scrolled).not.toContain("Bash line 30")
-							await mutateTaskMetadata(paths, current => ({
-								...current,
-								latestReply: { text: `${current.latestReply?.text ?? ""}\nBash line 31`, streaming: false }
-							}))
+							await appendFile(paths.output, "\nBash line 31")
+							publishTaskUpdate(workspace.cwd, "parent-session")
 							await Bun.sleep(20)
 							expect(component.render(80).join("\n")).not.toContain("Bash line 31")
 							expect(component.render(80).join("\n")).not.toContain("Bash line 30")
 							component.handleInput?.("\x1b[F") // End resumes follow
 							expect(component.render(80).join("\n")).toContain("Bash line 31")
+							const finalText = await readFile(paths.output, "utf8")
 							await mutateTaskMetadata(paths, current => ({
 								...current,
 								...termination,
+								latestReply: { text: finalText, streaming: false },
 								state: "idle",
 								activeRun: null
 							}))
