@@ -7,7 +7,7 @@ import { Type } from "typebox"
 import type { AgentsConfig, AgentsConfigWarning, ModelAliasChoice, ModelChoice } from "./config.js"
 import { MODEL_ALIASES, resolveConfiguredModels } from "./config.js"
 import { getAgentCoordinator, getBashCoordinator } from "./coordinator.js"
-import { type AgentDefinition, discoverAgentDefinitions } from "./definitions.js"
+import { type AgentDefinition, discoverAgentDefinitions, projectResourcesTrusted } from "./definitions.js"
 import { renderExpandableResult } from "./rendering.js"
 import {
 	type AgentTaskMetadata,
@@ -160,7 +160,7 @@ export function registerRosterTool(
 			const resolvedModels = await resolveConfiguredModels(config, ctx)
 			const discovered = discoverAgentDefinitions({
 				cwd: ctx.cwd,
-				projectTrusted: ctx.isProjectTrusted(),
+				projectTrusted: projectResourcesTrusted(ctx),
 				toolNames: pi.getAllTools().map(tool => tool.name),
 				models: ctx.modelRegistry.getAll(),
 				...(options.getAgentDir ? { agentDir: options.getAgentDir() } : {})

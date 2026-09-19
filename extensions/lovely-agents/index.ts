@@ -4,7 +4,7 @@ import { controlTaskLifecycle, recoverProviderTuple, registerAgentTool, register
 import { registerBashTool } from "./bash.js"
 import { type AgentsConfig, type AgentsConfigWarning, createAgentsConfigSpec, defaultAgentsConfig, resolveAgentsConfig } from "./config.js"
 import { getAgentCoordinator, getBashCoordinator } from "./coordinator.js"
-import { discoverAgentDefinitions } from "./definitions.js"
+import { discoverAgentDefinitions, projectResourcesTrusted } from "./definitions.js"
 import { reconcileParentTasks, recoverOwnedTaskTree, stopOwnedTaskTree } from "./lifecycle.js"
 import { type ManagementUiOptions, openManagementUi, openTaskManagementUi, stopFixtureTimersFor } from "./management.js"
 import {
@@ -123,7 +123,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	}
 	const loadConfig = (ctx: ExtensionContext) => {
 		const config = createAgentsConfigSpec(ctx).load(ctx.cwd)
-		const loaded = resolveAgentsConfig(config)
+		const loaded = resolveAgentsConfig(config, projectResourcesTrusted(ctx))
 		applyConfig(loaded.value, loaded.warnings, ctx)
 		return config
 	}
@@ -131,7 +131,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		discoverDefinitions: () =>
 			discoverAgentDefinitions({
 				cwd: ctx.cwd,
-				projectTrusted: ctx.isProjectTrusted(),
+				projectTrusted: projectResourcesTrusted(ctx),
 				toolNames: pi.getAllTools().map(tool => tool.name),
 				models: ctx.modelRegistry.getAll()
 			}),
@@ -182,7 +182,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 						theme: theme as unknown as ConstructorParameters<typeof ScopedConfigEditor>[0]["theme"],
 						config,
 						onChange(config) {
-							const loaded = resolveAgentsConfig(config)
+							const loaded = resolveAgentsConfig(config, projectResourcesTrusted(ctx))
 							applyConfig(loaded.value, loaded.warnings, ctx)
 						},
 						done
@@ -229,6 +229,9 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 		unbindToolUpdates = bindTaskUpdateRoute(ctx.cwd, parentSessionId, () => {
 			if (toolSessionId === toolSession) updateTools(ctx)
 		})
+		// Waking an idle managed child would run a turn outside its runtime's permit and
+		// provider gate; append instead, so the child sees the notice on its next run.
+		const managed = getAgentCoordinator().getSessionContext(parentSessionId) !== undefined
 		unbindNotificationRoute = getAgentCoordinator().bindNotificationRoute(notificationRouteKey(ctx.cwd, parentSessionId), notification => {
 			pi.sendMessage(
 				{
@@ -237,7 +240,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 					display: true,
 					details: { notificationId: notification.id, taskRef: notification.taskRef }
 				},
-				{ triggerTurn: true, deliverAs: "steer" }
+				{ triggerTurn: !managed || !ctx.isIdle(), deliverAs: "steer" }
 			)
 		})
 		if (ctx.mode === "tui") {
@@ -313,6 +316,19 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			await observeNotification(ctx.cwd, ctx.sessionManager.getSessionId(), details.taskRef, details.notificationId)
 		} catch (error) {
 			ctx.ui.notify(`Lovely Agents could not mark notification delivered: ${errorMessage(error)}`, "warning")
+		}
+	})
+
+	// Abort or run-end queue clearing drops steered notices without message_end;
+	// the transcript is authoritative once the run has ended.
+	pi.on("agent_end", async (_event, ctx) => {
+		if (ownershipWarning || !unbindNotificationRoute) return
+		const parentSessionId = ctx.sessionManager.getSessionId()
+		clearNotificationInFlight(ctx.cwd, parentSessionId)
+		try {
+			await reconcileParentNotifications(ctx.cwd, parentSessionId, ctx.sessionManager.getBranch())
+		} catch (error) {
+			ctx.ui.notify(`Lovely Agents notification recovery failed: ${errorMessage(error)}`, "warning")
 		}
 	})
 
@@ -412,7 +428,12 @@ export function successfulTurnTuple(message: {
 	provider?: string
 	model?: string
 }): { provider: string; model: string } | undefined {
-	if (message.role !== "assistant" || message.stopReason !== "stop" || !message.provider || !message.model) {
+	if (
+		message.role !== "assistant" ||
+		(message.stopReason !== "stop" && message.stopReason !== "toolUse") ||
+		!message.provider ||
+		!message.model
+	) {
 		return undefined
 	}
 	return { provider: message.provider, model: message.model }

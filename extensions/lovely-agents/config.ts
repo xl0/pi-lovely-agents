@@ -125,7 +125,11 @@ export function createAgentsConfigSpec(ctx?: ModelConfigContext): ScopedConfig<R
 	}) as ScopedConfig<RawAgentsConfig>
 }
 
-export function resolveAgentsConfig(config: ScopedConfig<RawAgentsConfig>): {
+/** Workspace values are project-controlled; they apply only to trusted projects. */
+export function resolveAgentsConfig(
+	config: ScopedConfig<RawAgentsConfig>,
+	workspaceTrusted = true
+): {
 	value: AgentsConfig
 	warnings: AgentsConfigWarning[]
 } {
@@ -134,6 +138,14 @@ export function resolveAgentsConfig(config: ScopedConfig<RawAgentsConfig>): {
 		workspace: { ...config.scoped.workspace }
 	}
 	const warnings: AgentsConfigWarning[] = [...config.warnings]
+	if (!workspaceTrusted && Object.keys(scoped.workspace).length > 0) {
+		scoped.workspace = {}
+		warnings.push({
+			scope: "workspace",
+			path: config.path("workspace"),
+			message: "Workspace settings are ignored until the project is trusted; use /trust and restart pi"
+		})
+	}
 
 	for (const scope of config.scopes) {
 		for (const key of ["maxConcurrency", "maxBashConcurrency", "maxDepth", "waitMs"] as const) {

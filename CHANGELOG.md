@@ -2,8 +2,26 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Ignore project Agent Definitions and workspace settings unless Pi evaluated project trust or a `/trust` decision is saved; ignored resources are reported as warnings. Ancestor `.pi/agents` directories owned by another user are skipped.
+
 ### Fixed
 
+- Fix a scheduler deadlock when an agent waits on several tasks in parallel at full capacity.
+- Return the execution permit of a promoted Follow-up when the task is stopped before it starts.
+- Stop detached descendants when an `agent` call is cancelled before detachment.
+- Deliver notifications to idle or suspended child agents without starting a turn outside the scheduler.
+- Resend notifications dropped when the parent turn is aborted before they are delivered.
+- Reclaim a stale session lease left by a crashed process whose PID this process reuses.
+- Settle Bash tasks when the shell exits, killing leftover background jobs that keep its pipes open.
+- Include tool-specific guidelines in child system prompts.
+- Reject symlinked task directories before reading or mutating task metadata.
+- Keep tasks controllable after the system clock steps backwards.
+- Reopen a provider gate after successful tool-use turns, not only final replies.
+- Limit streaming reply snapshots to two durable writes per second.
+- Accept Bash stdin sent immediately after a task is reported running, instead of failing before the process is spawned.
+- Keep unrelated staged changes out of the release commit.
 - Show a persistent session-ownership warning and disable Lovely Agents initialization when another Pi process owns the session's tasks.
 
 ## [0.1.2] - 2026-09-10

@@ -201,7 +201,8 @@ when that parent is reopened—not the authority for execution or deletion.
 Keep tasks until dependent work is integrated, then discard what is no longer
 needed. Existing old `archive/` contents are left untouched.
 
-There is no automatic deletion. From the package checkout/install directory:
+There is no automatic deletion. From a package checkout with dependencies installed
+(`bun install`; Pi-managed installs omit the peer dependencies the script needs):
 
 ```bash
 bun scripts/prune-tasks.ts /path/to/workspace          # dry-run

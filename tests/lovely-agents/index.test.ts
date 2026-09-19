@@ -59,6 +59,7 @@ test("lease conflicts show a persistent warning without recovering, notifying, o
 		} as unknown as ExtensionAPI)
 		const ctx = {
 			cwd: workspace.cwd,
+			isProjectTrusted: () => true,
 			mode: "tui",
 			modelRegistry: { getAvailable: () => [] },
 			sessionManager: {
@@ -130,6 +131,8 @@ test("lease conflicts show a persistent warning without recovering, notifying, o
 test("capability schemas and tool visibility follow config without hiding controls for retained tasks", async () => {
 	await withTempWorkspace(async workspace => {
 		await workspace.write("workspace/.pi/xl0-pi-lovely-agents.json", JSON.stringify({ backgroundAgents: false, backgroundBash: false }))
+		// A trust-requiring resource: Pi evaluated trust, so its answer covers the workspace config.
+		await workspace.write("workspace/.pi/settings.json", "{}")
 		const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>()
 		const tools = new Map<string, ToolDefinition>()
 		let active = ["read"]
@@ -171,6 +174,7 @@ test("capability schemas and tool visibility follow config without hiding contro
 		const errors: string[] = []
 		const ctx = {
 			cwd: workspace.cwd,
+			isProjectTrusted: () => true,
 			mode: "print",
 			modelRegistry: { getAvailable: () => [] },
 			sessionManager: { getSessionId: () => "parent", getBranch: () => [] },
@@ -264,6 +268,7 @@ test("manual controls cancel foreground input and notify only successful discard
 	initTheme("dark")
 	await withTempWorkspace(async workspace => {
 		await workspace.write("workspace/.pi/xl0-pi-lovely-agents.json", JSON.stringify({ backgroundAgents: false }))
+		await workspace.write("workspace/.pi/settings.json", "{}")
 		const ids = await seedFixtureTasks(workspace.cwd, "parent")
 		const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>()
 		const messages: Array<{ content: string; options: unknown }> = []
@@ -312,6 +317,7 @@ test("manual controls cancel foreground input and notify only successful discard
 		)
 		const ctx = {
 			cwd: workspace.cwd,
+			isProjectTrusted: () => true,
 			mode: "tui",
 			modelRegistry: { getAvailable: () => [] },
 			sessionManager: { getSessionId: () => "parent", getBranch: () => [] },

@@ -20,7 +20,7 @@ import {
 	type ResidentInputOptions,
 	type ResidentInputResult
 } from "./coordinator.js"
-import { type AgentDefinition, discoverAgentDefinitions } from "./definitions.js"
+import { type AgentDefinition, discoverAgentDefinitions, projectResourcesTrusted } from "./definitions.js"
 import { discardTask, stopOwnedTaskTree, stopTask } from "./lifecycle.js"
 import { appendTaskNotification, deliverTaskNotifications, prepareTaskNotification } from "./notifications.js"
 import { isProviderLimitError } from "./provider-limits.js"
@@ -206,7 +206,7 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 			})
 			const discovered = discoverAgentDefinitions({
 				cwd: ctx.cwd,
-				projectTrusted: ctx.isProjectTrusted(),
+				projectTrusted: projectResourcesTrusted(ctx),
 				toolNames: pi.getAllTools().map(tool => tool.name),
 				models: ctx.modelRegistry.getAll(),
 				...(options.getAgentDir ? { agentDir: options.getAgentDir() } : {})
@@ -577,6 +577,8 @@ class AgentRuntime implements ResidentAgent {
 	#pendingProgress: ({ runId: string } & Partial<Pick<TaskMetadata, "latestReply" | "lastActivity">>) | undefined
 	#lastHeartbeatAt = 0
 	#progressWriteQueued = false
+	#progressTimer: ReturnType<typeof setTimeout> | undefined
+	#lastProgressWriteAt = 0
 	#started = false
 	#stopRequested = false
 	#accepting = true
@@ -616,8 +618,7 @@ class AgentRuntime implements ResidentAgent {
 			try {
 				const result = await Promise.race([completion.promise, aborted.promise.then(() => undefined)])
 				if (signal?.aborted) {
-					await this.stop()
-					await stopOwnedTaskTree(this.#paths.workspace, this.#child.session.sessionId)
+					await this.stopTree()
 					throw abortError(signal)
 				}
 				if (!result) throw new Error(`Agent run ${runId} ended without a retained terminal result`)
@@ -634,7 +635,7 @@ class AgentRuntime implements ResidentAgent {
 			await this.detach()
 			return true
 		}
-		if (signal?.aborted) await this.stop()
+		if (signal?.aborted) await this.stopTree()
 		let timer: ReturnType<typeof setTimeout> | undefined
 		let onAbort: (() => void) | undefined
 		const timeout = new Promise<"timeout">(resolve => {
@@ -655,7 +656,7 @@ class AgentRuntime implements ResidentAgent {
 		if (timer) clearTimeout(timer)
 		if (signal && onAbort) signal.removeEventListener("abort", onAbort)
 		if (result === "aborted") {
-			await this.stop()
+			await this.stopTree()
 			return false
 		}
 		if (result === "timeout") {
@@ -663,6 +664,12 @@ class AgentRuntime implements ResidentAgent {
 			return true
 		}
 		return false
+	}
+
+	/** Cancellation owns the accepted run and any descendants it already detached. */
+	private async stopTree(): Promise<void> {
+		await this.stop()
+		await stopOwnedTaskTree(this.#paths.workspace, this.#child.session.sessionId)
 	}
 
 	async stop(): Promise<void> {
@@ -832,6 +839,9 @@ class AgentRuntime implements ResidentAgent {
 				}
 			}
 		} finally {
+			// Returns slots granted to promoted runs that stop pre-empted.
+			for (const reservation of this.#reservations.values()) reservation.cancel()
+			this.#reservations.clear()
 			this.dispose()
 			for (const completion of this.#completions.values()) completion.resolve(undefined)
 			this.#initialCompletion.resolve(undefined)
@@ -1137,21 +1147,7 @@ class AgentRuntime implements ResidentAgent {
 				...(latestReply ? { latestReply } : {}),
 				lastActivity: { at, action }
 			}
-			if (!this.#progressWriteQueued) {
-				this.#progressWriteQueued = true
-				this.queueEventWrite(async () => {
-					try {
-						// Coalesce replies and activity together so bursts cannot reorder their last action.
-						while (this.#pendingProgress) {
-							const { runId, ...progress } = this.#pendingProgress
-							this.#pendingProgress = undefined
-							await writeTaskProgress(this.#paths, runId, progress)
-						}
-					} finally {
-						this.#progressWriteQueued = false
-					}
-				})
-			}
+			this.scheduleProgressWrite(latestReply?.streaming === true)
 		}
 		if (event.type === "tool_execution_start") {
 			this.#toolArguments.set(event.toolCallId, { name: event.toolName, arguments: renderUnknown(event.args) })
@@ -1205,6 +1201,37 @@ class AgentRuntime implements ResidentAgent {
 				})
 			)
 		}
+	}
+
+	/**
+	 * Each write rewrites and fsyncs the whole snapshot, so streaming deltas are
+	 * capped at two per second; completed replies and tool activity flush at once.
+	 */
+	private scheduleProgressWrite(deferrable: boolean): void {
+		const wait = deferrable ? this.#lastProgressWriteAt + 500 - Date.now() : 0
+		if (wait > 0) {
+			this.#progressTimer ??= setTimeout(() => this.scheduleProgressWrite(false), wait)
+			this.#progressTimer.unref()
+			return
+		}
+		clearTimeout(this.#progressTimer)
+		this.#progressTimer = undefined
+		if (this.#progressWriteQueued) return
+		this.#progressWriteQueued = true
+		this.queueEventWrite(async () => {
+			try {
+				// Coalesce replies and activity together so bursts cannot reorder their last action.
+				const pending = this.#pendingProgress
+				this.#pendingProgress = undefined
+				if (!pending) return
+				const { runId, ...progress } = pending
+				this.#lastProgressWriteAt = Date.now()
+				await writeTaskProgress(this.#paths, runId, progress)
+			} finally {
+				this.#progressWriteQueued = false
+				if (this.#pendingProgress) this.scheduleProgressWrite(this.#pendingProgress.latestReply?.streaming === true)
+			}
+		})
 	}
 
 	private queueEventWrite(write: () => Promise<void>): void {

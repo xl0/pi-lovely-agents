@@ -214,6 +214,8 @@ class BashRuntime implements ResidentAgent {
 	#stopRequested = false
 	#detached = false
 	#stdinClosed = false
+	#running = false
+	#spawned = Promise.withResolvers<void>()
 	#inputLane: Promise<unknown> = Promise.resolve()
 	#outputLane: Promise<void> = Promise.resolve()
 	#progressTimer: ReturnType<typeof setTimeout> | undefined
@@ -309,6 +311,8 @@ class BashRuntime implements ResidentAgent {
 		if (typeof content !== "string" || Buffer.byteLength(content) > MAX_AGENT_INPUT_BYTES) throw new Error("stdin must be at most 64 KiB")
 		const operation = this.#inputLane.then(async () => {
 			options.signal?.throwIfAborted()
+			// Durable "running" precedes spawn; a caller that saw it must not race the child's creation.
+			if (this.#running) await this.#spawned.promise
 			const child = this.#child
 			if (
 				this.#stopRequested ||
@@ -395,6 +399,7 @@ class BashRuntime implements ResidentAgent {
 				await mutateTaskMetadata(this.paths, metadata => {
 					if (this.#stopRequested || metadata.discardedAt !== null || metadata.activeRun?.id !== this.#run.id) return metadata
 					running = true
+					this.#running = true
 					return {
 						...metadata,
 						state: "running",
@@ -466,6 +471,7 @@ class BashRuntime implements ResidentAgent {
 			await deliverTaskNotifications(this.paths).catch(() => {})
 		} finally {
 			this.#stdinClosed = true
+			this.#spawned.resolve()
 			try {
 				// Retry cleanup only after a real close failure left this handle open.
 				if (this.log.fd !== -1) await this.log.close()
@@ -478,6 +484,7 @@ class BashRuntime implements ResidentAgent {
 	private async process(): Promise<void> {
 		const child = spawn("bash", ["-c", this.metadata.command], { cwd: this.metadata.cwd, detached: true, stdio: "pipe" })
 		this.#child = child
+		this.#spawned.resolve()
 		const groups = liveGroups()
 		if (child.pid) groups.add(child.pid)
 		let spawnError: Error | undefined
@@ -487,6 +494,14 @@ class BashRuntime implements ResidentAgent {
 		// EPIPE is an input error, not an uncaught process-wide exception.
 		child.stdin.on("error", () => {
 			this.#stdinClosed = true
+		})
+		// Jobs the shell left behind hold the pipes open; reap them so settlement isn't deferred to their exit.
+		child.once("exit", () => {
+			try {
+				this.kill()
+			} catch (error) {
+				this.#failure ??= `process-group cleanup failed: ${error instanceof Error ? error.message : String(error)}`
+			}
 		})
 		const closed = new Promise<void>(resolve => {
 			child.once("close", (code, signal) => {

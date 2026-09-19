@@ -140,7 +140,8 @@ Discard it, fix up, commit, and re-run:
 
 console.log(`\n=== committing and tagging ${version} ===\n`)
 await $`git add CHANGELOG.md package.json`
-await $`git commit -m ${`chore(release): ${version}`}`
+// Path-scoped: unrelated staged changes stay out of the release commit.
+await $`git commit -m ${`chore(release): ${version}`} -- CHANGELOG.md package.json`
 await $`git tag -a ${`v${version}`} -m ${`${PKG} ${version}`}`
 
 if (!push) {

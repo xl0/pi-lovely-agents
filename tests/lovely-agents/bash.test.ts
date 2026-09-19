@@ -167,6 +167,14 @@ describe("bash_bg real processes", () => {
 		})
 	})
 
+	test("shell exit settles the task even when a leftover job holds the pipes open", async () => {
+		await fixture(async (workspace, tool) => {
+			const result = await execute(tool, workspace.cwd, { command: "sleep 30 & echo done", label: "leftover", waitMs: 5_000 })
+			expect(result.details).toMatchObject({ state: "idle", latestOutcome: "succeeded", exitCode: 0, detached: false })
+			expect(result.details.output.text).toContain("done\n")
+		})
+	})
+
 	test("nonzero exit and missing Bash executable are retained failures, not tool errors", async () => {
 		await fixture(async (workspace, tool) => {
 			const failed = await execute(tool, workspace.cwd, { command: "printf 'bad' >&2; exit 7", label: "Failure", waitMs: 2_000 })
