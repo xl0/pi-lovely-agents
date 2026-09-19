@@ -64,10 +64,10 @@ describe("task progress", () => {
 describe("retained history", () => {
 	test("keeps inputs, replies, outcomes and compact UTF-8 tool summaries in one private file", async () => {
 		await withTaskStorage("running", async paths => {
-			await appendHistoryLog(paths, { type: "run-start", sequence: 1, kind: "initial", timestamp: 0 })
-			await appendHistoryLog(paths, { type: "input", delivery: "initial", timestamp: 0, content: "Inspect the change" })
+			await appendHistoryLog(paths, { type: "run-start", sequence: 1, kind: "initial" })
+			await appendHistoryLog(paths, { type: "user", content: "Inspect the change" })
 			await appendHistoryLog(paths, { type: "assistant", content: "Looks good." })
-			await appendHistoryLog(paths, { type: "input", delivery: "steer", timestamp: 1, content: "Check tests too" })
+			await appendHistoryLog(paths, { type: "steer", content: "Check tests too" })
 			await appendHistoryLog(paths, {
 				type: "tool",
 				tool: "read",
@@ -75,7 +75,7 @@ describe("retained history", () => {
 				result: "🙂".repeat(1_000),
 				isError: false
 			})
-			await appendHistoryLog(paths, { type: "run-end", sequence: 1, outcome: "succeeded", timestamp: 2 })
+			await appendHistoryLog(paths, { type: "run-end", sequence: 1, outcome: "succeeded" })
 			const history = await readFile(paths.history, "utf8")
 			for (const text of ["Inspect the change", "Looks good.", "Check tests too", "succeeded"]) expect(history).toContain(text)
 			expect(history).not.toContain("�")

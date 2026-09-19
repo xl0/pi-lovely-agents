@@ -245,8 +245,6 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 					createdAt: acceptedAt,
 					updatedAt: acceptedAt
 				}
-				await appendHistoryLog(paths, { type: "run-start", sequence: 1, kind: "initial", timestamp: acceptedAt })
-				await appendHistoryLog(paths, { type: "input", delivery: "initial", timestamp: acceptedAt, content: params.prompt })
 				await writeTaskMetadata(paths, metadata)
 				accepted = true
 
@@ -477,11 +475,9 @@ class AgentRuntime implements ResidentAgent {
 	readonly #initialCompletion = deferred<void>()
 	readonly #runtimeCompletion = deferred<void>()
 	readonly #toolArguments = new Map<string, { name: string; arguments: string }>()
-	readonly #pendingSteers: Array<{ content: string }> = []
 	#unbindResident: (() => void) | undefined
 	#unsubscribe: (() => void) | undefined
 	#eventWrites: Promise<void> = Promise.resolve()
-	#eventWriteFailed = false
 	#recordingRunId: string | undefined
 	#pendingProgress: ({ runId: string } & Partial<Pick<TaskMetadata, "latestReply" | "lastActivity">>) | undefined
 	#lastHeartbeatAt = 0
@@ -492,7 +488,7 @@ class AgentRuntime implements ResidentAgent {
 	#stopRequested = false
 	#accepting = true
 	#disposed = false
-	#awaitingPrimaryInput = false
+	#sawInput = false
 	#lastAssistantOutcome: NonNullable<TaskMetadata["latestOutcome"]> | undefined
 
 	constructor(paths: TaskStoragePaths, child: ChildSessionHandle, metadata: AgentTaskMetadata, expandPromptTemplates: boolean) {
@@ -596,17 +592,9 @@ class AgentRuntime implements ResidentAgent {
 				if (!this.#accepting || this.#disposed) throw new RuntimeClosingError()
 				if (metadata.discardedAt !== null) throw new Error(`Task ${metadata.taskRef} has been discarded`)
 				if (delivery === "steer" && metadata.state === "running" && metadata.activeRun && this.#child.session.isStreaming) {
-					const pending = { content }
-					this.#pendingSteers.push(pending)
-					try {
-						// prompt() can yield in input hooks and start a new run after streaming ends.
-						if (this.#expandPromptTemplates) await this.#child.session.steer(content)
-						else this.#child.session.agent.steer({ role: "user", content, timestamp: Date.now() })
-					} catch (error) {
-						const index = this.#pendingSteers.indexOf(pending)
-						if (index >= 0) this.#pendingSteers.splice(index, 1)
-						throw error
-					}
+					// prompt() can yield in input hooks and start a new run after streaming ends.
+					if (this.#expandPromptTemplates) await this.#child.session.steer(content)
+					else this.#child.session.agent.steer({ role: "user", content, timestamp: Date.now() })
 					result = {
 						run: metadata.activeRun.sequence,
 						delivery: "steer",
@@ -737,24 +725,12 @@ class AgentRuntime implements ResidentAgent {
 						}
 					})
 					if (!won) return
-					if (run.kind === "followup") {
-						await appendHistoryLog(this.#paths, {
-							type: "run-start",
-							sequence: run.sequence,
-							kind: "followup",
-							timestamp: startedAt
-						})
-						await appendHistoryLog(this.#paths, {
-							type: "input",
-							delivery: "followup",
-							timestamp: startedAt,
-							content: run.input
-						})
-					}
-					this.#awaitingPrimaryInput = true
+					// Inputs are logged as the child session observes them: the first is the run's
+					// prompt, later ones are delivered Steers.
+					this.#sawInput = false
+					await appendHistoryLog(this.#paths, { type: "run-start", sequence: run.sequence, kind: run.kind })
 					await this.#child.prompt(run.id, run.input, childPromptOptions(this.#expandPromptTemplates))
 					await this.#eventWrites
-					if (this.#eventWriteFailed) throw new Error("Could not retain one or more child session events")
 					outcome = this.#stopRequested ? "stopped" : (this.#lastAssistantOutcome ?? "failed")
 				} catch {
 					await this.#eventWrites
@@ -768,7 +744,6 @@ class AgentRuntime implements ResidentAgent {
 			outcome = this.#stopRequested ? "stopped" : "failed"
 		}
 		this.#child.session.clearQueue()
-		this.#pendingSteers.length = 0
 		if (!settled) await this.settle(run, outcome, this.#stopRequested)
 	}
 
@@ -828,7 +803,7 @@ class AgentRuntime implements ResidentAgent {
 				updatedAt: timestamp
 			}
 		})
-		if (won) await appendHistoryLog(this.#paths, { type: "run-end", sequence: run.sequence, outcome, timestamp })
+		if (won) await appendHistoryLog(this.#paths, { type: "run-end", sequence: run.sequence, outcome })
 		if (won && notification) await deliverTaskNotifications(this.#paths).catch(() => {})
 		if (run.id === this.#initialRunId) this.#initialCompletion.resolve(undefined)
 	}
@@ -861,11 +836,7 @@ class AgentRuntime implements ResidentAgent {
 			event.message.role === "assistant" &&
 			(event.type !== "message_update" || event.assistantMessageEvent.type === "text_delta")
 		) {
-			const text = event.message.content
-				.filter(part => part.type === "text")
-				.map(part => part.text)
-				.join("")
-			latestReply = { text, streaming: event.type !== "message_end" }
+			latestReply = { text: messageText(event.message.content), streaming: event.type !== "message_end" }
 			action = latestReply.streaming ? "responding" : "reply complete"
 		}
 		if (runId && action) {
@@ -883,36 +854,14 @@ class AgentRuntime implements ResidentAgent {
 		}
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantOutcome = event.message.stopReason === "error" || event.message.stopReason === "aborted" ? "failed" : "succeeded"
-			const content = event.message.content
-				.filter(part => part.type === "text")
-				.map(part => part.text)
-				.join("")
+			const content = messageText(event.message.content)
 			if (content) this.queueEventWrite(() => appendHistoryLog(this.#paths, { type: "assistant", content }))
 			return
 		}
-		if (event.type === "message_start" && event.message.role === "user" && this.#awaitingPrimaryInput) {
-			this.#awaitingPrimaryInput = false
-			return
-		}
-		if (event.type === "message_start" && event.message.role === "user" && this.#pendingSteers.length > 0) {
-			const delivered = this.#pendingSteers.shift()
-			if (delivered) {
-				const content =
-					typeof event.message.content === "string"
-						? event.message.content
-						: event.message.content
-								.filter(part => part.type === "text")
-								.map(part => part.text)
-								.join("")
-				this.queueEventWrite(() =>
-					appendHistoryLog(this.#paths, {
-						type: "input",
-						delivery: "steer",
-						timestamp: Date.now(),
-						content: content || delivered.content
-					})
-				)
-			}
+		if (event.type === "message_start" && event.message.role === "user") {
+			const entry = { type: this.#sawInput ? ("steer" as const) : ("user" as const), content: messageText(event.message.content) }
+			this.#sawInput = true
+			this.queueEventWrite(() => appendHistoryLog(this.#paths, entry))
 			return
 		}
 		if (event.type === "tool_execution_end") {
@@ -966,9 +915,8 @@ class AgentRuntime implements ResidentAgent {
 	}
 
 	private queueEventWrite(write: () => Promise<void>): void {
-		this.#eventWrites = this.#eventWrites.then(write).catch(() => {
-			this.#eventWriteFailed = true
-		})
+		// history.md and progress snapshots are observability; their I/O errors never decide a run's outcome.
+		this.#eventWrites = this.#eventWrites.then(write).catch(() => {})
 	}
 }
 
@@ -1114,6 +1062,10 @@ function validateInput(value: string, name: string, maximumBytes: number): void 
 
 function createRunId(): string {
 	return `r_${randomBytes(8).toString("hex")}`
+}
+
+function messageText(content: string | ReadonlyArray<{ type: string; text?: string }>): string {
+	return typeof content === "string" ? content : content.map(part => (part.type === "text" ? (part.text ?? "") : "")).join("")
 }
 
 function renderUnknown(value: unknown): string {

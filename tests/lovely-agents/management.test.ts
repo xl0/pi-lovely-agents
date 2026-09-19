@@ -59,9 +59,9 @@ describe("management fixtures", () => {
 			if (!id) throw new Error("Missing fixture")
 			const paths = taskStoragePaths(await ensureParentStorage(workspace.cwd, "parent-session"), id)
 			await appendHistoryLog(paths, { type: "assistant", content: Array.from({ length: 80 }, (_, i) => `Line ${i} 界🙂`).join("\n") })
-			await appendHistoryLog(paths, { type: "input", delivery: "steer", content: "Delivered steer", timestamp: Date.now() })
-			await appendHistoryLog(paths, { type: "run-start", sequence: 2, kind: "followup", timestamp: Date.now() })
-			await appendHistoryLog(paths, { type: "input", delivery: "followup", content: "Current Follow-up", timestamp: Date.now() })
+			await appendHistoryLog(paths, { type: "steer", content: "Delivered steer" })
+			await appendHistoryLog(paths, { type: "run-start", sequence: 2, kind: "followup" })
+			await appendHistoryLog(paths, { type: "user", content: "Current Follow-up" })
 			await mutateTaskMetadata(paths, metadata => {
 				if (!metadata.activeRun) throw new Error("Missing fixture run")
 				return {

@@ -162,8 +162,8 @@ export function registerBashTool(pi: ExtensionAPI, options: { getConfig: () => A
 					createdAt: now,
 					updatedAt: now
 				}
-				await appendHistoryLog(paths, { type: "run-start", sequence: 1, kind: "initial", timestamp: now })
-				await appendHistoryLog(paths, { type: "input", delivery: "initial", content: params.command, timestamp: now })
+				await appendHistoryLog(paths, { type: "run-start", sequence: 1, kind: "initial" })
+				await appendHistoryLog(paths, { type: "user", content: params.command })
 				await writeTaskMetadata(paths, metadata)
 				accepted = true
 				const runtime = new BashRuntime(paths, metadata, log)
@@ -339,7 +339,7 @@ class BashRuntime implements ResidentAgent {
 				else child.stdin.write(content, finish)
 			})
 			try {
-				await appendHistoryLog(this.paths, { type: "stdin", content, timestamp: Date.now(), eof: options.eof === true })
+				await appendHistoryLog(this.paths, { type: "stdin", content, eof: options.eof === true })
 			} catch (error) {
 				this.fail(error)
 				throw error
@@ -424,7 +424,7 @@ class BashRuntime implements ResidentAgent {
 					: (this.#failure ?? (this.#signal ? `Bash terminated by ${this.#signal}` : `Bash exited with code ${this.#exitCode}`))
 				// A broken retained log must not suppress a still-writable terminal snapshot.
 				try {
-					await appendHistoryLog(this.paths, { type: "run-end", sequence: 1, outcome, timestamp: Date.now(), summary: reason })
+					await appendHistoryLog(this.paths, { type: "run-end", sequence: 1, outcome, summary: reason })
 				} catch (error) {
 					this.fail(error)
 					outcome = this.#stopRequested ? "stopped" : "failed"

@@ -41,8 +41,8 @@ describe("read-only task tools", () => {
 				updatedAt: 1
 			})
 			await writeFile(bash.output, "earlier output\nlast output")
-			await appendHistoryLog(bash, { type: "stdin", content: "literal\n", timestamp: 1, eof: true })
-			await appendHistoryLog(bash, { type: "output", content: "last output" })
+			await appendHistoryLog(bash, { type: "stdin", content: "literal\n", eof: true })
+			await appendHistoryLog(bash, { type: "assistant", content: "last output" })
 			expect((await readdir(bash.taskDirectory)).sort()).toEqual(["history.md", "metadata.json", "output.log"])
 			expect(await readFile(bash.history, "utf8")).toContain("<stdin>\nliteral\n<stdin EOF>")
 			if (process.platform !== "win32") expect((await stat(bash.output)).mode & 0o077).toBe(0)

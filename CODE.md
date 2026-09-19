@@ -224,9 +224,12 @@ semantic shutdown releases it.
 ### Agent runtime
 
 Accepts input inside the mutation lane: a Steer goes to Pi's queue only while
-the run is streaming, otherwise it deterministically becomes a Follow-up. Steers
-are logged only once their user message is observed, so stop/crash can drop
-them. Cancellation before detachment stops the run and its descendants; after
+the run is streaming, otherwise it deterministically becomes a Follow-up.
+`history.md` has one writer path: run boundaries from the runtime, everything
+else from child session events. The first user message of a run is logged as
+`<user>`, later ones as `<steer>`, so the log shows what the model actually
+received (a Steer dropped by stop/crash never appears). History and progress
+writes are observability: their I/O errors never decide a run's outcome. Cancellation before detachment stops the run and its descendants; after
 detachment the run is on its own. Child failures are task outcomes, not tool
 errors.
 
