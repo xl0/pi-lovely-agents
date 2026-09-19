@@ -71,6 +71,24 @@ describe("Lovely Agents config", () => {
 			expect(loaded.warnings[0]?.message).toContain("Invalid config")
 		})
 	})
+
+	test("unavailable saved models do not discard available choices or trigger a parent fallback", async () => {
+		await withTempWorkspace(async workspace => {
+			environment.PI_CODING_AGENT_DIR = workspace.agentDir
+			const config = createAgentsConfigSpec(configContext).load(workspace.cwd)
+			config.update("user", "models", ["anthropic/sonnet"])
+			for (const selections of [["openai/gpt", "missing/model"], ["missing/model"]]) {
+				config.update("workspace", "models", selections)
+				const loaded = loadAgentsConfig(workspace.cwd, configContext)
+				expect(loaded.value.models).toEqual(selections)
+				expect(loaded.warnings).toHaveLength(1)
+				expect(loaded.warnings[0]).toMatchObject({ scope: "workspace", key: "models" })
+				const result = resolveConfiguredModels(loaded.value, configContext as ExtensionContext)
+				expect(result.models).toEqual(selections.includes("openai/gpt") ? [{ model: models[1] }] : [])
+				expect(result.diagnostics).toMatchObject([{ code: "no-match", pattern: "missing/model" }])
+			}
+		})
+	})
 })
 
 describe("model choice", () => {

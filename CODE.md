@@ -50,14 +50,21 @@ Background Bash shares the durable task controls without creating a Pi session.
 
 The package is ESM. Pi discovers `./extensions` and `./skills` through the
 package manifest; both directories are included in npm distributions.
-Pi runtime packages stay peer dependencies. Lovely Config requires published
-version `^0.1.3` for `multiEnum` and is bundled; no local link is needed.
+Pi runtime packages stay peer dependencies. Lovely Config is pinned to published
+version `0.1.4` for advisory choices and is bundled.
+Local Pi packages use `bun link --no-save` from `../pi-mono` without changing
+peer declarations.
 
 `xl0-pi-lovely-agents.json` merges user then workspace values through Lovely
-Config. `models` is a searchable multi-select built from authenticated Pi
-models; an empty selection includes the current parent model. Optional `fast`,
-`smart`, and `workhorse` aliases each select an authenticated model and thinking
-level. Their targets join explicit choices automatically, without duplicate IDs.
+Config. Each config warning gets its own Pi warning notification.
+`models` is a searchable multi-select built from authenticated Pi
+models; an empty selection includes the current parent model.
+Unavailable model selections are retained in config with warnings, but skipped
+individually at resolution without dropping available choices. A nonempty
+selection with no available models does not fall back to the parent.
+Optional `fast`, `smart`, and `workhorse` aliases each select a model and thinking
+level, retaining unavailable targets through advisory validation. Available
+targets join explicit choices automatically, without duplicate IDs.
 Aliases default to disabled; unavailable targets warn and fail on selection,
 never reroute. The roster describes enabled presets; the parent chooses freely.
 Numeric runtime limits are also checked as integers because Lovely Config's ranged
@@ -406,6 +413,8 @@ or `aborted`.
 
 TypeScript is strict and checks `extensions/` and `tests/`; Bun runs the test
 suite; Biome handles formatting and linting. `bun run check` runs all three.
+Runtime and dev dependencies use exact versions; `.npmrc` makes Bun/npm save
+new additions exactly. Peer ranges remain host compatibility declarations.
 Biome explicitly includes `extensions/`, `tests/`, `scripts/`, and the root
 package, TypeScript and Biome JSON configs; editor/runtime files stay out of scope.
 Tests prioritize lifecycle/ownership safety and reported regressions. Avoid

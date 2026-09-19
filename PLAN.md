@@ -1,5 +1,17 @@
 # Lovely Agents design
 
+## [x] Model availability
+
+Published Lovely Config `0.1.4` provides advisory model-array and alias
+validation: retain saved IDs, warn separately and skip unavailable entries
+without losing available ones or implicitly selecting the parent when all
+explicit entries are unavailable.
+Runtime and dev dependencies are pinned exactly; `.npmrc` keeps future Bun/npm
+additions exact while peer compatibility ranges stay separate.
+Full `bun run check` passes (238 tests, typecheck and Biome) with Pi packages
+locally linked from `../pi-mono`. A Bash stdin-history timing test failed once
+and passed on the full rerun.
+
 ## [x] Conflicting-session warning
 
 Acquire ownership before startup recovery or route registration. On conflict,

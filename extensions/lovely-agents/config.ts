@@ -27,6 +27,7 @@ function createConfigSchema(ctx?: ModelConfigContext) {
 		field.enum([DISABLED_MODEL, ...modelIds] as [string, ...string[]], DISABLED_MODEL, {
 			label: `${name} model`,
 			description: MODEL_ALIASES[name],
+			choices: "advisory",
 			search: true,
 			valueDescriptions: { [DISABLED_MODEL]: "Do not expose this alias", ...valueDescriptions }
 		})
@@ -47,6 +48,7 @@ function createConfigSchema(ctx?: ModelConfigContext) {
 			description: "Run Bash commands as managed background tasks."
 		}),
 		models: field.multiEnum(modelValues, [], {
+			choices: "advisory",
 			label: "Models",
 			description: "Additional model IDs available for agent selection. Empty includes the parent. Alias targets are always included.",
 			valueDescriptions
