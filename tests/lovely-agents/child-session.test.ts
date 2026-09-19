@@ -144,7 +144,7 @@ describe("child tools and prompt", () => {
 	test("enforces depth and delegation while preserving explicit allowlists", () => {
 		expect(resolveChildToolPolicy({ definitionTools: ["read", "agent"], parentDepth: 0, maximumDepth: 2, allowAgents: false })).toEqual({
 			tools: ["read"],
-			excludeTools: ["agent"],
+			excludeTools: ["agent", "agent_roster"],
 			depth: 1,
 			allowAgents: false
 		})
@@ -155,7 +155,7 @@ describe("child tools and prompt", () => {
 			allowAgents: true
 		})
 		expect(resolveChildToolPolicy({ parentDepth: 1, maximumDepth: 2, allowAgents: true })).toEqual({
-			excludeTools: ["agent"],
+			excludeTools: ["agent", "agent_roster"],
 			depth: 2,
 			allowAgents: false
 		})

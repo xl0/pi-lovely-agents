@@ -21,7 +21,7 @@ import type { AgentDefinition, AgentThinkingLevel } from "./definitions.js"
 import { mutateTaskMetadata, TaskProgressSchema, type TaskStoragePaths } from "./state.js"
 
 const PROMPT_EXTENSION_PATH = "<inline:lovely-agent-prompt>"
-const CREATION_TOOL_NAMES = new Set(["agent"])
+const CREATION_TOOL_NAMES = new Set(["agent", "agent_roster"])
 
 export type ChildSessionSelection = {
 	model: ScopedModel["model"]
