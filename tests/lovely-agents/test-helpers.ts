@@ -118,15 +118,13 @@ export async function createFixtureTask(
 		updatedAt: now
 	}
 	await writeTaskMetadata(paths, metadata)
-	await appendHistoryLog(paths, { type: "run-start", sequence: 1, kind: "initial", timestamp: now })
+	await appendHistoryLog(paths, { type: "run-start", sequence: 1, kind: "initial" })
 	await appendHistoryLog(paths, {
-		type: "input",
-		delivery: "initial",
-		timestamp: now,
+		type: "user",
 		content: "Exercise the Lovely Agents development UI."
 	})
 	await appendHistoryLog(paths, { type: "assistant", content: `${state} fixture output.` })
-	if (!active) await appendHistoryLog(paths, { type: "run-end", sequence: 1, outcome: latestOutcome ?? "succeeded", timestamp: now })
+	if (!active) await appendHistoryLog(paths, { type: "run-end", sequence: 1, outcome: latestOutcome ?? "succeeded" })
 	await appendHistoryLog(paths, {
 		type: "tool",
 		tool: "fixture",

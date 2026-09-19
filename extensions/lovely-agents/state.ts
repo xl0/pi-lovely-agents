@@ -255,12 +255,10 @@ export type RetainedPaths = {
 
 /** Chronological inputs, replies, compact tool summaries, and run outcomes. */
 export type HistoryEntry =
-	| { type: "run-start"; sequence: number; kind: "initial" | "followup"; timestamp: number }
-	| { type: "input"; delivery: "initial" | "followup" | "steer" | "stdin"; timestamp: number; content: string }
-	| { type: "assistant"; content: string }
-	| { type: "output"; content: string }
-	| { type: "stdin"; content: string; timestamp: number; eof?: boolean }
-	| { type: "run-end"; sequence: number; outcome: Static<typeof RunOutcome>; timestamp: number; summary?: string }
+	| { type: "run-start"; sequence: number; kind: "initial" | "followup" }
+	| { type: "user" | "steer" | "assistant"; content: string }
+	| { type: "stdin"; content: string; eof?: boolean }
+	| { type: "run-end"; sequence: number; outcome: Static<typeof RunOutcome>; summary?: string }
 	| { type: "tool"; tool: string; arguments: string; result: string; isError: boolean }
 
 export type RetainedOutputReadOptions = {
@@ -864,20 +862,15 @@ function renderHistoryEntry(entry: HistoryEntry): string {
 	switch (entry.type) {
 		case "run-start":
 			return `<run ${entry.sequence} ${entry.kind}>\n`
-		case "input":
-			return taggedBlockEntry(
-				entry.delivery === "stdin" ? "stdin" : entry.delivery === "steer" ? "steer" : "user",
-				entry.content,
-				entry.delivery === "stdin"
-			)
+		case "user":
+		case "steer":
+			return taggedBlockEntry(entry.type, entry.content)
 		case "assistant":
 			return taggedBlockEntry("agent", entry.content)
-		case "output":
-			return taggedBlockEntry("output", entry.content)
 		case "stdin":
 			return `${taggedBlockEntry("stdin", entry.content, true)}${entry.eof ? "<stdin EOF>\n" : ""}`
 		case "run-end":
-			return `<outcome ${entry.outcome}>\n${entry.summary ? taggedBlockEntry("summary", entry.summary) : ""}\n`
+			return `<run ${entry.sequence} ${entry.outcome}>\n${entry.summary ? taggedBlockEntry("summary", entry.summary) : ""}\n`
 		case "tool":
 			return `<tool ${historyPreview(entry.tool, 80)} ${entry.isError ? "error" : "ok"}>\n${historyPreview(entry.arguments, 160)} → ${historyPreview(entry.result, 240)}\n`
 	}

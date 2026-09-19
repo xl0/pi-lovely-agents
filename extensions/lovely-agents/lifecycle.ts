@@ -152,6 +152,6 @@ async function settleRetained(
 		}
 	})
 	if (!settled.run) return false
-	await appendHistoryLog(paths, { type: "run-end", sequence: settled.run.sequence, outcome, timestamp: updatedAt })
+	await appendHistoryLog(paths, { type: "run-end", sequence: settled.run.sequence, outcome })
 	return true
 }
