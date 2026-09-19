@@ -63,7 +63,7 @@ async function pruneDiscardedTasks(ctx: ExtensionContext): Promise<void> {
 	await showText(ctx, "Prune discarded tasks (dry run)", report(dry, dry.candidates, "Would delete"))
 	if (dry.candidates.length === 0) return
 	if (!(await ctx.ui.confirm("Prune discarded tasks", `Permanently delete ${dry.candidates.length} discarded task(s)?`))) return
-	const applied = await pruneTasks(ctx.cwd, true)
+	const applied = await pruneTasks(ctx.cwd, true, dry.candidates)
 	await showText(ctx, "Prune discarded tasks", report(applied, applied.deleted, "Deleted"))
 }
 
