@@ -43,10 +43,10 @@
 		"biome:check": "biome check ."
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.4.14",
-		"@typescript/native-preview": "^7.0.0-dev.20260502.1",
-		"bun-types": "^1.3.13",
-		"typescript": "^6.0.3"
+		"@biomejs/biome": "2.5.11",
+		"@typescript/native-preview": "7.0.0-dev.20260707.2",
+		"bun-types": "1.4.0",
+		"typescript": "6.0.3"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",
@@ -62,7 +62,7 @@
 		]
 	},
 	"dependencies": {
-		"@xl0/pi-lovely-config": "^0.1.3"
+		"@xl0/pi-lovely-config": "0.1.4"
 	},
 	"bundledDependencies": [
 		"@xl0/pi-lovely-config"

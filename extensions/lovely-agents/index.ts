@@ -428,8 +428,7 @@ export function latestReplyWasInterrupted(entries: readonly SessionEntry[]): boo
 }
 
 function notifyConfigWarnings(ctx: ExtensionContext, warnings: readonly AgentsConfigWarning[]): void {
-	if (warnings.length === 0) return
-	ctx.ui.notify(warnings.map(warning => `${warning.path}: ${warning.message}`).join("\n"), "warning")
+	for (const warning of warnings) ctx.ui.notify(`${warning.path}: ${warning.message}`, "warning")
 }
 
 function errorMessage(error: unknown): string {

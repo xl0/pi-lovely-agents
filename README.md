@@ -149,8 +149,11 @@ an agent result before leaving it in the background.
 These limits are shared process-wide, not per conversation. The roster reports
 held/max execution permits; task lists show only the current parent's tasks.
 
-Under **Models**, choose additional models Pi may use for agents. You can also
-configure these optional shortcuts:
+Under **Models**, choose additional models Pi may use for agents. Unavailable
+entries warn and are skipped without dropping available ones; saved IDs remain
+intact. An empty selection includes the parent model, but a nonempty selection
+with no available entries does not fall back to it. You can also configure
+these optional shortcuts:
 
 | Alias | Suggested use |
 | --- | --- |
