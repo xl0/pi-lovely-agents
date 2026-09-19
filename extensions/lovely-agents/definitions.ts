@@ -84,8 +84,7 @@ export function discoverAgentDefinitions(options: {
 	const cwd = resolve(options.cwd)
 	const homeDir = resolve(options.homeDir ?? homedir())
 	const userDir = join(options.agentDir ?? getAgentDir(), "agents")
-	const nearestProjectAgentsDir = findNearestProjectAgentsDir(cwd)
-	const projectAgentsDir = options.projectTrusted ? nearestProjectAgentsDir : undefined
+	const projectAgentsDir = options.projectTrusted ? findNearestProjectAgentsDir(cwd) : undefined
 	const userCandidates = scanDefinitionDirectory(userDir, "user", options.toolNames, options.models, cwd, homeDir)
 	const projectCandidates = projectAgentsDir
 		? scanDefinitionDirectory(projectAgentsDir, "project", options.toolNames, options.models, cwd, homeDir)
@@ -95,15 +94,6 @@ export function discoverAgentDefinitions(options: {
 	invalidateDuplicates(projectCandidates)
 
 	const diagnostics = [...userCandidates, ...projectCandidates].flatMap(candidate => candidate.diagnostics)
-	if (nearestProjectAgentsDir && !projectAgentsDir) {
-		diagnostics.push({
-			type: "warning",
-			code: "untrusted-project",
-			message: "Project Agent Definitions are ignored until the project is trusted; use /trust and restart pi",
-			source: "project",
-			path: formatDisplayPath(nearestProjectAgentsDir, "project", cwd, homeDir)
-		})
-	}
 	const projectNames = new Set(projectCandidates.flatMap(candidate => candidate.declaredName ?? []))
 	const definitions: AgentDefinition[] = []
 
