@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import { publishSchedulerUpdate } from "./updates.js"
 
-export const AGENT_COORDINATOR_VERSION = 4
+export const AGENT_COORDINATOR_VERSION = 5
 const AGENT_COORDINATOR_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/coordinator")
 const BASH_COORDINATOR_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/bash-coordinator")
 
@@ -14,13 +14,6 @@ export type AgentPermit = {
 	readonly held: boolean
 	lend<T>(wait: () => Promise<T>, signal?: AbortSignal): Promise<T>
 	release(): void
-}
-
-export type AgentReservation = {
-	readonly acceptanceOrder: number
-	activate(): void
-	run<T>(work: () => Promise<T>): Promise<T>
-	cancel(reason?: unknown): void
 }
 
 export type ResidentAgent = {
@@ -58,7 +51,6 @@ export type AgentCoordinator = {
 	setMaxConcurrency(limit: number): void
 	acquire(request: AgentScheduleRequest): Promise<AgentPermit>
 	run<T>(request: AgentScheduleRequest, work: () => Promise<T>): Promise<T>
-	reserve(request: AgentScheduleRequest): AgentReservation
 	withLentPermit<T>(wait: () => Promise<T>, signal?: AbortSignal): Promise<T>
 	bindResident(taskKey: string, resident: ResidentAgent): () => void
 	getResident(taskKey: string): ResidentAgent | undefined
@@ -71,10 +63,6 @@ export type AgentCoordinator = {
 type Waiter = {
 	acceptanceOrder: number
 	queueOrder: number
-	eligible: boolean
-	/** Slot granted by drain; an unconsumed grant must be returned on cancel. */
-	granted?: boolean
-	consumed?: boolean
 	resolve: () => void
 	reject: (error: unknown) => void
 	signal?: AbortSignal
@@ -138,17 +126,6 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 				permit.release()
 			}
 		})
-	}
-
-	reserve(request: AgentScheduleRequest): AgentReservation {
-		if (request.signal?.aborted) throw abortError(request.signal)
-		const acceptanceOrder = request.acceptanceOrder ?? this.nextAcceptanceOrder()
-		if (!Number.isSafeInteger(acceptanceOrder) || acceptanceOrder < 1) {
-			throw new Error("acceptanceOrder must be a positive safe integer")
-		}
-		this.#acceptanceOrder = Math.max(this.#acceptanceOrder, acceptanceOrder)
-		const queued = this.#enqueue(request, acceptanceOrder, false)
-		return new Reservation(this, acceptanceOrder, queued.waiter, queued.promise)
 	}
 
 	async withLentPermit<T>(wait: () => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -216,16 +193,10 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 		}
 		this.#acceptanceOrder = Math.max(this.#acceptanceOrder, acceptanceOrder)
 
-		await this.#enqueue(request, acceptanceOrder, true).promise
-	}
-
-	#enqueue(request: AgentScheduleRequest, acceptanceOrder: number, eligible: boolean): { waiter: Waiter; promise: Promise<void> } {
-		let waiter!: Waiter
-		const promise = new Promise<void>((resolve, reject) => {
-			waiter = {
+		await new Promise<void>((resolve, reject) => {
+			const waiter: Waiter = {
 				acceptanceOrder,
 				queueOrder: ++this.#queueOrder,
-				eligible,
 				resolve,
 				reject,
 				...(request.signal ? { signal: request.signal } : {})
@@ -248,86 +219,17 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 			else this.#waiters.splice(insertion, 0, waiter)
 			this.#drain()
 		})
-		return { waiter, promise }
-	}
-
-	activate(waiter: Waiter): void {
-		if (!this.#waiters.includes(waiter)) return
-		waiter.eligible = true
-		this.#drain()
-	}
-
-	cancel(waiter: Waiter, reason?: unknown): void {
-		const index = this.#waiters.indexOf(waiter)
-		if (index < 0) {
-			if (waiter.granted && !waiter.consumed) {
-				waiter.consumed = true
-				this.releaseSlot()
-			}
-			return
-		}
-		this.#waiters.splice(index, 1)
-		if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort)
-		waiter.reject(reason instanceof Error ? reason : new Error("Agent reservation cancelled"))
-	}
-
-	async runReservation<T>(waiter: Waiter, ready: Promise<void>, work: () => Promise<T>): Promise<T> {
-		this.activate(waiter)
-		await ready
-		if (waiter.consumed) throw new Error("Agent reservation cancelled")
-		waiter.consumed = true
-		const permit = new Permit(this)
-		return this.#permits.run(permit, async () => {
-			try {
-				return await work()
-			} finally {
-				permit.release()
-			}
-		})
 	}
 
 	#drain(): void {
 		while (this.#active < this.#limit) {
-			const index = this.#waiters.findIndex(waiter => waiter.eligible)
-			if (index < 0) break
-			const [waiter] = this.#waiters.splice(index, 1)
+			const waiter = this.#waiters.shift()
 			if (!waiter) break
 			if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort)
 			this.#active++
-			waiter.granted = true
 			waiter.resolve()
 		}
 		publishSchedulerUpdate()
-	}
-}
-
-class Reservation implements AgentReservation {
-	readonly acceptanceOrder: number
-	readonly #coordinator: ProcessAgentCoordinator
-	readonly #waiter: Waiter
-	readonly #ready: Promise<void>
-	#used = false
-
-	constructor(coordinator: ProcessAgentCoordinator, acceptanceOrder: number, waiter: Waiter, ready: Promise<void>) {
-		this.#coordinator = coordinator
-		this.acceptanceOrder = acceptanceOrder
-		this.#waiter = waiter
-		this.#ready = ready
-		void this.#ready.catch(() => {})
-	}
-
-	activate(): void {
-		this.#coordinator.activate(this.#waiter)
-	}
-
-	async run<T>(work: () => Promise<T>): Promise<T> {
-		if (this.#used) throw new Error("Agent reservation has already been used")
-		this.#used = true
-		return this.#coordinator.runReservation(this.#waiter, this.#ready, work)
-	}
-
-	cancel(reason?: unknown): void {
-		this.#coordinator.cancel(this.#waiter, reason)
 	}
 }
 
@@ -447,7 +349,6 @@ function isAgentCoordinator(value: unknown): value is AgentCoordinator {
 	return (
 		candidate.version === AGENT_COORDINATOR_VERSION &&
 		typeof candidate.acquire === "function" &&
-		typeof candidate.reserve === "function" &&
 		typeof candidate.withLentPermit === "function" &&
 		typeof candidate.setMaxConcurrency === "function" &&
 		typeof candidate.bindResident === "function" &&

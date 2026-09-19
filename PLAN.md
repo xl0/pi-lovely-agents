@@ -203,10 +203,7 @@ stop, discard. No slash-command mirror of the model tools.
 
 - Let the kernel write Bash output straight to `output.log`; read tails on
   demand instead of mirroring them into metadata.
-- Drop inactive Follow-up reservations (global FIFO position for queued
-  Follow-ups).
 - Drop agent `history.md` in favor of `session.jsonl`.
-- Simplify the process-global registries in `state.ts`.
 - Compose the child prompt through Pi's prompt `sections` once a Pi release
   ships that API.
 

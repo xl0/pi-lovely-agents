@@ -12,13 +12,7 @@ import {
 } from "./child-session.js"
 import type { AgentsConfig } from "./config.js"
 import { resolveConfiguredModels } from "./config.js"
-import {
-	type AgentReservation,
-	getAgentCoordinator,
-	type ResidentAgent,
-	type ResidentInputOptions,
-	type ResidentInputResult
-} from "./coordinator.js"
+import { getAgentCoordinator, type ResidentAgent, type ResidentInputOptions, type ResidentInputResult } from "./coordinator.js"
 import { type AgentDefinition, discoverAgentDefinitions, projectResourcesTrusted } from "./definitions.js"
 import { discardTask, stopOwnedTaskTree, stopTask } from "./lifecycle.js"
 import { appendTaskNotification, deliverTaskNotifications, prepareTaskNotification } from "./notifications.js"
@@ -484,7 +478,6 @@ class AgentRuntime implements ResidentAgent {
 	readonly #runtimeCompletion = deferred<void>()
 	readonly #toolArguments = new Map<string, { name: string; arguments: string }>()
 	readonly #pendingSteers: Array<{ content: string }> = []
-	readonly #reservations = new Map<string, AgentReservation>()
 	#unbindResident: (() => void) | undefined
 	#unsubscribe: (() => void) | undefined
 	#eventWrites: Promise<void> = Promise.resolve()
@@ -597,7 +590,6 @@ class AgentRuntime implements ResidentAgent {
 		if (delivery === "stdin" || options.eof !== undefined) throw new Error("Agent tasks do not accept stdin or eof")
 		if (!this.#accepting || this.#disposed) throw new RuntimeClosingError()
 		let result: ResidentInputResult | undefined
-		let acceptedRun: NonNullable<TaskMetadata["activeRun"]> | undefined
 		try {
 			await mutateTaskMetadata(this.#paths, async metadata => {
 				if (options.signal?.aborted) throw abortError(options.signal)
@@ -638,7 +630,7 @@ class AgentRuntime implements ResidentAgent {
 					queuedFollowUps: metadata.queuedFollowUps.length + 1,
 					...(delivery === "steer" ? { conversionReason: `task ${metadata.state}, no live stream to steer` } : {})
 				}
-				acceptedRun = {
+				const acceptedRun: NonNullable<TaskMetadata["activeRun"]> = {
 					id: runId,
 					sequence,
 					acceptanceOrder,
@@ -674,8 +666,6 @@ class AgentRuntime implements ResidentAgent {
 			throw error
 		}
 		if (!result) throw new Error("Task input was not accepted")
-		// Inactive reservations preserve acceptance order across promotion.
-		if (acceptedRun) this.reserveRun(acceptedRun)
 		this.start()
 		return result
 	}
@@ -688,9 +678,6 @@ class AgentRuntime implements ResidentAgent {
 				await this.executeRun(activeRun)
 			}
 		} finally {
-			// Returns slots granted to promoted runs that stop pre-empted.
-			for (const reservation of this.#reservations.values()) reservation.cancel()
-			this.#reservations.clear()
 			this.dispose()
 			this.#initialCompletion.resolve(undefined)
 			this.#runtimeCompletion.resolve(undefined)
@@ -730,7 +717,9 @@ class AgentRuntime implements ResidentAgent {
 		this.#lastAssistantOutcome = undefined
 		let settled = false
 		try {
-			await this.reserveRun(run).run(async () => {
+			// The stored acceptance order puts a promoted Follow-up ahead of later-accepted work.
+			const schedule = { signal: this.#scheduleAbort.signal, ...(run.acceptanceOrder ? { acceptanceOrder: run.acceptanceOrder } : {}) }
+			await getAgentCoordinator().run(schedule, async () => {
 				if (this.#stopRequested) return
 				try {
 					let won = false
@@ -771,9 +760,8 @@ class AgentRuntime implements ResidentAgent {
 					await this.#eventWrites
 					outcome = this.#stopRequested ? "stopped" : "failed"
 				}
-				const promoted = await this.settle(run, outcome, this.#stopRequested)
+				await this.settle(run, outcome, this.#stopRequested)
 				settled = true
-				if (promoted) this.reserveRun(promoted).activate()
 			})
 		} catch {
 			await this.#eventWrites
@@ -781,11 +769,7 @@ class AgentRuntime implements ResidentAgent {
 		}
 		this.#child.session.clearQueue()
 		this.#pendingSteers.length = 0
-		this.#reservations.delete(run.id)
-		if (!settled) {
-			const promoted = await this.settle(run, outcome, this.#stopRequested)
-			if (promoted) this.reserveRun(promoted).activate()
-		}
+		if (!settled) await this.settle(run, outcome, this.#stopRequested)
 	}
 
 	private async detach(): Promise<void> {
@@ -801,9 +785,8 @@ class AgentRuntime implements ResidentAgent {
 		run: NonNullable<TaskMetadata["activeRun"]>,
 		outcome: NonNullable<TaskMetadata["latestOutcome"]>,
 		clearFollowUps = false
-	): Promise<NonNullable<TaskMetadata["activeRun"]> | null> {
+	): Promise<void> {
 		let won = false
-		const promoted: { run: NonNullable<TaskMetadata["activeRun"]> | null } = { run: null }
 		let notification: TaskMetadata["notifications"][number] | undefined
 		const timestamp = Date.now()
 		await mutateTaskMetadata(this.#paths, async metadata => {
@@ -815,7 +798,8 @@ class AgentRuntime implements ResidentAgent {
 			}
 			const [next, ...remaining] = clearFollowUps ? [] : metadata.queuedFollowUps
 			if (next) {
-				promoted.run = {
+				// Promote atomically: an idle gap would let new input jump the queue.
+				const promoted: NonNullable<TaskMetadata["activeRun"]> = {
 					id: next.id,
 					sequence: next.sequence,
 					...(next.acceptanceOrder ? { acceptanceOrder: next.acceptanceOrder } : {}),
@@ -828,7 +812,7 @@ class AgentRuntime implements ResidentAgent {
 					...metadata,
 					state: "queued",
 					latestOutcome: outcome,
-					activeRun: promoted.run,
+					activeRun: promoted,
 					queuedFollowUps: remaining,
 					...(notification ? { notifications: appendTaskNotification(metadata.notifications, notification) } : {}),
 					updatedAt: timestamp
@@ -847,18 +831,6 @@ class AgentRuntime implements ResidentAgent {
 		if (won) await appendHistoryLog(this.#paths, { type: "run-end", sequence: run.sequence, outcome, timestamp })
 		if (won && notification) await deliverTaskNotifications(this.#paths).catch(() => {})
 		if (run.id === this.#initialRunId) this.#initialCompletion.resolve(undefined)
-		return promoted.run
-	}
-
-	private reserveRun(run: NonNullable<TaskMetadata["activeRun"]>): AgentReservation {
-		const existing = this.#reservations.get(run.id)
-		if (existing) return existing
-		const reservation = getAgentCoordinator().reserve({
-			signal: this.#scheduleAbort.signal,
-			...(run.acceptanceOrder ? { acceptanceOrder: run.acceptanceOrder } : {})
-		})
-		this.#reservations.set(run.id, reservation)
-		return reservation
 	}
 
 	private recordEvent(event: AgentSessionEvent): void {

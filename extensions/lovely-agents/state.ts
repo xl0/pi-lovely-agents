@@ -29,8 +29,8 @@ const FILE_MODE = 0o600
 const MAX_TASK_REFERENCE_ATTEMPTS = 100
 const MAX_LEASE_ACQUIRE_ATTEMPTS = 10
 const DEFINITION_NAME_PATTERN = "^[a-z0-9][a-z0-9_-]{0,63}$"
-const LEASE_STATE_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/parent-leases/v1")
-const TASK_QUEUE_STATE_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/task-queues/v1")
+const PROCESS_TOKEN_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/process-token/v1")
+const TASK_QUEUE_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/task-queues/v2")
 
 const RunId = Type.String({ pattern: "^r_[0-9a-f]{16}$" })
 const Timestamp = Type.Integer({ minimum: 0 })
@@ -243,7 +243,7 @@ export type TaskStoragePaths = ParentStoragePaths & {
 	output: string
 }
 
-/** Process-global ownership proof for one parent partition. */
+/** This process's ownership proof for one parent partition. */
 export type ParentLease = Readonly<ParentLeaseFile & { paths: Readonly<ParentStoragePaths> }>
 
 /** Stable model-visible paths for retained task artifacts. */
@@ -306,18 +306,6 @@ export type MetadataLoadResult =
 	| { status: "invalid"; diagnostic: MetadataDiagnostic }
 
 type ParentLeaseLoadResult = { status: "ok"; lease: ParentLeaseFile } | { status: "missing" } | { status: "invalid"; message: string }
-
-type ParentLeaseState = {
-	version: typeof PARENT_LEASE_VERSION
-	leases: Map<string, ParentLease>
-	queues: Map<string, Promise<void>>
-}
-
-type TaskQueueState = {
-	version: 1
-	metadata: Map<string, Promise<void>>
-	logs: Map<string, Promise<void>>
-}
 
 export class InvalidTaskMetadataError extends Error {
 	constructor(message: string) {
@@ -427,87 +415,56 @@ export async function ensureParentStorage(cwd: string, parentSessionId: string):
  * Acquires one durable parent-partition lease. Duplicate calls in this process
  * return the same lease, including across extension runtime reloads.
  */
+/**
+ * The `.lease` file is the only ownership record. It carries this process's
+ * token, so every extension runtime in the process recognizes it as its own,
+ * and a reused PID with another token is simply stale.
+ */
 export async function acquireParentLease(cwd: string, parentSessionId: string): Promise<ParentLease> {
 	const paths = await ensureParentStorage(cwd, parentSessionId)
-	const state = parentLeaseState()
-	return serializeOperation(state.queues, paths.lease, async () => {
-		const existing = state.leases.get(paths.lease)
-		if (existing) {
-			const loaded = await loadParentLease(paths.lease)
-			if (loaded.status === "ok" && loaded.lease.pid === existing.pid && loaded.lease.token === existing.token) {
-				return existing
+	const mine: ParentLeaseFile = { version: PARENT_LEASE_VERSION, pid: process.pid, token: processToken(), createdAt: Date.now() }
+	for (let attempt = 0; attempt < MAX_LEASE_ACQUIRE_ATTEMPTS; attempt++) {
+		const loaded = await loadParentLease(paths.lease)
+		if (loaded.status === "invalid") throw new ParentLeaseError(`Cannot acquire invalid parent lease ${paths.lease}: ${loaded.message}`)
+		if (loaded.status === "ok") {
+			if (loaded.lease.pid === mine.pid && loaded.lease.token === mine.token) return Object.freeze({ ...loaded.lease, paths })
+			if (loaded.lease.pid !== process.pid && processIsAlive(loaded.lease.pid)) {
+				throw new ParentLeaseConflictError(paths.lease, loaded.lease.pid)
 			}
-			state.leases.delete(paths.lease)
-			throw new ParentLeaseError(`Process-global lease ownership no longer matches ${paths.lease}`)
+			// Simultaneous stale reclamation is best-effort; the no-overwrite link stays atomic.
+			await removeIfPresent(paths.lease)
 		}
-
-		const leaseFile: ParentLeaseFile = {
-			version: PARENT_LEASE_VERSION,
-			pid: process.pid,
-			token: randomBytes(16).toString("hex"),
-			createdAt: Date.now()
-		}
-		const candidate = `${paths.lease}.${process.pid}.${leaseFile.token}.tmp`
-		await writePrivateFile(candidate, `${JSON.stringify(leaseFile)}\n`)
+		const candidate = `${paths.lease}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`
+		await writePrivateFile(candidate, `${JSON.stringify(mine)}\n`)
 		try {
-			for (let attempt = 0; attempt < MAX_LEASE_ACQUIRE_ATTEMPTS; attempt++) {
-				try {
-					// A liveness lock needs no fsync: after power loss its PID is gone anyway.
-					await link(candidate, paths.lease)
-					const lease = Object.freeze({ ...leaseFile, paths: Object.freeze({ ...paths }) })
-					state.leases.set(paths.lease, lease)
-					return lease
-				} catch (error) {
-					if (!hasCode(error, "EEXIST")) throw error
-				}
-
-				const loaded = await loadParentLease(paths.lease)
-				if (loaded.status === "missing") continue
-				if (loaded.status === "invalid") {
-					throw new ParentLeaseError(`Cannot acquire invalid parent lease ${paths.lease}: ${loaded.message}`)
-				}
-				// This process's leases live in the registry; an unregistered own-PID lease is a reused PID.
-				if (loaded.lease.pid !== process.pid && processIsAlive(loaded.lease.pid)) {
-					throw new ParentLeaseConflictError(paths.lease, loaded.lease.pid)
-				}
-
-				// Simultaneous stale reclamation is best-effort; the no-overwrite link stays atomic.
-				await removeIfPresent(paths.lease)
-			}
-			throw new ParentLeaseError(`Unable to acquire changing parent lease: ${paths.lease}`)
+			// A liveness lock needs no fsync: after power loss its PID is gone anyway.
+			await link(candidate, paths.lease)
+			return Object.freeze({ ...mine, paths })
+		} catch (error) {
+			if (!hasCode(error, "EEXIST")) throw error
 		} finally {
 			await removeIfPresent(candidate)
 		}
-	})
+	}
+	throw new ParentLeaseError(`Unable to acquire changing parent lease: ${paths.lease}`)
 }
 
-/** Releases only the matching process-global lease; repeated release is safe. */
+/** Releases only a lease this process still owns; a missing file is already released. */
 export async function releaseParentLease(lease: ParentLease): Promise<void> {
-	const state = parentLeaseState()
-	await serializeOperation(state.queues, lease.paths.lease, async () => {
-		if (state.leases.get(lease.paths.lease) !== lease) return
-
-		const loaded = await loadParentLease(lease.paths.lease)
-		if (loaded.status === "missing") {
-			state.leases.delete(lease.paths.lease)
-			return
-		}
-		if (loaded.status === "invalid" || loaded.lease.pid !== lease.pid || loaded.lease.token !== lease.token) {
-			state.leases.delete(lease.paths.lease)
-			throw new ParentLeaseError(`Refusing to release a parent lease no longer owned by this process: ${lease.paths.lease}`)
-		}
-
-		await unlink(lease.paths.lease)
-		state.leases.delete(lease.paths.lease)
-	})
+	const loaded = await loadParentLease(lease.paths.lease)
+	if (loaded.status === "missing") return
+	if (loaded.status === "invalid" || loaded.lease.pid !== lease.pid || loaded.lease.token !== lease.token) {
+		throw new ParentLeaseError(`Refusing to release a parent lease no longer owned by this process: ${lease.paths.lease}`)
+	}
+	await removeIfPresent(lease.paths.lease)
 }
 
-/** Releases a registered lease by identity after a semantic parent close. */
+/** Releases this process's lease by identity after a semantic parent close. */
 export async function releaseParentLeaseFor(cwd: string, parentSessionId: string): Promise<boolean> {
 	const path = parentStoragePaths(cwd, parentSessionId).lease
-	const lease = parentLeaseState().leases.get(path)
-	if (!lease) return false
-	await releaseParentLease(lease)
+	const loaded = await loadParentLease(path)
+	if (loaded.status !== "ok" || loaded.lease.pid !== process.pid || loaded.lease.token !== processToken()) return false
+	await removeIfPresent(path)
 	return true
 }
 
@@ -1052,7 +1009,7 @@ async function ensurePrivateLogFile(path: string): Promise<void> {
 }
 
 function appendRetainedLog(path: string, content: string): Promise<void> {
-	return serializeOperation(taskQueueState().logs, path, async () => {
+	return serializeOperation(taskQueues(), path, async () => {
 		await ensurePrivateLogFile(path)
 		const handle = await open(path, "a", FILE_MODE)
 		try {
@@ -1134,7 +1091,7 @@ async function syncDirectory(path: string): Promise<void> {
 }
 
 function serializeMetadataMutation<T>(path: string, operation: () => Promise<T>): Promise<T> {
-	return serializeOperation(taskQueueState().metadata, path, operation)
+	return serializeOperation(taskQueues(), path, operation)
 }
 
 function serializeOperation<T>(queues: Map<string, Promise<void>>, path: string, operation: () => Promise<T>): Promise<T> {
@@ -1150,44 +1107,17 @@ function serializeOperation<T>(queues: Map<string, Promise<void>>, path: string,
 	})
 }
 
-function parentLeaseState(): ParentLeaseState {
-	const globals = globalThis as unknown as { [key: symbol]: unknown }
-	const existing = globals[LEASE_STATE_SYMBOL]
-	if (existing !== undefined) {
-		if (!isParentLeaseState(existing)) throw new ParentLeaseError("Incompatible process-global Lovely Agents lease state")
-		return existing
-	}
-	const state: ParentLeaseState = {
-		version: PARENT_LEASE_VERSION,
-		leases: new Map(),
-		queues: new Map()
-	}
-	globals[LEASE_STATE_SYMBOL] = state
-	return state
+function processToken(): string {
+	const global = globalThis as typeof globalThis & { [PROCESS_TOKEN_SYMBOL]?: string }
+	global[PROCESS_TOKEN_SYMBOL] ??= randomBytes(16).toString("hex")
+	return global[PROCESS_TOKEN_SYMBOL]
 }
 
-function taskQueueState(): TaskQueueState {
-	const globals = globalThis as unknown as { [key: symbol]: unknown }
-	const existing = globals[TASK_QUEUE_STATE_SYMBOL]
-	if (existing !== undefined) {
-		const candidate = existing as Partial<TaskQueueState>
-		if (candidate.version !== 1 || !(candidate.metadata instanceof Map) || !(candidate.logs instanceof Map)) {
-			throw new Error("Incompatible process-global Lovely Agents task queue state")
-		}
-		return candidate as TaskQueueState
-	}
-	const created: TaskQueueState = { version: 1, metadata: new Map(), logs: new Map() }
-	globals[TASK_QUEUE_STATE_SYMBOL] = created
-	return created
-}
-
-function isParentLeaseState(value: unknown): value is ParentLeaseState {
-	return (
-		isRecord(value) &&
-		property(value, "version") === PARENT_LEASE_VERSION &&
-		property(value, "leases") instanceof Map &&
-		property(value, "queues") instanceof Map
-	)
+/** Per-path promise chains; process-global so surviving runtimes stay serialized across reload. */
+function taskQueues(): Map<string, Promise<void>> {
+	const global = globalThis as typeof globalThis & { [TASK_QUEUE_SYMBOL]?: Map<string, Promise<void>> }
+	global[TASK_QUEUE_SYMBOL] ??= new Map()
+	return global[TASK_QUEUE_SYMBOL]
 }
 
 function processIsAlive(pid: number): boolean {

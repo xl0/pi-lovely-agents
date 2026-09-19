@@ -28,8 +28,12 @@ flowchart TD
 - The tool call waits up to `waitMs`, then **detaches**; the work continues.
   A detached run (and every Follow-up) leaves a durable **notification**, which
   is steered into the parent and acknowledged only once seen in its transcript.
-- Everything process-wide (coordinator, leases, write queues, routes, live Bash
-  groups) lives on `globalThis` under `Symbol.for` keys, so `/reload` swaps the
+- Disk is the source of truth for task state: every transition is a
+  read-check-write of `metadata.json`, and tools and UI always re-read it.
+  Memory holds only what cannot be durable: live handles, in-process locks,
+  callbacks, and liveness (the residents map; `running` on disk proves nothing).
+- That process-wide memory (coordinator, write queues, routes, live Bash groups)
+  lives on `globalThis` under `Symbol.for` keys, so `/reload` swaps the
   extension instance without losing running work.
 
 ### Task lifecycle
@@ -178,10 +182,9 @@ The coordinator is an acceptance-ordered semaphore. Managed runs carry their
 permit in async-local context; a synchronous wait on a descendant (or a timed
 `task_output`) lends it and reacquires FIFO afterwards. Overlapping lends from
 parallel tool calls share one released slot; only the last to finish
-reacquires. Queued Follow-ups hold inactive reservations that keep their
-acceptance order without consuming capacity; promotion activates the next
-before the current permit is released. A granted but unused reservation
-returns its slot on cancel; runtimes cancel leftovers on exit. Bash uses a
+reacquires. Waiters sort by acceptance order, which is stored with each run,
+so a promoted Follow-up queues ahead of later-accepted work; it holds no
+position while its task is still busy with an earlier run. Bash uses a
 second instance of the same class. The coordinator object survives reload, so
 changing its shape needs a version bump and a process restart.
 
@@ -209,10 +212,11 @@ policy, context exclusion, scoped models) plus per-run observability:
 snapshots are throttled to two writes per second; final replies and tool
 activity flush at once, inside the same write-chain link that settlement awaits.
 
-Leases: `.lease` holds PID and token, published by no-overwrite link and reused
-process-wide. A live foreign PID is a conflict (tools hidden, persistent footer,
-`/resume` hint); a dead PID, or this process's own PID with no registry entry
-(PID reuse), is reclaimed. Release verifies the token. Reload keeps the lease;
+Leases: the `.lease` file is the only ownership record. It holds the PID and a
+per-process token, published by no-overwrite link, so every extension runtime
+in the process recognizes it without an in-memory registry. A live foreign PID
+is a conflict (tools hidden, persistent footer, `/resume` hint); a dead PID, or
+this PID with another token (PID reuse), is reclaimed. Release verifies the token. Reload keeps the lease;
 semantic shutdown releases it.
 
 ### Agent runtime
@@ -231,7 +235,8 @@ Defaults to immediate detachment. Output flows through one no-follow
 `output.log` handle with backpressure; a 2,000-line/50 KiB UTF-8-safe tail is
 mirrored into metadata with a sticky truncation flag. Stdin writes serialize
 and log delivery; a write submitted before cancellation cannot be undone. Durable
-`running` precedes spawn, so stdin waits for the child to exist. The group is
+`running` precedes spawn, so stdin checks the durable state and then waits for
+the child to exist. The group is
 killed on stop, on shell exit (leftover jobs would hold the pipes), and on
 normal process exit. SIGKILL of Pi or `setsid` escapes need OS supervision;
 restart never signals a stored PID or replays a command. A failed log close
