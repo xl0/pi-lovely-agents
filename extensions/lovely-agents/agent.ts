@@ -1221,15 +1221,19 @@ class AgentRuntime implements ResidentAgent {
 		this.queueEventWrite(async () => {
 			try {
 				// Coalesce replies and activity together so bursts cannot reorder their last action.
-				const pending = this.#pendingProgress
-				this.#pendingProgress = undefined
-				if (!pending) return
-				const { runId, ...progress } = pending
-				this.#lastProgressWriteAt = Date.now()
-				await writeTaskProgress(this.#paths, runId, progress)
+				// Drain inside this one chain link: settlement awaits the chain it saw, so a
+				// terminal reply arriving mid-write must not be deferred to a later link.
+				while (this.#pendingProgress) {
+					if (this.#pendingProgress.latestReply?.streaming === true && this.#lastProgressWriteAt + 500 > Date.now()) break
+					const { runId, ...progress } = this.#pendingProgress
+					this.#pendingProgress = undefined
+					this.#lastProgressWriteAt = Date.now()
+					await writeTaskProgress(this.#paths, runId, progress)
+				}
 			} finally {
 				this.#progressWriteQueued = false
-				if (this.#pendingProgress) this.scheduleProgressWrite(this.#pendingProgress.latestReply?.streaming === true)
+				// Only a throttled streaming snapshot can remain.
+				if (this.#pendingProgress) this.scheduleProgressWrite(true)
 			}
 		})
 	}
