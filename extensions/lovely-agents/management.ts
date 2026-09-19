@@ -23,13 +23,13 @@ export async function openManagementUi(ctx: ExtensionContext, options: Managemen
 		const definitions = options.discoverDefinitions()
 		const tasks = await options.loadTasks()
 		const choice = await select(ctx, "Lovely Agents", [
+			{ value: "config", label: "Configuration", description: "Edit user and workspace settings" },
 			{
 				value: "definitions",
 				label: `Agent definitions (${definitions.definitions.length})`,
 				description: `${definitions.diagnostics.length} diagnostics`
 			},
 			{ value: "tasks", label: `Tasks (${tasks.tasks.length})`, description: "Inspect durable direct children" },
-			{ value: "config", label: "Configuration", description: "Edit user and workspace settings" },
 			{ value: "prune", label: "Prune discarded tasks", description: "Permanently delete discarded task files in this workspace" }
 		])
 		if (!choice) return
