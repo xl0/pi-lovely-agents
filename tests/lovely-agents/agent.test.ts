@@ -458,39 +458,6 @@ describe("agent tool", () => {
 })
 
 describe("task_input tool", () => {
-	test("advertises only the input modes enabled by producer/owned-kind callbacks", () => {
-		for (const agentInput of [false, true]) {
-			for (const bashInput of [false, true]) {
-				const tools = captureAgentTools(
-					"/unused",
-					async () => {
-						throw new Error("No child should load")
-					},
-					{ ...config, backgroundAgents: false, backgroundBash: !bashInput },
-					undefined,
-					() => bashInput,
-					() => agentInput
-				)
-				const advertised = JSON.stringify({
-					parameters: tools.input.parameters,
-					description: tools.input.description,
-					promptSnippet: tools.input.promptSnippet,
-					promptGuidelines: tools.input.promptGuidelines
-				})
-				expect(Value.Check(tools.input.parameters, { id: "a_12345678", content: "next", delivery: "followup" })).toBe(agentInput)
-				expect(Value.Check(tools.input.parameters, { id: "b_12345678", content: "", eof: true })).toBe(bashInput)
-				if (!agentInput) {
-					expect(tools.input.parameters).not.toHaveProperty("properties.delivery")
-					expect(advertised).not.toMatch(/follow.?up|steer/i)
-				}
-				if (!bashInput) {
-					expect(tools.input.parameters).not.toHaveProperty("properties.eof")
-					expect(advertised).not.toMatch(/stdin|EOF/)
-				}
-			}
-		}
-	})
-
 	test("dispatches omitted delivery to live Bash stdin, preserves literal bytes and EOF after disabling creation", async () => {
 		await withTempWorkspace(async workspace => {
 			const paths = await reserveTaskStorage(await ensureParentStorage(workspace.cwd, "parent-session"), () => "b_12345678")
@@ -529,12 +496,8 @@ describe("task_input tool", () => {
 			const noColdLoad = async () => {
 				throw new Error("Must not cold-load Bash")
 			}
-			const tools = captureAgentTools(workspace.agentDir, noColdLoad, currentConfig, undefined, () => true)
+			const tools = captureAgentTools(workspace.agentDir, noColdLoad, currentConfig)
 			expect(Value.Check(tools.input.parameters, { id: paths.taskRef, content: "", eof: true })).toBe(true)
-			const hidden = captureAgentTools(workspace.agentDir, noColdLoad, currentConfig)
-			expect(Value.Check(hidden.input.parameters, { id: paths.taskRef, content: "", eof: true })).toBe(false)
-			const enabled = captureAgentTools(workspace.agentDir, noColdLoad, { ...config, backgroundBash: true })
-			expect(Value.Check(enabled.input.parameters, { id: paths.taskRef, content: "", eof: true })).toBe(true)
 			const ctx = taskContext(workspace.cwd)
 			await expect(tools.input.execute("cold", { id: paths.taskRef, content: "x" }, undefined, ctx)).rejects.toThrow(
 				"live running resident"
@@ -1127,7 +1090,7 @@ describe("task lifecycle controls", () => {
 })
 
 describe("foreground agents", () => {
-	test("hides waitMs, validates schemas, and rejects stale hidden arguments at execution", async () => {
+	test("static schemas accept waitMs and allowAgents; execution rejects delegation past the depth limit", async () => {
 		await withTempWorkspace(async workspace => {
 			const current = { ...config, backgroundAgents: false }
 			const tools = captureAgentTools(
@@ -1139,37 +1102,17 @@ describe("foreground agents", () => {
 			)
 			const args = { definition: "reviewer", label: "Review", prompt: "work" }
 			expect(Value.Check(tools.agent.parameters, args)).toBe(true)
-			expect(Value.Check(tools.agent.parameters, { ...args, waitMs: 0 })).toBe(false)
-			expect(tools.agent.description).toContain("terminal result")
-			expect(tools.input.description).toContain("wait for its terminal reply")
-			await expect(tools.agent.execute("hidden", { ...args, waitMs: 0 }, undefined, taskContext(workspace.cwd))).rejects.toThrow(
-				"backgroundAgents"
-			)
+			expect(Value.Check(tools.agent.parameters, { ...args, waitMs: 0, allowAgents: true })).toBe(true)
 			await expect(
 				tools.input.execute("hidden", { id: "a_11111111", content: "work", waitMs: 0 }, undefined, taskContext(workspace.cwd))
 			).rejects.toThrow("task_input does not accept waitMs")
-			current.backgroundAgents = true
-			const background = captureAgentTools(
-				workspace.agentDir,
-				async () => {
-					throw new Error("Must not create")
-				},
-				current
-			)
-			expect(Value.Check(background.agent.parameters, { ...args, waitMs: 0 })).toBe(true)
-			current.backgroundAgents = false
-			await expect(background.agent.execute("stale", { ...args, waitMs: 0 }, undefined, taskContext(workspace.cwd))).rejects.toThrow(
-				"backgroundAgents"
-			)
 			const limited = captureAgentTools(
 				workspace.agentDir,
 				async () => {
 					throw new Error("Must not create")
 				},
-				current,
-				() => false
+				{ ...current, maxDepth: 1 }
 			)
-			expect(Value.Check(limited.agent.parameters, { ...args, allowAgents: true })).toBe(false)
 			await expect(
 				limited.agent.execute("hidden-delegation", { ...args, allowAgents: true }, undefined, taskContext(workspace.cwd))
 			).rejects.toThrow("cannot delegate")
@@ -1535,10 +1478,7 @@ function captureAgentTool(agentDir: string, child: ChildSessionHandle, toolConfi
 function captureAgentTools(
 	agentDir: string,
 	createChild: (options: CreateChildSessionOptions) => Promise<ChildSessionHandle>,
-	toolConfig: AgentsConfig = config,
-	canDelegate?: () => boolean,
-	bashInputEnabled?: () => boolean,
-	agentInputEnabled?: () => boolean
+	toolConfig: AgentsConfig = config
 ): CapturedAgentTools {
 	const captured = new Map<string, CapturedAgentTool>()
 	const api = {
@@ -1566,14 +1506,11 @@ function captureAgentTools(
 	registerAgentTool(api, {
 		getConfig: () => toolConfig,
 		getAgentDir: () => agentDir,
-		...(canDelegate ? { canDelegate } : {}),
 		createChild
 	})
 	registerTaskInputTool(api, {
 		getConfig: () => toolConfig,
 		getAgentDir: () => agentDir,
-		...(bashInputEnabled ? { bashInputEnabled } : {}),
-		...(agentInputEnabled ? { agentInputEnabled } : {}),
 		createChild
 	})
 	const agent = captured.get("agent")

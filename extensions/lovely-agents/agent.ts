@@ -113,20 +113,15 @@ export type AgentToolOptions = {
 	getConfig: () => AgentsConfig
 	createChild?: typeof createChildSession
 	getAgentDir?: () => string
-	canDelegate?: () => boolean
-	/** Input-schema visibility from allowed producers plus retained owned kinds; not execution gates. */
-	agentInputEnabled?: () => boolean
-	bashInputEnabled?: () => boolean
 }
 
+/** Schemas and descriptions are static; config and depth limits are enforced at execution. */
 export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): void {
-	const background = options.getConfig().backgroundAgents
 	pi.registerTool({
 		name: "agent",
 		label: "Agent",
-		description: background
-			? "Create a durable Lovely Agent session and start its initial run. waitMs permits background detachment."
-			: "Create a durable Lovely Agent session and wait for its terminal result. Cancellation stops the accepted work.",
+		description:
+			"Create a durable Lovely Agent session and start its initial run. With background agents enabled, waitMs permits background detachment; otherwise the call waits for the terminal result and cancellation stops the accepted work.",
 		promptSnippet: "Create or delegate work to a durable agent",
 		promptGuidelines: ["Call agent_roster before creating an agent and use task tools for existing work."],
 		parameters: Type.Object(
@@ -134,14 +129,12 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 				definition: Type.String({ minLength: 1, description: "Agent Definition name" }),
 				label: Type.String({ minLength: 1, description: "Short task label" }),
 				prompt: Type.String({ minLength: 1, description: "Initial task prompt" }),
-				...(background ? { waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 600_000 })) } : {}),
+				waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 600_000, description: "Ignored unless background agents are enabled" })),
 				model: Type.Optional(
 					Type.String({ minLength: 1, description: "Configured provider/model ID or an enabled alias from agent_roster" })
 				),
 				thinking: Type.Optional(ThinkingLevel),
-				...(options.canDelegate?.() === false
-					? {}
-					: { allowAgents: Type.Optional(Type.Boolean({ description: "Allow this child to create descendants" })) })
+				allowAgents: Type.Optional(Type.Boolean({ description: "Allow this child to create descendants, depth permitting" }))
 			},
 			{ additionalProperties: false }
 		),
@@ -182,7 +175,6 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 			if (signal?.aborted) throw abortError(signal)
 			const config = options.getConfig()
 			const background = config.backgroundAgents
-			if (!background && "waitMs" in params) throw new Error("waitMs requires backgroundAgents")
 			if (
 				"waitMs" in params &&
 				(typeof params.waitMs !== "number" || !Number.isInteger(params.waitMs) || params.waitMs < 0 || params.waitMs > 600_000)
@@ -191,7 +183,6 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 			}
 			if ("allowAgents" in params && typeof params.allowAgents !== "boolean") throw new Error("allowAgents must be boolean")
 			const allowAgents = params.allowAgents === true
-			if (allowAgents && options.canDelegate?.() === false) throw new Error("This child cannot delegate at the current maximum depth")
 			validateInput(params.label, "label", MAX_AGENT_LABEL_BYTES)
 			validateInput(params.prompt, "prompt", MAX_AGENT_INPUT_BYTES)
 			const parentSessionId = ctx.sessionManager.getSessionId()
@@ -199,6 +190,7 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 			const parentContext = coordinator.getSessionContext(parentSessionId)
 			if (parentContext && !parentContext.allowAgents) throw new Error("This parent agent is not allowed to delegate")
 			const parentDepth = parentContext?.depth ?? 0
+			if (allowAgents && parentDepth + 1 >= config.maxDepth) throw new Error("This child cannot delegate at the current maximum depth")
 			resolveChildToolPolicy({
 				parentDepth,
 				maximumDepth: config.maxDepth,
@@ -318,43 +310,22 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 }
 
 export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOptions): void {
-	const background = options.getConfig().backgroundAgents
-	// Foreground agents remain a producer by default; the parent knows allowed producers and owned kinds.
-	const agentInput = options.agentInputEnabled?.() ?? true
-	const bashInput = options.bashInputEnabled?.() ?? options.getConfig().backgroundBash
 	pi.registerTool({
 		name: "task_input",
 		label: "Task Input",
 		description:
-			[
-				...(agentInput
-					? [
-							background
-								? "Send a durable Follow-up or live Steer to an owned Lovely Agent task."
-								: "Run a Follow-up on an idle owned task and wait for its terminal reply, or send a run-scoped live Steer. Busy tasks reject Follow-ups."
-						]
-					: []),
-				...(bashInput ? ["Write literal stdin to a running owned Bash task; eof closes stdin. Empty content requires eof:true."] : [])
-			].join(" ") || "Send input to an owned task.",
-		promptSnippet: agentInput
-			? `Send Follow-up work or a live Steer${bashInput ? ", or literal Bash stdin" : ""} to a durable task`
-			: bashInput
-				? "Write literal stdin to a running Bash task"
-				: "Send input to an owned task",
+			"Send a durable Follow-up or live Steer to an owned Lovely Agent task; with background agents disabled, a Follow-up requires an idle task and waits for its terminal reply. Or write literal stdin to a running owned Bash task; eof closes stdin. Empty content requires eof:true.",
+		promptSnippet: "Send Follow-up work or a live Steer, or literal Bash stdin, to a durable task",
 		promptGuidelines: [
-			...(agentInput
-				? [
-						"Use task_input Follow-up for a new run; Steer queues input for a live streaming run. Without a live steering target, Steer becomes a Follow-up (foreground busy tasks reject it). Acceptance does not guarantee observation before stop."
-					]
-				: []),
-			...(bashInput ? ["For Bash, omit delivery and write literal stdin; eof closes stdin without restarting the command."] : [])
+			"Use task_input Follow-up for a new run; Steer queues input for a live streaming run. Without a live steering target, Steer becomes a Follow-up (foreground busy tasks reject it). Acceptance does not guarantee observation before stop.",
+			"For Bash, omit delivery and write literal stdin; eof closes stdin without restarting the command."
 		],
 		parameters: Type.Object(
 			{
 				id: Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" }),
-				content: Type.String({ minLength: bashInput ? 0 : 1, description: "Input text" }),
-				...(agentInput ? { delivery: Type.Optional(Type.Union([Type.Literal("followup"), Type.Literal("steer")])) } : {}),
-				...(bashInput ? { eof: Type.Optional(Type.Boolean({ description: "Close Bash stdin after writing content" })) } : {})
+				content: Type.String({ description: "Input text" }),
+				delivery: Type.Optional(Type.Union([Type.Literal("followup"), Type.Literal("steer")], { description: "Agent tasks only" })),
+				eof: Type.Optional(Type.Boolean({ description: "Bash only: close stdin after writing content" }))
 			},
 			{ additionalProperties: false }
 		),

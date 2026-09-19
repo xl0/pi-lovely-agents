@@ -128,7 +128,7 @@ test("lease conflicts show a persistent warning without recovering, notifying, o
 	})
 })
 
-test("capability schemas and tool visibility follow config without hiding controls for retained tasks", async () => {
+test("tools stay visible regardless of config, and SDK idle disposal unbinds without stale context calls", async () => {
 	await withTempWorkspace(async workspace => {
 		await workspace.write("workspace/.pi/xl0-pi-lovely-agents.json", JSON.stringify({ backgroundAgents: false, backgroundBash: false }))
 		// A trust-requiring resource: Pi evaluated trust, so its answer covers the workspace config.
@@ -144,7 +144,6 @@ test("capability schemas and tool visibility follow config without hiding contro
 		})
 		let disposed = false
 		let staleCalls = 0
-		let toolReads = 0
 		const assertLive = () => {
 			if (disposed) {
 				staleCalls++
@@ -160,7 +159,6 @@ test("capability schemas and tool visibility follow config without hiding contro
 			},
 			getActiveTools: () => {
 				assertLive()
-				toolReads++
 				return [...active]
 			},
 			setActiveTools: (names: string[]) => {
@@ -191,59 +189,9 @@ test("capability schemas and tool visibility follow config without hiding contro
 		environment.PI_CODING_AGENT_DIR = workspace.agentDir
 		try {
 			await emit("session_start", "reload")
-			expect(active).toContain("agent")
-			expect(active).toContain("task_input")
-			expect(active).not.toContain("bash_bg")
-			expect(tools.get("task_input")).not.toHaveProperty("parameters.properties.eof")
-			expect(tools.get("agent")).not.toHaveProperty("parameters.properties.waitMs")
-			expect(tools.get("agent")?.description).toContain("terminal result")
-			active = active.filter(name => name !== "task_stop")
-			await emit("session_shutdown", "reload")
-			await workspace.write(
-				"workspace/.pi/xl0-pi-lovely-agents.json",
-				JSON.stringify({
-					backgroundAgents: true,
-					backgroundBash: true,
-					maxDepth: 0
-				})
-			)
-			await emit("session_start", "reload")
-			expect(active).toContain("bash_bg")
-			expect(active).toContain("task_input")
-			expect(active).not.toContain("agent")
-			expect(tools.get("task_input")).toHaveProperty("parameters.properties.eof")
-			expect(tools.get("task_input")).not.toHaveProperty("parameters.properties.delivery")
-			expect(tools.get("agent")).toHaveProperty("parameters.properties.waitMs")
-			expect(tools.get("agent")).not.toHaveProperty("parameters.properties.allowAgents")
-			expect(tools.get("agent")).not.toHaveProperty("parameters.properties.fork")
-			await seedFixtureTasks(workspace.cwd, "parent")
-			for (let i = 0; i < 200 && !active.includes("task_discard"); i++) await Bun.sleep(5)
-			expect(active).toContain("task_discard")
-			expect(active).toContain("task_output")
-			expect(active).not.toContain("task_stop")
-			expect(active).not.toContain("agent")
-			expect(active).not.toContain("agent_roster")
-			expect(tools.get("task_input")).toHaveProperty("parameters.properties.delivery")
-			expect(errors).toEqual([])
-
-			const bash = tools.get("bash_bg")
-			if (!bash) throw new Error("Missing Bash tool")
-			await bash.execute("retained-bash", { command: "printf kept", label: "Retained Bash", waitMs: 1000 }, undefined, undefined, ctx)
-			await emit("session_shutdown", "reload")
-			await workspace.write(
-				"workspace/.pi/xl0-pi-lovely-agents.json",
-				JSON.stringify({ backgroundAgents: false, backgroundBash: false, maxDepth: 0 })
-			)
-			await emit("session_start", "reload")
-			expect(active).not.toContain("bash_bg")
-			expect(active).toContain("task_input")
-			expect(tools.get("task_input")).toHaveProperty("parameters.properties.eof")
-
-			// SDK idle disposal has no session_shutdown: cancel pending reads and queued callbacks.
-			const reads = toolReads
-			publishSchedulerUpdate()
-			await Promise.resolve()
-			expect(toolReads).toBeGreaterThan(reads)
+			for (const name of ["agent", "agent_roster", "bash_bg", "task_input", "task_stop"]) expect(active).toContain(name)
+			expect(getAgentCoordinator().getNotificationRoute(notificationRouteKey(workspace.cwd, "parent"))).toBeDefined()
+			// SDK idle disposal has no session_shutdown: queued callbacks must not touch the stale context.
 			publishTaskUpdate(workspace.cwd, "parent")
 			lifetime.abort()
 			disposed = true

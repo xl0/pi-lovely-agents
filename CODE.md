@@ -74,11 +74,12 @@ number fields accept fractions.
 true by default. The former enables timed detachment and asynchronous
 Follow-ups; the latter exposes `bash_bg`. Context forks are deferred until
 the required Pi SDK changes land; no fork setting or tool is exposed.
-Tool schemas refresh with config: no foreground `waitMs`, and `allowAgents`
-requires remaining descendant depth. Creation tools follow parent permission,
-depth, and active SDK tools; inspection/control tools remain for owned tasks
-or diagnostics even without a producer. Event-driven visibility restores only
-tools this extension hid, not tools excluded by a Definition/SDK allowlist.
+Tool schemas and visibility are static. Config and depth limits are enforced
+at execution: `allowAgents` without remaining depth and `bash_bg` without
+`backgroundBash` fail explicitly; `waitMs` is ignored without background agents.
+Children that may not delegate never see creation tools: child creation
+excludes them in the SDK registry. Tools are hidden only on a lease conflict
+and restored on reload.
 
 Project-controlled inputs (`.pi/agents`, workspace config) need real trust:
 Pi reports projects without trust-requiring resources as trusted without
