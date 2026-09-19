@@ -1,7 +1,14 @@
 import { type Dirent, readdirSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
-import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter, type ScopedModel } from "@earendil-works/pi-coding-agent"
+import {
+	CONFIG_DIR_NAME,
+	getAgentDir,
+	hasTrustRequiringProjectResources,
+	ProjectTrustStore,
+	parseFrontmatter,
+	type ScopedModel
+} from "@earendil-works/pi-coding-agent"
 import { MODEL_ALIASES } from "./config.js"
 
 const ALLOWED_KEYS = new Set(["name", "description", "model", "thinking", "tools", "exclude_agents_md"])
@@ -57,6 +64,16 @@ type AgentFrontmatter = Record<string, unknown> & {
 	exclude_agents_md?: unknown
 }
 
+/**
+ * Pi reports projects without trust-requiring resources as trusted without asking,
+ * and `.pi/agents` and Lovely config are not among those resources. Accept Pi's
+ * answer only when it actually evaluated trust; otherwise require a saved /trust decision.
+ */
+export function projectResourcesTrusted(ctx: { cwd: string; isProjectTrusted(): boolean }): boolean {
+	if (!ctx.isProjectTrusted()) return false
+	return hasTrustRequiringProjectResources(ctx.cwd) || new ProjectTrustStore(getAgentDir()).get(ctx.cwd) === true
+}
+
 export function discoverAgentDefinitions(options: {
 	cwd: string
 	projectTrusted: boolean
@@ -69,7 +86,8 @@ export function discoverAgentDefinitions(options: {
 	const cwd = resolve(options.cwd)
 	const homeDir = resolve(options.homeDir ?? homedir())
 	const userDir = join(options.agentDir ?? getAgentDir(), "agents")
-	const projectAgentsDir = options.projectTrusted ? findNearestProjectAgentsDir(cwd, options.configDirName ?? CONFIG_DIR_NAME) : undefined
+	const nearestProjectAgentsDir = findNearestProjectAgentsDir(cwd, options.configDirName ?? CONFIG_DIR_NAME)
+	const projectAgentsDir = options.projectTrusted ? nearestProjectAgentsDir : undefined
 	const userCandidates = scanDefinitionDirectory(userDir, "user", options.toolNames, options.models, cwd, homeDir)
 	const projectCandidates = projectAgentsDir
 		? scanDefinitionDirectory(projectAgentsDir, "project", options.toolNames, options.models, cwd, homeDir)
@@ -79,6 +97,15 @@ export function discoverAgentDefinitions(options: {
 	invalidateDuplicates(projectCandidates)
 
 	const diagnostics = [...userCandidates, ...projectCandidates].flatMap(candidate => candidate.diagnostics)
+	if (nearestProjectAgentsDir && !projectAgentsDir) {
+		diagnostics.push({
+			type: "warning",
+			code: "untrusted-project",
+			message: "Project Agent Definitions are ignored until the project is trusted; use /trust and restart pi",
+			source: "project",
+			path: formatDisplayPath(nearestProjectAgentsDir, "project", cwd, homeDir)
+		})
+	}
 	const projectNames = new Set(projectCandidates.flatMap(candidate => candidate.declaredName ?? []))
 	const definitions: AgentDefinition[] = []
 
@@ -113,7 +140,9 @@ export function findNearestProjectAgentsDir(cwd: string, configDirName = CONFIG_
 	while (true) {
 		const candidate = join(directory, configDirName, "agents")
 		try {
-			if (statSync(candidate).isDirectory()) return candidate
+			const stats = statSync(candidate)
+			// Trust covers the user's own tree, not e.g. another user's /tmp/.pi/agents.
+			if (stats.isDirectory() && (process.getuid === undefined || stats.uid === process.getuid())) return candidate
 		} catch {
 			// Missing, inaccessible, and broken links do not stop the ancestor walk.
 		}

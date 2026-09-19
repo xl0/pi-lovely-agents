@@ -269,6 +269,7 @@ export function buildDefinitionSystemPrompt(options: BuildSystemPromptOptions): 
 					: "Use bash for file operations like ls, rg, find"
 		)
 	}
+	for (const name of tools) for (const guideline of options.toolGuidelines?.[name] ?? []) addGuideline(guideline)
 	for (const guideline of options.promptGuidelines ?? []) addGuideline(guideline)
 	addGuideline("Be concise in your responses")
 	addGuideline("Show file paths clearly when working with files")

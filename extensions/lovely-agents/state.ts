@@ -494,7 +494,8 @@ export async function acquireParentLease(cwd: string, parentSessionId: string): 
 				if (loaded.status === "invalid") {
 					throw new ParentLeaseError(`Cannot acquire invalid parent lease ${paths.lease}: ${loaded.message}`)
 				}
-				if (processIsAlive(loaded.lease.pid)) {
+				// This process's leases live in the registry; an unregistered own-PID lease is a reused PID.
+				if (loaded.lease.pid !== process.pid && processIsAlive(loaded.lease.pid)) {
 					throw new ParentLeaseConflictError(paths.lease, loaded.lease.pid)
 				}
 
@@ -766,6 +767,10 @@ export async function reserveTaskStorage(
 export async function readTaskMetadata(paths: TaskStoragePaths): Promise<MetadataLoadResult> {
 	let source: string
 	try {
+		// lstat never follows the final component: a swapped-in symlink must not redirect reads or mutations.
+		if (!(await lstat(paths.taskDirectory)).isDirectory()) {
+			return invalidMetadata(paths.metadata, "unreadable", "Task path is not a regular directory")
+		}
 		const stats = await lstat(paths.metadata)
 		if (!stats.isFile() || stats.isSymbolicLink()) {
 			return invalidMetadata(paths.metadata, "unreadable", "metadata.json is not a regular file")
@@ -898,8 +903,6 @@ function taskMetadataSemanticError(value: TaskMetadata): string | undefined {
 	if (Buffer.byteLength(value.label, "utf8") > MAX_AGENT_LABEL_BYTES) {
 		return `/label must be at most ${MAX_AGENT_LABEL_BYTES} UTF-8 bytes`
 	}
-	if (value.updatedAt < value.createdAt) return "/updatedAt must not precede /createdAt"
-	if (value.discardedAt !== null && value.discardedAt < value.createdAt) return "/discardedAt must not precede /createdAt"
 	if (
 		value.lastSettledRun !== undefined &&
 		(value.lastSettledRun > value.lastRunSequence || (value.activeRun && value.lastSettledRun >= value.activeRun.sequence))

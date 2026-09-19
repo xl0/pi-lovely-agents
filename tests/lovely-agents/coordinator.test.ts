@@ -251,6 +251,29 @@ describe("Agent scheduling", () => {
 		other.release()
 	})
 
+	test("cancelling a granted but unused reservation returns its slot", async () => {
+		const coordinator = createAgentCoordinator(1)
+		const reservation = coordinator.reserve({ tuple: alpha })
+		reservation.activate()
+		expect(coordinator.activeCount).toBe(1)
+		reservation.cancel()
+		expect(coordinator.activeCount).toBe(0)
+		await expect(reservation.run(async () => "late")).rejects.toThrow("cancelled")
+	})
+
+	test("overlapping lends keep the slot free until the last wait ends", async () => {
+		const coordinator = createAgentCoordinator(1)
+		await coordinator.run({ tuple: alpha }, async () => {
+			const results = await Promise.all([
+				coordinator.withLentPermit(async () => "quick"),
+				coordinator.withLentPermit(() => coordinator.run({ tuple: alpha }, async () => "child"))
+			])
+			expect(results).toEqual(["quick", "child"])
+			expect(coordinator.activeCount).toBe(1)
+		})
+		expect(coordinator.activeCount).toBe(0)
+	})
+
 	test("lends all parent permits to avoid descendant deadlock", async () => {
 		const coordinator = createAgentCoordinator(4)
 		const allParentsReady = deferred<void>()

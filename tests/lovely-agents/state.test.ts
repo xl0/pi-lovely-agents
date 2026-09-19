@@ -108,12 +108,12 @@ describe("parent partition leases", () => {
 		})
 	})
 
-	test("rejects a lease owned by a live process", async () => {
+	test("rejects a lease owned by another live process", async () => {
 		await withTempWorkspace(async workspace => {
 			const paths = await ensureParentStorage(workspace.cwd, "parent-session")
 			const source = `${JSON.stringify({
 				version: 1,
-				pid: process.pid,
+				pid: process.ppid,
 				token: "1".repeat(32),
 				createdAt: 1
 			})}\n`

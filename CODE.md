@@ -80,6 +80,13 @@ depth, and active SDK tools; inspection/control tools remain for owned tasks
 or diagnostics even without a producer. Event-driven visibility restores only
 tools this extension hid, not tools excluded by a Definition/SDK allowlist.
 
+Project-controlled inputs (`.pi/agents`, workspace config) need real trust:
+Pi reports projects without trust-requiring resources as trusted without
+asking, and these are not among them. `projectResourcesTrusted` accepts Pi's
+answer only when it evaluated trust, else requires a saved `/trust` decision.
+Ignored resources produce warnings. Ancestor `.pi/agents` directories owned by
+another user are skipped.
+
 Definitions are scanned on each roster call. The nearest trusted project
 `.pi/agents` directory shadows user definitions by declared name, even when the
 project definition is invalid. Same-scope duplicates invalidate that name.
@@ -121,7 +128,8 @@ Older completed runs are not reconstructed by parsing the human history;
 ambiguous old settled snapshots report an unknown run rather than treating the
 highest accepted Follow-up as the reply's identity.
 Reply and last-activity writes coalesce together so burst events
-cannot reorder their final action. Optional `lastActivity` records observed work,
+cannot reorder their final action. Streaming reply snapshots are capped at two
+durable writes per second; completed replies and tool activity flush at once. Optional `lastActivity` records observed work,
 not bookkeeping timestamps: start, thinking, reply, or tool activity, without
 reasoning/tool payloads. Thinking and tool-update heartbeats are event-driven,
 capped at one per second. New runs reset activity as well as the reply. Earlier
@@ -142,7 +150,8 @@ Each open parent partition has a versioned PID/token `.lease`, published through
 an atomic no-overwrite link. A package-symbol process-global registry reuses the
 same lease across extension runtimes and serializes local acquisition. Live
 owners cause an explicit conflict; only a valid lease whose PID is definitively
-absent is reclaimed. Simultaneous stale reclamation is best-effort; fresh and
+absent, or is this process's own PID without a registry entry (PID reuse after
+a crash), is reclaimed. Simultaneous stale reclamation is best-effort; fresh and
 live-owner acquisition remains atomic. Release verifies the ownership token
 before unlinking.
 
@@ -212,6 +221,9 @@ routes with replacement-safe unbind callbacks. Managed runs carry permits in
 async-local context. Synchronous descendant waits and blocking `task_output`
 can lend that permit, then queue FIFO reacquisition before the caller resumes;
 reacquisition bypasses tuple gates because the caller was already running.
+Overlapping lends (parallel tool calls) share one released slot; only the last
+wait to finish reacquires it. Cancelling a granted but unconsumed reservation
+returns its slot; runtimes cancel leftover reservations on exit.
 Inactive reservations hold Follow-up acceptance order without consuming
 capacity; atomic promotion activates the next reservation before the current
 permit is released.
@@ -237,6 +249,8 @@ submitted write; settlement drains its logging lane.
 Terminal settlement records exit status and detached notifications. Stop and
 discard wait for process/pipes/log cleanup; actual I/O failures are retained
 when metadata remains writable. Cleanup failures stay reachable for retry.
+The group is also killed when the shell exits, so leftover jobs holding the
+pipes cannot defer settlement.
 Live POSIX groups are killed on stop and normal process exit. SIGKILL/power
 loss or intentional `setsid` escapes require OS supervision; restart never
 signals a stored PID or replays a command.
@@ -256,7 +270,11 @@ unattended. Each accepted run retains its background policy across config edits.
 Detached initial runs and background Follow-ups persist bounded completion notifications;
 detached suspensions persist status notifications, and startup reconciliation
 persists interruption notifications. Exact parent routes inject them as custom
-Steers and wake idle parents. Delivery is marked only after the parent's
+Steers and wake idle parents. Idle managed children instead get the message
+appended without a turn, which would run outside their runtime's permit and
+gate. Queue clearing (Esc, run end) can drop a steered notice without
+`message_end`, so `agent_end` clears in-flight suppression and reconciles
+against the transcript. Delivery is marked only after the parent's
 `message_end` observes the deterministic task/run/type ID. Session startup
 reconciles IDs in the transcript and resends only absent notices; semantic
 parent shutdown clears process-local in-flight suppression. Synchronous initial

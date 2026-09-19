@@ -85,6 +85,9 @@ type Waiter = {
 	queueOrder: number
 	bypassTupleGate: boolean
 	eligible: boolean
+	/** Slot granted by drain; an unconsumed grant must be returned on cancel. */
+	granted?: boolean
+	consumed?: boolean
 	resolve: () => void
 	reject: (error: unknown) => void
 	signal?: AbortSignal
@@ -188,7 +191,7 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 
 	async withLentPermit<T>(wait: () => Promise<T>, signal?: AbortSignal): Promise<T> {
 		const permit = this.#permits.getStore()
-		return permit?.held ? permit.lend(wait, signal) : wait()
+		return permit ? permit.lend(wait, signal) : wait()
 	}
 
 	bindResident(taskKey: string, resident: ResidentAgent): () => void {
@@ -306,7 +309,13 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 
 	cancel(waiter: Waiter, reason?: unknown): void {
 		const index = this.#waiters.indexOf(waiter)
-		if (index < 0) return
+		if (index < 0) {
+			if (waiter.granted && !waiter.consumed) {
+				waiter.consumed = true
+				this.releaseSlot()
+			}
+			return
+		}
 		this.#waiters.splice(index, 1)
 		if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort)
 		waiter.reject(reason instanceof Error ? reason : new Error("Agent reservation cancelled"))
@@ -315,6 +324,8 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 	async runReservation<T>(tuple: ModelTuple, waiter: Waiter, ready: Promise<void>, work: () => Promise<T>): Promise<T> {
 		this.activate(waiter)
 		await ready
+		if (waiter.consumed) throw new Error("Agent reservation cancelled")
+		waiter.consumed = true
 		const permit = new Permit(this, tuple)
 		return this.#permits.run(permit, async () => {
 			try {
@@ -333,6 +344,7 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 			if (!waiter) break
 			if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort)
 			this.#active++
+			waiter.granted = true
 			waiter.resolve()
 		}
 		publishSchedulerUpdate()
@@ -376,6 +388,8 @@ class Permit implements AgentPermit {
 	readonly #tuple: ModelTuple
 	#state: "held" | "lent" | "released" = "held"
 	#reacquireAbort: AbortController | undefined
+	#reacquiring: Promise<void> | undefined
+	#lends = 0
 
 	constructor(coordinator: ProcessAgentCoordinator, tuple: ModelTuple) {
 		this.#coordinator = coordinator
@@ -386,10 +400,14 @@ class Permit implements AgentPermit {
 		return this.#state === "held"
 	}
 
+	/** Overlapping lends share one released slot; the last to finish reacquires it. */
 	async lend<T>(wait: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-		if (this.#state !== "held") throw new Error(`Cannot lend an Agent permit while it is ${this.#state}`)
-		this.#state = "lent"
-		this.#coordinator.releaseSlot()
+		if (this.#state === "released") return wait()
+		if (this.#state === "held") {
+			this.#state = "lent"
+			this.#coordinator.releaseSlot()
+		}
+		this.#lends++
 
 		let succeeded = false
 		let result: T | undefined
@@ -400,30 +418,40 @@ class Permit implements AgentPermit {
 		} catch (error) {
 			failure = error
 		}
+		this.#lends--
 
-		if (this.#state === "lent") {
-			const reacquireAbort = new AbortController()
-			const forwardAbort = () => reacquireAbort.abort(signal?.reason)
-			if (signal?.aborted) forwardAbort()
-			else signal?.addEventListener("abort", forwardAbort, { once: true })
-			this.#reacquireAbort = reacquireAbort
-			try {
-				await this.#coordinator.reacquire(this.#tuple, reacquireAbort.signal)
-				if (this.currentState() === "released") {
-					this.#coordinator.releaseSlot()
-					throw abortError(reacquireAbort.signal)
-				}
-				this.#state = "held"
-			} catch (error) {
-				this.#state = "released"
-				throw error
-			} finally {
-				signal?.removeEventListener("abort", forwardAbort)
-				this.#reacquireAbort = undefined
-			}
+		while (this.currentState() === "lent" && this.#lends === 0) {
+			this.#reacquiring ??= this.reacquire(signal).finally(() => {
+				this.#reacquiring = undefined
+			})
+			await this.#reacquiring
 		}
 		if (!succeeded) throw failure
 		return result as T
+	}
+
+	private async reacquire(signal?: AbortSignal): Promise<void> {
+		const reacquireAbort = new AbortController()
+		const forwardAbort = () => reacquireAbort.abort(signal?.reason)
+		if (signal?.aborted) forwardAbort()
+		else signal?.addEventListener("abort", forwardAbort, { once: true })
+		this.#reacquireAbort = reacquireAbort
+		try {
+			await this.#coordinator.reacquire(this.#tuple, reacquireAbort.signal)
+			if (this.currentState() === "released") {
+				this.#coordinator.releaseSlot()
+				throw abortError(reacquireAbort.signal)
+			}
+			// A wait that began during reacquisition still needs the slot lent.
+			if (this.#lends > 0) this.#coordinator.releaseSlot()
+			else this.#state = "held"
+		} catch (error) {
+			this.#state = "released"
+			throw error
+		} finally {
+			signal?.removeEventListener("abort", forwardAbort)
+			this.#reacquireAbort = undefined
+		}
 	}
 
 	release(): void {
