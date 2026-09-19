@@ -6,7 +6,7 @@ import { type AgentsConfig, type AgentsConfigWarning, createAgentsConfigSpec, de
 import { getAgentCoordinator, getBashCoordinator } from "./coordinator.js"
 import { discoverAgentDefinitions, projectResourcesTrusted } from "./definitions.js"
 import { reconcileParentTasks, recoverOwnedTaskTree, stopOwnedTaskTree } from "./lifecycle.js"
-import { type ManagementUiOptions, openManagementUi, openTaskManagementUi, stopFixtureTimersFor } from "./management.js"
+import { type ManagementUiOptions, openManagementUi, openTaskManagementUi } from "./management.js"
 import {
 	clearNotificationInFlight,
 	NOTIFICATION_CUSTOM_TYPE,
@@ -339,11 +339,7 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 	registerTaskTools(pi, {
 		beforeParentLeaseRelease: async (cwd, parentSessionId) => {
 			if (ownershipWarning) return
-			try {
-				await stopFixtureTimersFor(cwd, parentSessionId)
-			} finally {
-				await stopOwnedTaskTree(cwd, parentSessionId)
-			}
+			await stopOwnedTaskTree(cwd, parentSessionId)
 		}
 	})
 }

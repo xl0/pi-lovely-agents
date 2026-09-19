@@ -9,11 +9,10 @@ import {
 } from "@earendil-works/pi-coding-agent"
 import { getAgentCoordinator } from "../../extensions/lovely-agents/coordinator.js"
 import lovelyAgentsExtension, { latestReplyWasInterrupted, successfulTurnTuple } from "../../extensions/lovely-agents/index.js"
-import { seedFixtureTasks } from "../../extensions/lovely-agents/management.js"
 import { NOTIFICATION_CUSTOM_TYPE, notificationRouteKey } from "../../extensions/lovely-agents/notifications.js"
 import { ensureParentStorage, mutateTaskMetadata, releaseParentLeaseFor, taskStoragePaths } from "../../extensions/lovely-agents/state.js"
 import { publishSchedulerUpdate, publishTaskUpdate } from "../../extensions/lovely-agents/updates.js"
-import { withTempWorkspace } from "./test-helpers.js"
+import { seedFixtureTasks, withTempWorkspace } from "./test-helpers.js"
 
 test("lease conflicts show a persistent warning without recovering, notifying, or stopping foreign tasks", async () => {
 	await withTempWorkspace(async workspace => {

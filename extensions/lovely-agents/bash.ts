@@ -70,7 +70,7 @@ export function registerBashTool(pi: ExtensionAPI, options: { getConfig: () => A
 		promptSnippet: "Run a background Bash command with durable output and task controls",
 		promptGuidelines: [
 			"Use bash_bg for background shell work, not as a replacement for normal bash. Use task_list/task_output/task_stop/task_discard with its b_ ID.",
-			"Detached bash_bg tasks automatically notify you on success or failure and wake an idle parent; no completion polling is needed. Synchronous completion and explicit stops do not notify.",
+			"Detached bash_bg tasks automatically notify you on success or failure and wake an idle parent; do not poll for completion. Synchronous completion and explicit stops do not notify.",
 			"Use task_input on a running bash_bg task for literal stdin, optionally eof:true to close stdin; agent Follow-up/Steer modes are not supported. Commands never restart automatically."
 		],
 		parameters: BashParameters,

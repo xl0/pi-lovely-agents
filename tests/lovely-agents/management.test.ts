@@ -1,24 +1,13 @@
 import { describe, expect, test } from "bun:test"
-import { readdir, stat, writeFile } from "node:fs/promises"
-import { join } from "node:path"
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { visibleWidth } from "@earendil-works/pi-tui"
-import {
-	clearFixtureTasks,
-	openManagementUi,
-	openTaskManagementUi,
-	seedFixtureEdgeCases,
-	seedFixtureTasks,
-	seedLiveFixtureTask
-} from "../../extensions/lovely-agents/management.js"
+import { openManagementUi, openTaskManagementUi } from "../../extensions/lovely-agents/management.js"
 import {
 	acquireParentLease,
 	appendHistoryLog,
 	ensureParentStorage,
 	initializeRetainedLogs,
 	mutateTaskMetadata,
-	readRetainedOutput,
-	readTaskMetadata,
 	releaseParentLeaseFor,
 	reserveTaskStorage,
 	TASK_METADATA_VERSION,
@@ -27,8 +16,7 @@ import {
 	writeTaskMetadata
 } from "../../extensions/lovely-agents/state.js"
 import { loadTaskList, type TaskListRow } from "../../extensions/lovely-agents/tools.js"
-import { bindTaskUpdateRoute } from "../../extensions/lovely-agents/updates.js"
-import { withTempWorkspace } from "./test-helpers.js"
+import { seedFixtureTasks, withTempWorkspace } from "./test-helpers.js"
 
 test("management Tasks hands off to the existing panel instead of opening another selector", async () => {
 	let selectors = 0
@@ -238,7 +226,6 @@ describe("management fixtures", () => {
 				expect(step).toBe(5)
 				expect(renders).toBeGreaterThan(0)
 			} finally {
-				await clearFixtureTasks(workspace.cwd, "parent-session")
 				await releaseParentLeaseFor(workspace.cwd, "parent-session")
 			}
 		})
@@ -273,53 +260,8 @@ describe("management fixtures", () => {
 				expect(menus).toBe(2)
 				expect(notices).toEqual(["No system prompt captured for this run."])
 			} finally {
-				await clearFixtureTasks(workspace.cwd, "parent-session")
 				await releaseParentLeaseFor(workspace.cwd, "parent-session")
 			}
-		})
-	})
-
-	test("fixture cleanup removes only owned, marked tasks", async () => {
-		await withTempWorkspace(async workspace => {
-			const ids = await seedFixtureTasks(workspace.cwd, "parent-session")
-			const parent = await ensureParentStorage(workspace.cwd, "parent-session")
-
-			const foreignFixture = await reserveTaskStorage(parent, () => "a_ffffffff")
-			await writeFile(join(foreignFixture.taskDirectory, ".fixture"), "another-parent")
-			expect(await clearFixtureTasks(workspace.cwd, "parent-session")).toBe(ids.length)
-			expect((await stat(foreignFixture.taskDirectory)).isDirectory()).toBe(true)
-			const first = ids[0]
-			if (!first) throw new Error("Fixture task was not created")
-			await expect(stat(taskStoragePaths(parent, first).taskDirectory)).rejects.toMatchObject({ code: "ENOENT" })
-			await releaseParentLeaseFor(workspace.cwd, "parent-session")
-		})
-	})
-
-	test("seeds nested, queued, discarded, corrupt, and large-output cases", async () => {
-		await withTempWorkspace(async workspace => {
-			const ids = await seedFixtureEdgeCases(workspace.cwd, "parent-session")
-			expect(ids).toHaveLength(3)
-			const [showcaseId, discardedId, corruptId] = ids
-			if (!showcaseId || !discardedId || !corruptId) throw new Error("Edge-case fixtures were not created")
-			const parent = await ensureParentStorage(workspace.cwd, "parent-session")
-			const showcase = await readTaskMetadata(taskStoragePaths(parent, showcaseId))
-			expect(showcase.status).toBe("ok")
-			if (showcase.status !== "ok" || showcase.metadata.kind !== "agent") throw new Error("Showcase fixture is invalid")
-			expect(showcase.metadata.queuedFollowUps).toHaveLength(1)
-			expect((await stat(taskStoragePaths(parent, showcaseId).history)).size).toBeGreaterThan(50_000)
-
-			const descendantParent = await ensureParentStorage(workspace.cwd, showcase.metadata.childSessionId)
-			const descendants = (await readdir(descendantParent.parentDirectory)).filter(name => /^a_[0-9a-f]{8}$/.test(name))
-			expect(descendants).toHaveLength(1)
-			const discarded = await readTaskMetadata(taskStoragePaths(parent, discardedId))
-			expect(discarded.status).toBe("ok")
-			if (discarded.status !== "ok") throw new Error("Discarded fixture is invalid")
-			expect(discarded.metadata.discardedAt).not.toBeNull()
-			expect((await readTaskMetadata(taskStoragePaths(parent, corruptId))).status).toBe("invalid")
-
-			expect(await clearFixtureTasks(workspace.cwd, "parent-session")).toBe(4)
-			expect((await readdir(descendantParent.parentDirectory)).filter(name => /^a_[0-9a-f]{8}$/.test(name))).toHaveLength(0)
-			await releaseParentLeaseFor(workspace.cwd, "parent-session")
 		})
 	})
 
@@ -387,7 +329,6 @@ describe("management fixtures", () => {
 				expect(step).toBe(3)
 				expect(renders).toBeGreaterThan(0)
 			} finally {
-				await clearFixtureTasks(workspace.cwd, "parent-session")
 				await releaseParentLeaseFor(workspace.cwd, "parent-session")
 			}
 		})
@@ -508,29 +449,6 @@ describe("management fixtures", () => {
 				expect(step).toBe(3)
 				expect(renders).toBeGreaterThan(1)
 			} finally {
-				await releaseParentLeaseFor(workspace.cwd, "parent-session")
-			}
-		})
-	})
-
-	test("live fixtures produce observable output growth", async () => {
-		await withTempWorkspace(async workspace => {
-			const id = await seedLiveFixtureTask(workspace.cwd, "parent-session")
-			const parent = await ensureParentStorage(workspace.cwd, "parent-session")
-			const paths = taskStoragePaths(parent, id)
-			const updates: string[] = []
-			const unbind = bindTaskUpdateRoute(workspace.cwd, "parent-session", async () => {
-				updates.push((await readRetainedOutput(paths)).text)
-			})
-			try {
-				const completion = await readRetainedOutput(paths, { waitMs: 4_000 })
-				expect(completion.timedOut).toBe(false)
-				expect(completion.state).toBe("idle")
-				expect(completion.text).toBe("Fixture update 5")
-				expect(updates).toContain("Fixture update 1")
-			} finally {
-				unbind()
-				expect(await clearFixtureTasks(workspace.cwd, "parent-session")).toBe(1)
 				await releaseParentLeaseFor(workspace.cwd, "parent-session")
 			}
 		})
