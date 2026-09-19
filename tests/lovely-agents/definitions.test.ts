@@ -110,7 +110,7 @@ describe("Agent Definition discovery", () => {
 
 			const untrusted = discover(workspace, false)
 			expect(untrusted.definitions.map(definition => definition.name)).toEqual(["reviewer"])
-			expect(untrusted.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["untrusted-project"])
+			expect(untrusted.diagnostics).toEqual([])
 		})
 	})
 

@@ -147,7 +147,8 @@ Project-controlled inputs (`.pi/agents`, workspace config) need real trust: Pi
 reports projects without trust-requiring resources as trusted without asking,
 and these are not among them. `projectResourcesTrusted` accepts Pi's answer
 only when it evaluated trust, else requires a saved `/trust` decision. Ignored
-resources warn. Ancestor `.pi/agents` owned by another user are skipped.
+resources raise a UI warning at session start (the model cannot fix trust, so
+the roster stays quiet). Ancestor `.pi/agents` owned by another user are skipped.
 
 Definitions are rescanned on every use. The nearest trusted project directory
 shadows user Definitions by declared name, even when the project one is

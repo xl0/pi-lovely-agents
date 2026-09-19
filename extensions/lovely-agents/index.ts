@@ -4,7 +4,7 @@ import { controlTaskLifecycle, registerAgentTool, registerTaskInputTool, sendTas
 import { registerBashTool } from "./bash.js"
 import { type AgentsConfig, type AgentsConfigWarning, createAgentsConfigSpec, defaultAgentsConfig, resolveAgentsConfig } from "./config.js"
 import { getAgentCoordinator, getBashCoordinator } from "./coordinator.js"
-import { discoverAgentDefinitions, projectResourcesTrusted } from "./definitions.js"
+import { discoverAgentDefinitions, findNearestProjectAgentsDir, projectResourcesTrusted } from "./definitions.js"
 import { reconcileParentTasks, stopOwnedTaskTree } from "./lifecycle.js"
 import { type ManagementUiOptions, openManagementUi, openTaskManagementUi } from "./management.js"
 import {
@@ -177,6 +177,13 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 				loadTasks: options.loadTasks,
 				openSelection: selection => openTaskManagementUi(ctx, options, selection)
 			})
+		}
+		// The user can fix trust; the model cannot, so this is a notification, not a roster diagnostic.
+		if (!managed && !projectResourcesTrusted(ctx) && findNearestProjectAgentsDir(ctx.cwd)) {
+			ctx.ui.notify(
+				"Project Agent Definitions in .pi/agents are ignored until the project is trusted; use /trust and restart pi",
+				"warning"
+			)
 		}
 		try {
 			currentDepth = getAgentCoordinator().getSessionContext(parentSessionId)?.depth ?? 0

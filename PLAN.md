@@ -205,6 +205,9 @@ stop, discard. No slash-command mirror of the model tools.
 
 ### [ ] Release hygiene
 
+- [x] Refactor preflight and 14 live-tool smoke scenarios pass; see
+  `TEST-RESULTS.md` for evidence and the configured-capacity adaptation.
+- [x] The eight interactive UI/trust scenarios in `TEST-PLAN.md` pass.
 - Verify OIDC staged publishing on the next tag; the first CI run skipped an
   already-published version. Publishing needs explicit approval.
 - Decide on committing a lockfile for the publish job; `bun.lock` is ignored
