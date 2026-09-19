@@ -3,7 +3,7 @@ import { type ConfigFromSchema, defineScopedConfig, field, type ScopedConfig } f
 
 const NO_MODELS = "(no authenticated models)"
 const DISABLED_MODEL = "disabled"
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const
 export const MODEL_ALIASES = {
 	fast: "Cheap, low-latency model for straightforward tasks.",
 	smart: "Most capable model for difficult reasoning and complex work.",
@@ -39,10 +39,6 @@ function createConfigSchema(ctx?: ModelConfigContext) {
 			visibleWhen: ctx => ctx.get(`${name}Model`) !== DISABLED_MODEL
 		})
 	return {
-		backgroundAgents: field.boolean(true, {
-			label: "Background agents",
-			description: "Allow detached agents and asynchronous Follow-ups. Off keeps agents in the foreground."
-		}),
 		backgroundBash: field.boolean(true, {
 			label: "Background Bash",
 			description: "Run Bash commands as managed background tasks."
@@ -82,8 +78,7 @@ function createConfigSchema(ctx?: ModelConfigContext) {
 			label: "Initial wait (ms)",
 			description: "How long agent creation waits before detaching.",
 			min: 0,
-			step: 1000,
-			visibleWhen: ctx => ctx.get("backgroundAgents") === true
+			step: 1000
 		}),
 		expandPromptTemplates: field.boolean(false, {
 			label: "Expand prompt templates",
@@ -107,7 +102,7 @@ export type AgentsConfigWarning = {
 
 export type ModelChoice = ScopedModel
 
-export type ModelChoiceDiagnostic = {
+type ModelChoiceDiagnostic = {
 	type: "warning"
 	code: "no-match"
 	message: string
@@ -162,16 +157,6 @@ export function resolveAgentsConfig(
 	}
 
 	return { value: config.resolve(scoped), warnings }
-}
-
-export function loadAgentsConfig(
-	cwd: string,
-	ctx?: ModelConfigContext
-): {
-	value: AgentsConfig
-	warnings: AgentsConfigWarning[]
-} {
-	return resolveAgentsConfig(createAgentsConfigSpec(ctx).load(cwd))
 }
 
 export function resolveModelChoices(options: {

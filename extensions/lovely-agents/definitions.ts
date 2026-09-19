@@ -9,14 +9,14 @@ import {
 	parseFrontmatter,
 	type ScopedModel
 } from "@earendil-works/pi-coding-agent"
-import { MODEL_ALIASES } from "./config.js"
+import { MODEL_ALIASES, THINKING_LEVELS } from "./config.js"
+import { errorMessage, hasCode } from "./utils.js"
 
 const ALLOWED_KEYS = new Set(["name", "description", "model", "thinking", "tools", "exclude_agents_md"])
 const NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
 
 export type DefinitionSource = "user" | "project"
-export type AgentThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+export type AgentThinkingLevel = (typeof THINKING_LEVELS)[number]
 
 export type AgentDefinition = {
 	name: string
@@ -43,7 +43,6 @@ export type DefinitionDiagnostic = {
 export type DefinitionDiscoveryResult = {
 	definitions: AgentDefinition[]
 	diagnostics: DefinitionDiagnostic[]
-	projectAgentsDir: string | undefined
 }
 
 type DefinitionCandidate = {
@@ -80,13 +79,12 @@ export function discoverAgentDefinitions(options: {
 	toolNames: readonly string[]
 	models: readonly ScopedModel["model"][]
 	agentDir?: string
-	configDirName?: string
 	homeDir?: string
 }): DefinitionDiscoveryResult {
 	const cwd = resolve(options.cwd)
 	const homeDir = resolve(options.homeDir ?? homedir())
 	const userDir = join(options.agentDir ?? getAgentDir(), "agents")
-	const nearestProjectAgentsDir = findNearestProjectAgentsDir(cwd, options.configDirName ?? CONFIG_DIR_NAME)
+	const nearestProjectAgentsDir = findNearestProjectAgentsDir(cwd)
 	const projectAgentsDir = options.projectTrusted ? nearestProjectAgentsDir : undefined
 	const userCandidates = scanDefinitionDirectory(userDir, "user", options.toolNames, options.models, cwd, homeDir)
 	const projectCandidates = projectAgentsDir
@@ -130,15 +128,14 @@ export function discoverAgentDefinitions(options: {
 
 	return {
 		definitions: definitions.sort((left, right) => compareText(left.name, right.name)),
-		diagnostics: diagnostics.sort(compareDiagnostics),
-		projectAgentsDir
+		diagnostics: diagnostics.sort(compareDiagnostics)
 	}
 }
 
-export function findNearestProjectAgentsDir(cwd: string, configDirName = CONFIG_DIR_NAME): string | undefined {
+export function findNearestProjectAgentsDir(cwd: string): string | undefined {
 	let directory = resolve(cwd)
 	while (true) {
-		const candidate = join(directory, configDirName, "agents")
+		const candidate = join(directory, CONFIG_DIR_NAME, "agents")
 		try {
 			const stats = statSync(candidate)
 			// Trust covers the user's own tree, not e.g. another user's /tmp/.pi/agents.
@@ -164,7 +161,7 @@ function scanDefinitionDirectory(
 	try {
 		entries = readdirSync(directory, { withFileTypes: true })
 	} catch (error) {
-		if (isMissing(error)) return []
+		if (hasCode(error, "ENOENT")) return []
 		return [diagnosticCandidate(directory, source, "directory-unreadable", errorMessage(error), cwd, homeDir)]
 	}
 
@@ -304,8 +301,8 @@ function parseDefinitionModel(value: unknown, models: readonly ScopedModel["mode
 
 function parseThinkingLevel(value: unknown): { value?: AgentThinkingLevel; error?: string } {
 	if (value === undefined) return {}
-	if (typeof value !== "string" || !THINKING_LEVELS.has(value)) {
-		return { error: `thinking must be one of: ${[...THINKING_LEVELS].join(", ")}` }
+	if (typeof value !== "string" || !(THINKING_LEVELS as readonly string[]).includes(value)) {
+		return { error: `thinking must be one of: ${THINKING_LEVELS.join(", ")}` }
 	}
 	return { value: value as AgentThinkingLevel }
 }
@@ -391,14 +388,6 @@ function isWithin(parent: string, child: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function isMissing(error: unknown): boolean {
-	return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT"
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error)
 }
 
 function compareDiagnostics(left: DefinitionDiagnostic, right: DefinitionDiagnostic): number {

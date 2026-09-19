@@ -1,22 +1,20 @@
-import type { Dirent } from "node:fs"
-import { readdir } from "node:fs/promises"
 import { resolve } from "node:path"
 import { getAgentCoordinator } from "./coordinator.js"
 import {
+	directTaskPaths,
 	MAX_NOTIFICATION_CONTENT_BYTES,
 	MAX_TASK_NOTIFICATIONS,
 	mutateTaskMetadata,
 	parentStoragePaths,
 	readTaskMetadata,
 	retainedPaths,
-	TASK_REFERENCE_PATTERN,
 	type TaskMetadata,
 	type TaskStoragePaths,
 	taskStoragePaths,
+	truncateUtf8,
 	truncateUtf8Tail
 } from "./state.js"
-import { readTaskDiscardMarker } from "./storage.js"
-import { loadTaskList } from "./tools.js"
+import { errorMessage } from "./utils.js"
 
 export const NOTIFICATION_CUSTOM_TYPE = "lovely-agents:notification"
 export const NOTIFICATION_OUTPUT_PREVIEW_BYTES = 2 * 1024
@@ -52,11 +50,8 @@ export async function prepareTaskNotification(
 		metadata.kind === "bash"
 			? truncateUtf8Tail(metadata.latestReply?.text ?? "", NOTIFICATION_OUTPUT_PREVIEW_BYTES)
 			: truncateUtf8(metadata.latestReply?.text ?? "", NOTIFICATION_OUTPUT_PREVIEW_BYTES)
-	const taskList = await loadTaskList(paths.workspace, metadata.parentSessionId).catch(() => undefined)
-	const descendants = taskList?.details.tasks.find(task => task.id === metadata.taskRef)?.descendants
-	const descendantText = descendants && descendants.total > 0 ? `\nDescendants: ${JSON.stringify(descendants)}` : ""
 	const pathsForDisplay = retainedPaths(paths)
-	const status = type === "suspension" ? "suspended by a provider limit" : type === "interruption" ? "interrupted" : `completed: ${outcome}`
+	const status = type === "interruption" ? "interrupted" : `completed: ${outcome}`
 	const content = truncateUtf8(
 		[
 			`[Lovely ${metadata.kind === "bash" ? "Bash" : "Agent"} ${metadata.taskRef}:${run.id}:${type}]`,
@@ -66,7 +61,7 @@ export async function prepareTaskNotification(
 				: `Model: ${metadata.model.provider}/${metadata.model.id}:${metadata.thinking}`,
 			`Read: task_output(id: "${metadata.taskRef}", run: ${run.sequence})`,
 			output ? `Output preview:\n${output}` : "Output preview: (empty)",
-			`Files: history=${pathsForDisplay.history} ${metadata.kind === "bash" ? `output=${pathsForDisplay.output}` : `session=${pathsForDisplay.session}`}${descendantText}`
+			`Files: history=${pathsForDisplay.history} ${metadata.kind === "bash" ? `output=${pathsForDisplay.output}` : `session=${pathsForDisplay.session}`}`
 		].join("\n"),
 		MAX_NOTIFICATION_CONTENT_BYTES
 	)
@@ -125,12 +120,6 @@ export async function reconcileParentNotifications(
 	for (const paths of await directTaskPaths(cwd, parentSessionId)) {
 		const loaded = await readTaskMetadata(paths)
 		if (loaded.status !== "ok") {
-			try {
-				if (await readTaskDiscardMarker(paths)) continue
-			} catch (error) {
-				result.diagnostics.push(`${paths.taskDirectory}: ${errorMessage(error)}`)
-				continue
-			}
 			if (loaded.status === "invalid") result.diagnostics.push(`${paths.taskDirectory}: ${loaded.diagnostic.message}`)
 			continue
 		}
@@ -199,35 +188,4 @@ function notificationInFlight(): Set<string> {
 	const global = globalThis as typeof globalThis & { [NOTIFICATION_IN_FLIGHT_SYMBOL]?: Set<string> }
 	global[NOTIFICATION_IN_FLIGHT_SYMBOL] ??= new Set()
 	return global[NOTIFICATION_IN_FLIGHT_SYMBOL]
-}
-
-async function directTaskPaths(cwd: string, parentSessionId: string): Promise<TaskStoragePaths[]> {
-	const parent = parentStoragePaths(cwd, parentSessionId)
-	let entries: Dirent[]
-	try {
-		entries = await readdir(parent.parentDirectory, { withFileTypes: true })
-	} catch (error) {
-		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return []
-		throw error
-	}
-	return entries
-		.filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && TASK_REFERENCE_PATTERN.test(entry.name))
-		.map(entry => taskStoragePaths(parent, entry.name))
-		.sort((left, right) => left.taskDirectory.localeCompare(right.taskDirectory))
-}
-
-function truncateUtf8(content: string, maximumBytes: number): string {
-	const bytes = Buffer.from(content)
-	if (bytes.length <= maximumBytes) return content
-	let end = maximumBytes - 3
-	while (end > 0 && isUtf8Continuation(bytes[end])) end--
-	return `${bytes.subarray(0, end).toString("utf8")}...`
-}
-
-function isUtf8Continuation(byte: number | undefined): boolean {
-	return byte !== undefined && (byte & 0xc0) === 0x80
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error)
 }

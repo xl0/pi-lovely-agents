@@ -4,7 +4,6 @@ import { Box, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui"
 const COLLAPSED_LINES = 10
 const COLLAPSED_HEAD_LINES = 6
 const COLLAPSED_TAIL_LINES = 3
-const COLLAPSED_CHARACTERS = 1_200
 const PREVIEW_LINE_CHARACTERS = 240
 
 type TextToolResult = {
@@ -53,31 +52,19 @@ export function renderExpandableResult(result: TextToolResult, expanded: boolean
 	if (!output) return new Text("", outputPad, 0)
 
 	const lines = output.split("\n")
-	const characterCount = Array.from(output).length
-	if (expanded || (lines.length <= COLLAPSED_LINES && characterCount <= COLLAPSED_CHARACTERS)) {
-		return new Text(lines.map(line => theme.fg("toolOutput", line)).join("\n"), outputPad, 0)
-	}
+	if (expanded) return new Text(lines.map(line => theme.fg("toolOutput", line)).join("\n"), outputPad, 0)
 
-	const preview =
-		lines.length > COLLAPSED_LINES
-			? [
-					...lines.slice(0, COLLAPSED_HEAD_LINES).map(line => theme.fg("toolOutput", previewLine(line))),
-					expansionHint(`${lines.length - COLLAPSED_HEAD_LINES - COLLAPSED_TAIL_LINES} more lines`, theme),
-					...lines.slice(-COLLAPSED_TAIL_LINES).map(line => theme.fg("toolOutput", previewLine(line)))
-				]
-			: characterPreview(output, theme)
+	// Collapsed: cap every line, and fold the middle of long results.
+	const folded = lines.length > COLLAPSED_LINES
+	const shown = folded ? [...lines.slice(0, COLLAPSED_HEAD_LINES), ...lines.slice(-COLLAPSED_TAIL_LINES)] : lines
+	const preview = shown.map(line => theme.fg("toolOutput", previewLine(line)))
+	const omitted = folded
+		? `${lines.length - shown.length} more lines`
+		: shown.some(line => previewLine(line) !== line)
+			? "long lines cut"
+			: undefined
+	if (omitted) preview.splice(folded ? COLLAPSED_HEAD_LINES : preview.length, 0, expansionHint(omitted, theme))
 	return new Text(preview.join("\n"), outputPad, 0)
-}
-
-function characterPreview(output: string, theme: Theme): string[] {
-	const characters = Array.from(output)
-	const head = characters.slice(0, 800).join("")
-	const tail = characters.slice(-300).join("")
-	return [
-		...head.split("\n").map(line => theme.fg("toolOutput", line)),
-		expansionHint(`${characters.length - 1_100} more characters`, theme),
-		...tail.split("\n").map(line => theme.fg("toolOutput", line))
-	]
 }
 
 function previewLine(line: string): string {

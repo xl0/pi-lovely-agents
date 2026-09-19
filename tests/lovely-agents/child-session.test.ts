@@ -178,7 +178,7 @@ describe("child tools and prompt", () => {
 		expect(prompt.match(/Verify every claim/g)).toHaveLength(1)
 		expect(prompt).toContain("Appended policy")
 		expect(prompt).toContain('<project_instructions path="/workspace/AGENTS.md">')
-		expect(prompt).toContain("Use the bash tool to load a skill")
+		expect(prompt).toContain("Use bash to load a skill")
 		expect(prompt).toContain("Current working directory: C:/workspace")
 		expect(childPromptOptions(false)).toEqual({ expandPromptTemplates: false })
 		expect(childPromptOptions(true)).toEqual({ expandPromptTemplates: true })

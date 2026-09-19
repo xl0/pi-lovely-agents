@@ -1,11 +1,10 @@
 #!/usr/bin/env bun
 import { lstat, readdir, readFile, rm } from "node:fs/promises"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import {
 	acquireParentLease,
 	type ParentLease,
 	parentStoragePaths,
-	readTaskIdentity,
 	readTaskMetadata,
 	releaseParentLease,
 	SESSION_ID_PATTERN,
@@ -14,16 +13,10 @@ import {
 	type TaskStoragePaths,
 	taskStoragePaths
 } from "../extensions/lovely-agents/state.js"
-import {
-	assertCanonicalTaskDirectory,
-	assertStorageDirectory,
-	readTaskDiscardMarker,
-	syncActiveTaskLink
-} from "../extensions/lovely-agents/storage.js"
+import { errorMessage, hasCode, isRealDirectory } from "../extensions/lovely-agents/utils.js"
 
 export type PruneResult = { apply: boolean; candidates: string[]; deleted: string[]; diagnostics: string[] }
 type RecordEntry = { paths: TaskStoragePaths; metadata?: TaskMetadata; reason?: string }
-const pruning = new Set<string>()
 
 /**
  * Explicit maintenance only. Coarse workspace-wide leases deliberately trade
@@ -32,11 +25,6 @@ const pruning = new Set<string>()
 export async function pruneTasks(cwd: string, apply = false): Promise<PruneResult> {
 	cwd = resolve(cwd)
 	const result: PruneResult = { apply, candidates: [], deleted: [], diagnostics: [] }
-	if (pruning.has(cwd)) {
-		result.diagnostics.push(`Pruning is already running for ${cwd}`)
-		return result
-	}
-	pruning.add(cwd)
 	const root = parentStoragePaths(cwd, "prune").root
 	const leases: ParentLease[] = []
 	try {
@@ -54,12 +42,9 @@ export async function pruneTasks(cwd: string, apply = false): Promise<PruneResul
 			await assertStorageDirectory(parent)
 			for (const entry of await readdir(parent.parentDirectory, { withFileTypes: true })) {
 				if (!entry.isDirectory() || !TASK_REFERENCE_PATTERN.test(entry.name)) continue
-				try {
-					const identity = await readTaskIdentity(taskStoragePaths(parent, entry.name))
-					if (identity?.kind === "agent" && identity.childSessionId !== "archive") lockIds.add(identity.childSessionId)
-				} catch {
-					// Invalid records remain in place and block removal of their owner below.
-				}
+				// Invalid records remain in place and block removal of their owner below.
+				const loaded = await readTaskMetadata(taskStoragePaths(parent, entry.name))
+				if (loaded.status === "ok" && loaded.metadata.kind === "agent") lockIds.add(loaded.metadata.childSessionId)
 			}
 		}
 		for (const id of [...lockIds].sort()) {
@@ -87,11 +72,8 @@ export async function pruneTasks(cwd: string, apply = false): Promise<PruneResul
 			partitions.set(id, records)
 			for (const entry of await readdir(parent.parentDirectory, { withFileTypes: true })) {
 				if (entry.name === ".lease" && entry.isFile()) continue
-				if (entry.name === "active" && entry.isDirectory()) {
-					// Only known browsing links are disposable; arbitrary index content is retained.
-					const links = await readdir(join(parent.parentDirectory, "active"), { withFileTypes: true })
-					if (links.every(link => link.isSymbolicLink() && TASK_REFERENCE_PATTERN.test(link.name))) continue
-				}
+				// Browsing index written by 0.1.2; left in place.
+				if (entry.name === "active" && entry.isDirectory()) continue
 				if (!TASK_REFERENCE_PATTERN.test(entry.name) || !entry.isDirectory()) {
 					unsafePartitions.add(id)
 					result.diagnostics.push(`${join(parent.parentDirectory, entry.name)}: unrecognized partition entry retained`)
@@ -101,18 +83,13 @@ export async function pruneTasks(cwd: string, apply = false): Promise<PruneResul
 				const record: RecordEntry = { paths }
 				records.push(record)
 				try {
-					await assertCanonicalTaskDirectory(paths)
-					const identity = await readTaskIdentity(paths)
-					if (!identity) throw new Error("Missing task identity")
-					if (identity.kind === "agent") {
-						if (!lockIds.has(identity.childSessionId)) throw new Error("Child ownership changed during lease acquisition; retry")
-						const group = owners.get(identity.childSessionId) ?? []
-						group.push(record)
-						owners.set(identity.childSessionId, group)
-					}
 					const loaded = await readTaskMetadata(paths)
 					if (loaded.status !== "ok") throw new Error(loaded.status === "invalid" ? loaded.diagnostic.message : "Missing metadata")
-					await readTaskDiscardMarker(paths)
+					if (loaded.metadata.kind === "agent") {
+						const child = loaded.metadata.childSessionId
+						if (!lockIds.has(child)) throw new Error("Child ownership changed during lease acquisition; retry")
+						owners.set(child, [...(owners.get(child) ?? []), record])
+					}
 					record.metadata = loaded.metadata
 					if (loaded.metadata.discardedAt === null) throw new Error("Not explicitly discarded")
 					if (loaded.metadata.activeRun || loaded.metadata.queuedFollowUps.length) throw new Error("Unsettled work retained")
@@ -171,10 +148,9 @@ export async function pruneTasks(cwd: string, apply = false): Promise<PruneResul
 		result.candidates = ordered.map(record => record.paths.taskDirectory)
 		if (apply) {
 			for (const { paths } of ordered) {
-				await assertCanonicalTaskDirectory(paths)
+				await assertStorageDirectory(paths)
+				if (!(await isRealDirectory(paths.taskDirectory))) throw new Error(`Not a task directory: ${paths.taskDirectory}`)
 				await validateTree(paths.taskDirectory)
-				const warning = await syncActiveTaskLink(paths, true)
-				if (warning) throw new Error(warning)
 				await rm(paths.taskDirectory, { recursive: true })
 				result.deleted.push(paths.taskDirectory)
 			}
@@ -189,7 +165,6 @@ export async function pruneTasks(cwd: string, apply = false): Promise<PruneResul
 				result.diagnostics.push(errorMessage(error))
 			}
 		}
-		pruning.delete(cwd)
 	}
 	return result
 
@@ -202,7 +177,6 @@ export async function pruneTasks(cwd: string, apply = false): Promise<PruneResul
 		const ids: string[] = []
 		for (const entry of await readdir(root, { withFileTypes: true })) {
 			if (entry.name === ".gitignore" && entry.isFile()) continue
-			if (entry.name === "archive") continue
 			if (!entry.isDirectory() || !SESSION_ID_PATTERN.test(entry.name)) {
 				throw new Error(`Unrecognized storage root entry retained: ${join(root, entry.name)}`)
 			}
@@ -220,12 +194,11 @@ async function validateTree(directory: string): Promise<void> {
 	}
 }
 
-function hasCode(error: unknown, code: string): boolean {
-	return typeof error === "object" && error !== null && "code" in error && error.code === code
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error)
+/** Verify every storage component without following directory symlinks. */
+async function assertStorageDirectory(parent: { root: string; parentDirectory: string }): Promise<void> {
+	for (const directory of [dirname(parent.root), parent.root, parent.parentDirectory]) {
+		if (!(await isRealDirectory(directory))) throw new Error(`Unsafe or missing storage directory: ${directory}`)
+	}
 }
 
 if (import.meta.main) {

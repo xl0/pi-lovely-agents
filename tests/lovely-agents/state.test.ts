@@ -30,16 +30,6 @@ describe("private task storage", () => {
 			if (process.platform !== "win32") await chmod(configDirectory, 0o755)
 			const paths = await ensureParentStorage(workspace.cwd, "parent-session")
 			expect(await readFile(join(paths.root, ".gitignore"), "utf8")).toBe(STORAGE_GITIGNORE)
-			expect(Bun.spawnSync(["git", "init", "-q", workspace.cwd]).exitCode).toBe(0)
-			const ignored = Bun.spawnSync([
-				"git",
-				"-C",
-				workspace.cwd,
-				"check-ignore",
-				".pi/lovely-agents/.gitignore",
-				".pi/lovely-agents/parent-session/metadata.json"
-			])
-			expect(ignored.stdout.toString().trim().split("\n")).toHaveLength(2)
 			if (process.platform !== "win32") {
 				expect((await stat(configDirectory)).mode & 0o777).toBe(0o755)
 				expect((await stat(paths.root)).mode & 0o077).toBe(0)
@@ -193,8 +183,7 @@ describe("task metadata", () => {
 					kind: "initial",
 					state: "queued",
 					input: "printf hello",
-					acceptedAt: 1,
-					background: true
+					acceptedAt: 1
 				},
 				queuedFollowUps: [],
 				notifications: [],
@@ -211,57 +200,14 @@ describe("task metadata", () => {
 				{ cwd: "../relative" },
 				{ command: "  " },
 				{ command: "x".repeat(65537) },
-				{ childSessionId: "child" },
-				{ model: { provider: "bash", id: "process" } },
-				{ sessionConfig: {} },
-				{ thinking: "off" },
-				{ definitionName: "bash" },
-				{ depth: 1 },
-				{ allowAgents: false },
-				{ effectiveSystemPrompt: "" },
 				{ lastRunSequence: 2 },
 				{ activeRun: { ...bash.activeRun, kind: "followup" } },
-				{ state: "suspended", activeRun: { ...bash.activeRun, state: "suspended", startedAt: 1 } },
 				{ queuedFollowUps: [{ id: "r_0000000000000002", sequence: 2, content: "again", acceptedAt: 1 }] }
 			]) {
 				await expect(writeTaskMetadata(paths, { ...bash, ...patch } as TaskMetadata)).rejects.toThrow()
 				expect(await readFile(paths.metadata, "utf8")).toBe(before)
 			}
 			await expect(writeTaskMetadata(paths, metadata(paths))).rejects.toThrow()
-		})
-	})
-
-	test("retains boolean per-run policy and rejects malformed active or queued policy", async () => {
-		await withTaskStorage(async paths => {
-			const value: TaskMetadata = {
-				...metadata(paths),
-				state: "queued",
-				lastRunSequence: 2,
-				activeRun: {
-					id: "r_0000000000000001",
-					sequence: 1,
-					kind: "initial",
-					state: "queued",
-					input: "initial",
-					acceptedAt: 1,
-					background: false
-				},
-				queuedFollowUps: [{ id: "r_0000000000000002", sequence: 2, content: "later", acceptedAt: 2, background: true }]
-			}
-			await writeTaskMetadata(paths, value)
-			const loaded = await readTaskMetadata(paths)
-			expect(loaded.status === "ok" ? loaded.metadata.activeRun?.background : null).toBe(false)
-			expect(loaded.status === "ok" ? loaded.metadata.queuedFollowUps[0]?.background : null).toBe(true)
-			for (const invalid of [
-				{ ...value, activeRun: { ...value.activeRun, background: "background" } },
-				{ ...value, queuedFollowUps: [{ ...value.queuedFollowUps[0], background: 1 }] }
-			]) {
-				await expect(writeTaskMetadata(paths, invalid as unknown as TaskMetadata)).rejects.toThrow()
-			}
-			const { background: _background, ...activeRun } = value.activeRun as NonNullable<TaskMetadata["activeRun"]>
-			await writeTaskMetadata(paths, { ...value, activeRun })
-			const missing = await readTaskMetadata(paths)
-			expect(missing.status === "ok" ? missing.metadata.activeRun?.background : null).toBeUndefined()
 		})
 	})
 

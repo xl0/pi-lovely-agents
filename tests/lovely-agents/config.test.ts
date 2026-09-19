@@ -3,7 +3,7 @@ import type { ExtensionContext, ScopedModel } from "@earendil-works/pi-coding-ag
 import {
 	createAgentsConfigSpec,
 	defaultAgentsConfig,
-	loadAgentsConfig,
+	resolveAgentsConfig,
 	resolveConfiguredModels,
 	resolveModelChoices
 } from "../../extensions/lovely-agents/config.js"
@@ -23,19 +23,6 @@ afterEach(() => {
 })
 
 describe("Lovely Agents config", () => {
-	test("background features are independent on-by-default switches with scoped overrides", async () => {
-		await withTempWorkspace(async workspace => {
-			environment.PI_CODING_AGENT_DIR = workspace.agentDir
-			let config = createAgentsConfigSpec(configContext).load(workspace.cwd)
-			expect(config.value).toMatchObject({ backgroundAgents: true, backgroundBash: true, maxBashConcurrency: 4 })
-			config = config.update("user", "backgroundAgents", false)
-			expect(config.value).toMatchObject({ backgroundAgents: false, backgroundBash: true })
-			config = config.update("workspace", "backgroundAgents", true)
-			config = config.update("workspace", "backgroundBash", false)
-			expect(config.value).toMatchObject({ backgroundAgents: true, backgroundBash: false })
-		})
-	})
-
 	test("loads defaults, merges scopes, and isolates invalid values", async () => {
 		await withTempWorkspace(async workspace => {
 			environment.PI_CODING_AGENT_DIR = workspace.agentDir
@@ -48,7 +35,7 @@ describe("Lovely Agents config", () => {
 				JSON.stringify({ models: ["openai/gpt"], maxConcurrency: 2.5, maxBashConcurrency: 1.5, maxDepth: -1 })
 			)
 
-			const loaded = loadAgentsConfig(workspace.cwd, configContext)
+			const loaded = resolveAgentsConfig(createAgentsConfigSpec(configContext).load(workspace.cwd))
 			expect(loaded.value).toEqual({
 				...defaultAgentsConfig,
 				models: ["openai/gpt"],
@@ -65,7 +52,7 @@ describe("Lovely Agents config", () => {
 		await withTempWorkspace(async workspace => {
 			environment.PI_CODING_AGENT_DIR = workspace.agentDir
 			await workspace.write("workspace/.pi/xl0-pi-lovely-agents.json", "not json")
-			const loaded = loadAgentsConfig(workspace.cwd, configContext)
+			const loaded = resolveAgentsConfig(createAgentsConfigSpec(configContext).load(workspace.cwd))
 			expect(loaded.value.maxConcurrency).toBe(4)
 			expect(loaded.warnings).toHaveLength(1)
 			expect(loaded.warnings[0]?.message).toContain("Invalid config")
@@ -79,7 +66,7 @@ describe("Lovely Agents config", () => {
 			config.update("user", "models", ["anthropic/sonnet"])
 			for (const selections of [["openai/gpt", "missing/model"], ["missing/model"]]) {
 				config.update("workspace", "models", selections)
-				const loaded = loadAgentsConfig(workspace.cwd, configContext)
+				const loaded = resolveAgentsConfig(createAgentsConfigSpec(configContext).load(workspace.cwd))
 				expect(loaded.value.models).toEqual(selections)
 				expect(loaded.warnings).toHaveLength(1)
 				expect(loaded.warnings[0]).toMatchObject({ scope: "workspace", key: "models" })

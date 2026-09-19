@@ -1,19 +1,13 @@
 import { AsyncLocalStorage } from "node:async_hooks"
-import type { TaskMetadata } from "./state.js"
 import { publishSchedulerUpdate } from "./updates.js"
 
-export const AGENT_COORDINATOR_VERSION = 3
+export const AGENT_COORDINATOR_VERSION = 4
 const AGENT_COORDINATOR_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/coordinator")
 const BASH_COORDINATOR_SYMBOL = Symbol.for("@xl0/pi-lovely-agents/bash-coordinator")
 
-export type ModelTuple = Readonly<{ provider: string; model: string }>
-
 export type AgentScheduleRequest = {
-	tuple: ModelTuple
 	acceptanceOrder?: number
 	signal?: AbortSignal
-	/** Foreground callers cannot leave work parked behind a provider gate. */
-	rejectOnClosedTuple?: boolean
 }
 
 export type AgentPermit = {
@@ -33,10 +27,9 @@ export type ResidentAgent = {
 	stop(): void | Promise<void>
 	dispose(): void | Promise<void>
 	input?(content: string, delivery: "followup" | "steer" | "stdin", options?: ResidentInputOptions): Promise<ResidentInputResult>
-	recover?(): boolean | Promise<boolean>
 }
 
-export type ResidentInputOptions = { background?: boolean; signal?: AbortSignal; eof?: boolean }
+export type ResidentInputOptions = { signal?: AbortSignal; eof?: boolean }
 
 export type ResidentInputResult = {
 	run: number
@@ -44,7 +37,6 @@ export type ResidentInputResult = {
 	conversionReason?: string
 	queuePosition: number | null
 	queuedFollowUps: number
-	completed?: TaskMetadata
 }
 
 export type ParentNotification = Readonly<{ id: string; taskRef: string; content: string }>
@@ -64,9 +56,6 @@ export type AgentCoordinator = {
 	readonly residentCount: number
 	nextAcceptanceOrder(): number
 	setMaxConcurrency(limit: number): void
-	closeTuple(tuple: ModelTuple): void
-	openTuple(tuple: ModelTuple): void
-	isTupleOpen(tuple: ModelTuple): boolean
 	acquire(request: AgentScheduleRequest): Promise<AgentPermit>
 	run<T>(request: AgentScheduleRequest, work: () => Promise<T>): Promise<T>
 	reserve(request: AgentScheduleRequest): AgentReservation
@@ -80,10 +69,8 @@ export type AgentCoordinator = {
 }
 
 type Waiter = {
-	tuple: string
 	acceptanceOrder: number
 	queueOrder: number
-	bypassTupleGate: boolean
 	eligible: boolean
 	/** Slot granted by drain; an unconsumed grant must be returned on cancel. */
 	granted?: boolean
@@ -92,13 +79,11 @@ type Waiter = {
 	reject: (error: unknown) => void
 	signal?: AbortSignal
 	onAbort?: () => void
-	rejectOnClosedTuple: boolean
 }
 
 class ProcessAgentCoordinator implements AgentCoordinator {
 	readonly version = AGENT_COORDINATOR_VERSION
 	readonly #permits = new AsyncLocalStorage<Permit>()
-	readonly #closedTuples = new Set<string>()
 	readonly #waiters: Waiter[] = []
 	readonly #residents = new Map<string, ResidentAgent>()
 	readonly #notificationRoutes = new Map<string, ParentNotificationRoute>()
@@ -139,31 +124,9 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 		this.#drain()
 	}
 
-	closeTuple(tuple: ModelTuple): void {
-		assertTuple(tuple)
-		this.#closedTuples.add(tupleKey(tuple))
-		for (const waiter of [...this.#waiters]) {
-			if (waiter.tuple === tupleKey(tuple) && waiter.rejectOnClosedTuple) {
-				this.cancel(waiter, new Error("Provider/model is suspended by a provider limit; foreground work cannot wait for recovery"))
-			}
-		}
-		publishSchedulerUpdate()
-	}
-
-	openTuple(tuple: ModelTuple): void {
-		assertTuple(tuple)
-		this.#closedTuples.delete(tupleKey(tuple))
-		this.#drain()
-	}
-
-	isTupleOpen(tuple: ModelTuple): boolean {
-		assertTuple(tuple)
-		return !this.#closedTuples.has(tupleKey(tuple))
-	}
-
 	async acquire(request: AgentScheduleRequest): Promise<AgentPermit> {
-		await this.#waitForSlot(request, false)
-		return new Permit(this, { provider: request.tuple.provider, model: request.tuple.model })
+		await this.#waitForSlot(request)
+		return new Permit(this)
 	}
 
 	async run<T>(request: AgentScheduleRequest, work: () => Promise<T>): Promise<T> {
@@ -178,15 +141,14 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 	}
 
 	reserve(request: AgentScheduleRequest): AgentReservation {
-		assertTuple(request.tuple)
 		if (request.signal?.aborted) throw abortError(request.signal)
 		const acceptanceOrder = request.acceptanceOrder ?? this.nextAcceptanceOrder()
 		if (!Number.isSafeInteger(acceptanceOrder) || acceptanceOrder < 1) {
 			throw new Error("acceptanceOrder must be a positive safe integer")
 		}
 		this.#acceptanceOrder = Math.max(this.#acceptanceOrder, acceptanceOrder)
-		const queued = this.#enqueue(request, acceptanceOrder, false, false)
-		return new Reservation(this, request.tuple, acceptanceOrder, queued.waiter, queued.promise)
+		const queued = this.#enqueue(request, acceptanceOrder, false)
+		return new Reservation(this, acceptanceOrder, queued.waiter, queued.promise)
 	}
 
 	async withLentPermit<T>(wait: () => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -236,8 +198,8 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 		return this.#sessionContexts.get(sessionId)
 	}
 
-	async reacquire(tuple: ModelTuple, signal?: AbortSignal): Promise<void> {
-		await this.#waitForSlot({ tuple, ...(signal ? { signal } : {}) }, true)
+	async reacquire(signal?: AbortSignal): Promise<void> {
+		await this.#waitForSlot(signal ? { signal } : {})
 	}
 
 	releaseSlot(): void {
@@ -246,8 +208,7 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 		this.#drain()
 	}
 
-	async #waitForSlot(request: AgentScheduleRequest, bypassTupleGate: boolean): Promise<void> {
-		assertTuple(request.tuple)
+	async #waitForSlot(request: AgentScheduleRequest): Promise<void> {
 		if (request.signal?.aborted) throw abortError(request.signal)
 		const acceptanceOrder = request.acceptanceOrder ?? this.nextAcceptanceOrder()
 		if (!Number.isSafeInteger(acceptanceOrder) || acceptanceOrder < 1) {
@@ -255,27 +216,16 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 		}
 		this.#acceptanceOrder = Math.max(this.#acceptanceOrder, acceptanceOrder)
 
-		await this.#enqueue(request, acceptanceOrder, bypassTupleGate, true).promise
+		await this.#enqueue(request, acceptanceOrder, true).promise
 	}
 
-	#enqueue(
-		request: AgentScheduleRequest,
-		acceptanceOrder: number,
-		bypassTupleGate: boolean,
-		eligible: boolean
-	): { waiter: Waiter; promise: Promise<void> } {
-		if (request.rejectOnClosedTuple && !this.isTupleOpen(request.tuple)) {
-			throw new Error("Provider/model is suspended by a provider limit; foreground work cannot wait for recovery")
-		}
+	#enqueue(request: AgentScheduleRequest, acceptanceOrder: number, eligible: boolean): { waiter: Waiter; promise: Promise<void> } {
 		let waiter!: Waiter
 		const promise = new Promise<void>((resolve, reject) => {
 			waiter = {
-				tuple: tupleKey(request.tuple),
 				acceptanceOrder,
 				queueOrder: ++this.#queueOrder,
-				bypassTupleGate,
 				eligible,
-				rejectOnClosedTuple: request.rejectOnClosedTuple ?? false,
 				resolve,
 				reject,
 				...(request.signal ? { signal: request.signal } : {})
@@ -321,12 +271,12 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 		waiter.reject(reason instanceof Error ? reason : new Error("Agent reservation cancelled"))
 	}
 
-	async runReservation<T>(tuple: ModelTuple, waiter: Waiter, ready: Promise<void>, work: () => Promise<T>): Promise<T> {
+	async runReservation<T>(waiter: Waiter, ready: Promise<void>, work: () => Promise<T>): Promise<T> {
 		this.activate(waiter)
 		await ready
 		if (waiter.consumed) throw new Error("Agent reservation cancelled")
 		waiter.consumed = true
-		const permit = new Permit(this, tuple)
+		const permit = new Permit(this)
 		return this.#permits.run(permit, async () => {
 			try {
 				return await work()
@@ -338,7 +288,7 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 
 	#drain(): void {
 		while (this.#active < this.#limit) {
-			const index = this.#waiters.findIndex(waiter => waiter.eligible && (waiter.bypassTupleGate || !this.#closedTuples.has(waiter.tuple)))
+			const index = this.#waiters.findIndex(waiter => waiter.eligible)
 			if (index < 0) break
 			const [waiter] = this.#waiters.splice(index, 1)
 			if (!waiter) break
@@ -354,14 +304,12 @@ class ProcessAgentCoordinator implements AgentCoordinator {
 class Reservation implements AgentReservation {
 	readonly acceptanceOrder: number
 	readonly #coordinator: ProcessAgentCoordinator
-	readonly #tuple: ModelTuple
 	readonly #waiter: Waiter
 	readonly #ready: Promise<void>
 	#used = false
 
-	constructor(coordinator: ProcessAgentCoordinator, tuple: ModelTuple, acceptanceOrder: number, waiter: Waiter, ready: Promise<void>) {
+	constructor(coordinator: ProcessAgentCoordinator, acceptanceOrder: number, waiter: Waiter, ready: Promise<void>) {
 		this.#coordinator = coordinator
-		this.#tuple = { ...tuple }
 		this.acceptanceOrder = acceptanceOrder
 		this.#waiter = waiter
 		this.#ready = ready
@@ -375,7 +323,7 @@ class Reservation implements AgentReservation {
 	async run<T>(work: () => Promise<T>): Promise<T> {
 		if (this.#used) throw new Error("Agent reservation has already been used")
 		this.#used = true
-		return this.#coordinator.runReservation(this.#tuple, this.#waiter, this.#ready, work)
+		return this.#coordinator.runReservation(this.#waiter, this.#ready, work)
 	}
 
 	cancel(reason?: unknown): void {
@@ -385,15 +333,13 @@ class Reservation implements AgentReservation {
 
 class Permit implements AgentPermit {
 	readonly #coordinator: ProcessAgentCoordinator
-	readonly #tuple: ModelTuple
 	#state: "held" | "lent" | "released" = "held"
 	#reacquireAbort: AbortController | undefined
 	#reacquiring: Promise<void> | undefined
 	#lends = 0
 
-	constructor(coordinator: ProcessAgentCoordinator, tuple: ModelTuple) {
+	constructor(coordinator: ProcessAgentCoordinator) {
 		this.#coordinator = coordinator
-		this.#tuple = tuple
 	}
 
 	get held(): boolean {
@@ -437,7 +383,7 @@ class Permit implements AgentPermit {
 		else signal?.addEventListener("abort", forwardAbort, { once: true })
 		this.#reacquireAbort = reacquireAbort
 		try {
-			await this.#coordinator.reacquire(this.#tuple, reacquireAbort.signal)
+			await this.#coordinator.reacquire(reacquireAbort.signal)
 			if (this.currentState() === "released") {
 				this.#coordinator.releaseSlot()
 				throw abortError(reacquireAbort.signal)
@@ -508,16 +454,6 @@ function isAgentCoordinator(value: unknown): value is AgentCoordinator {
 		typeof candidate.bindNotificationRoute === "function" &&
 		typeof candidate.bindSessionContext === "function"
 	)
-}
-
-function tupleKey(tuple: ModelTuple): string {
-	return `${tuple.provider}\0${tuple.model}`
-}
-
-function assertTuple(tuple: ModelTuple): void {
-	if (!tuple.provider || !tuple.model || tuple.provider.includes("\0") || tuple.model.includes("\0")) {
-		throw new Error("Model tuple provider and model must be nonempty and contain no NUL bytes")
-	}
 }
 
 function assertConcurrency(limit: number): void {

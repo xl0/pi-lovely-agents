@@ -1,10 +1,11 @@
 import { lstat, readFile } from "node:fs/promises"
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
+import { DynamicBorder, type ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Container, Key, matchesKey, type SelectItem, SelectList, Text, truncateToWidth } from "@earendil-works/pi-tui"
 import type { AgentDefinition, DefinitionDiagnostic, DefinitionDiscoveryResult } from "./definitions.js"
 import { parentStoragePaths, readRetainedOutput, readTaskMetadata, taskStoragePaths } from "./state.js"
 import { relativeTime, type TaskListResult, type TaskListRow } from "./tools.js"
 import { bindTaskUpdateRoute } from "./updates.js"
+import { hasCode } from "./utils.js"
 
 export type ManagementUiOptions = {
 	discoverDefinitions: () => DefinitionDiscoveryResult
@@ -26,7 +27,7 @@ export async function openManagementUi(ctx: ExtensionContext, options: Managemen
 				label: `Agent definitions (${definitions.definitions.length})`,
 				description: `${definitions.diagnostics.length} diagnostics`
 			},
-			{ value: "tasks", label: `Tasks (${tasks.total})`, description: "Inspect durable direct children" },
+			{ value: "tasks", label: `Tasks (${tasks.tasks.length})`, description: "Inspect durable direct children" },
 			{ value: "config", label: "Configuration", description: "Edit user and workspace settings" }
 		])
 		if (!choice) return
@@ -180,88 +181,46 @@ async function showTaskContext(ctx: ExtensionContext, task: TaskListRow, view: "
 async function showLiveTaskOutput(ctx: ExtensionContext, task: TaskListRow): Promise<void> {
 	const paths = taskStoragePaths(parentStoragePaths(ctx.cwd, ctx.sessionManager.getSessionId()), task.id)
 	let output = await readRetainedOutput(paths)
-	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-		let closed = false
-		let loading = false
-		let refreshAgain = false
-		let offset = 0
-		let pageSize = 1
-		let total = 0
-		let follow = task.kind === "bash"
-		const refresh = async () => {
-			if (closed) return
-			refreshAgain = true
-			if (loading) return
-			loading = true
-			try {
-				do {
-					refreshAgain = false
-					const latest = await readRetainedOutput(paths)
-					if (closed) return
-					output = latest
-					tui.requestRender()
-				} while (refreshAgain)
-			} finally {
-				loading = false
-			}
-		}
-		const unbind = bindTaskUpdateRoute(ctx.cwd, ctx.sessionManager.getSessionId(), refresh)
-		return {
-			render(width: number) {
-				const exitStatus =
-					output.exitCode !== undefined ? ` · Exit code: ${output.exitCode ?? "unknown"} · Signal: ${output.signal ?? "none"}` : ""
-				const heading = theme.fg(
-					"accent",
-					theme.bold(
-						`${task.id} · ${output.state}${output.latestOutcome ? `/${output.latestOutcome}` : ""}${output.streaming ? " · streaming" : ""}${exitStatus}`
-					)
+	let closed = false
+	let loading = false
+	let refreshAgain = false
+	await showScrollable(ctx, {
+		follow: task.kind === "bash",
+		header: theme => [
+			theme.fg(
+				"accent",
+				theme.bold(
+					`${task.id} · ${output.state}${output.latestOutcome ? `/${output.latestOutcome}` : ""}${output.streaming ? " · streaming" : ""}${
+						output.exitCode !== undefined ? ` · Exit code: ${output.exitCode ?? "unknown"} · Signal: ${output.signal ?? "none"}` : ""
+					}`
 				)
-				const progressLines = [
-					`Capacity: ${output.capacity.active}/${output.capacity.limit} execution permits`,
-					...(output.progress ? [`Progress: ${JSON.stringify(output.progress)}`] : []),
-					...(output.queueReason ? [`Waiting: ${output.queueReason}`] : []),
-					...(output.lastActivity ? [`${output.lastActivity.action} · ${relativeTime(output.lastActivity.at, Date.now())}`] : [])
-				]
-				const bodyLines = new Text(output.text || "(no output)", 0, 0).render(width)
-				total = bodyLines.length
-				pageSize = Math.max(1, Math.floor(tui.terminal.rows * 0.6) - (1 + progressLines.length + 2))
-				const maxOffset = Math.max(0, total - pageSize)
-				if (follow) offset = maxOffset
-				else offset = Math.max(0, Math.min(offset, maxOffset))
-				const position = `${Math.min(offset + 1, total)}-${Math.min(offset + pageSize, total)}/${total}${follow ? " · follow" : ""}`
-				return [
-					truncateToWidth(heading, width),
-					...progressLines.map(line => truncateToWidth(line, width)),
-					"",
-					...bodyLines.slice(offset, offset + pageSize).map(line => truncateToWidth(line, width)),
-					truncateToWidth(theme.fg("dim", `Enter/Esc back · ↑↓ PgUp/PgDn Home/End · ${position}`), width)
-				]
-			},
-			invalidate() {},
-			handleInput(data: string) {
-				if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) done(undefined)
-				else if (matchesKey(data, Key.up)) {
-					offset--
-					follow = false
-				} else if (matchesKey(data, Key.down)) {
-					offset++
-				} else if (matchesKey(data, Key.pageUp)) {
-					offset -= pageSize
-					follow = false
-				} else if (matchesKey(data, Key.pageDown)) {
-					offset += pageSize
-				} else if (matchesKey(data, Key.home)) {
-					offset = 0
-					follow = false
-				} else if (matchesKey(data, Key.end)) {
-					offset = Math.max(0, total - pageSize)
-					follow = true
-				} else return
-				offset = Math.max(0, Math.min(offset, total - pageSize))
-				if (offset >= Math.max(0, total - pageSize)) follow = true
-				tui.requestRender()
-			},
-			dispose() {
+			),
+			`Capacity: ${output.capacity.active}/${output.capacity.limit} execution permits`,
+			...(output.progress ? [`Progress: ${JSON.stringify(output.progress)}`] : []),
+			...(output.queueReason ? [`Waiting: ${output.queueReason}`] : []),
+			...(output.lastActivity ? [`${output.lastActivity.action} · ${relativeTime(output.lastActivity.at, Date.now())}`] : []),
+			""
+		],
+		body: () => output.text || "(no output)",
+		subscribe(rerender) {
+			const unbind = bindTaskUpdateRoute(ctx.cwd, ctx.sessionManager.getSessionId(), async () => {
+				if (closed) return
+				refreshAgain = true
+				if (loading) return
+				loading = true
+				try {
+					do {
+						refreshAgain = false
+						const latest = await readRetainedOutput(paths)
+						if (closed) return
+						output = latest
+						rerender()
+					} while (refreshAgain)
+				} finally {
+					loading = false
+				}
+			})
+			return () => {
 				closed = true
 				unbind()
 			}
@@ -272,7 +231,7 @@ async function showLiveTaskOutput(ctx: ExtensionContext, task: TaskListRow): Pro
 async function select(ctx: ExtensionContext, title: string, items: SelectItem[]): Promise<string | null> {
 	return ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
 		const container = new Container()
-		container.addChild(border(text => theme.fg("accent", text)))
+		container.addChild(new DynamicBorder(text => theme.fg("accent", text)))
 		container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0))
 		const list = new SelectList(items, Math.min(Math.max(items.length, 1), 15), {
 			selectedPrefix: text => theme.fg("accent", text),
@@ -285,7 +244,7 @@ async function select(ctx: ExtensionContext, title: string, items: SelectItem[])
 		list.onCancel = () => done(null)
 		container.addChild(list)
 		container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter select • esc back"), 1, 0))
-		container.addChild(border(text => theme.fg("accent", text)))
+		container.addChild(new DynamicBorder(text => theme.fg("accent", text)))
 		return {
 			render: (width: number) => container.render(width),
 			invalidate: () => container.invalidate(),
@@ -297,31 +256,45 @@ async function select(ctx: ExtensionContext, title: string, items: SelectItem[])
 	})
 }
 
-async function showText(ctx: ExtensionContext, title: string, content: string): Promise<void> {
+function showText(ctx: ExtensionContext, title: string, content: string): Promise<void> {
+	return showScrollable(ctx, {
+		header: theme => [theme.fg("accent", theme.bold(title.replace(/[\r\n]+/g, " ")))],
+		body: () => content
+	})
+}
+
+/** Wrapped, bounded viewport. `follow` sticks to the bottom until the user scrolls up; End resumes it. */
+async function showScrollable(
+	ctx: ExtensionContext,
+	view: {
+		header(theme: ExtensionContext["ui"]["theme"]): string[]
+		body(): string
+		follow?: boolean
+		subscribe?(rerender: () => void): () => void
+	}
+): Promise<void> {
 	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-		const body = new Text(content, 0, 0)
 		let offset = 0
 		let pageSize = 1
 		let total = 0
+		let follow = view.follow ?? false
+		const unsubscribe = view.subscribe?.(() => tui.requestRender())
 		return {
 			render(width: number) {
-				const lines = body.render(width)
+				const header = view.header(theme)
+				const lines = new Text(view.body(), 0, 0).render(width)
 				total = lines.length
-				pageSize = Math.max(1, Math.floor(tui.terminal.rows * 0.6) - 2)
-				offset = Math.max(0, Math.min(offset, total - pageSize))
+				pageSize = Math.max(1, Math.floor(tui.terminal.rows * 0.6) - header.length - 1)
+				const maxOffset = Math.max(0, total - pageSize)
+				offset = follow ? maxOffset : Math.max(0, Math.min(offset, maxOffset))
+				const position = `${Math.min(offset + 1, total)}-${Math.min(offset + pageSize, total)}/${total}${follow ? " · follow" : ""}`
 				return [
-					truncateToWidth(theme.fg("accent", theme.bold(title.replace(/[\r\n]+/g, " "))), width),
-					...lines.slice(offset, offset + pageSize).map(line => truncateToWidth(line, width)),
-					truncateToWidth(
-						theme.fg(
-							"dim",
-							`Enter/Esc back · ↑↓ PgUp/PgDn Home/End · ${Math.min(offset + 1, total)}-${Math.min(offset + pageSize, total)}/${total}`
-						),
-						width
-					)
-				]
+					...header,
+					...lines.slice(offset, offset + pageSize),
+					theme.fg("dim", `Enter/Esc back · ↑↓ PgUp/PgDn Home/End · ${position}`)
+				].map(line => truncateToWidth(line, width))
 			},
-			invalidate: () => body.invalidate(),
+			invalidate() {},
 			handleInput(data: string) {
 				if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) return done(undefined)
 				if (matchesKey(data, Key.up)) offset--
@@ -331,18 +304,17 @@ async function showText(ctx: ExtensionContext, title: string, content: string): 
 				else if (matchesKey(data, Key.home)) offset = 0
 				else if (matchesKey(data, Key.end)) offset = total - pageSize
 				else return
-				offset = Math.max(0, Math.min(offset, total - pageSize))
+				const maxOffset = Math.max(0, total - pageSize)
+				offset = Math.max(0, Math.min(offset, maxOffset))
+				// Following is only meaningful for views that asked for it.
+				follow = view.follow === true && offset >= maxOffset
 				tui.requestRender()
+			},
+			dispose() {
+				unsubscribe?.()
 			}
 		}
 	})
-}
-
-function border(color: (text: string) => string): { render(width: number): string[]; invalidate(): void } {
-	return {
-		render: width => [color("─".repeat(Math.max(1, width)))],
-		invalidate() {}
-	}
 }
 
 async function isRegularFile(path: string): Promise<boolean> {
@@ -350,7 +322,7 @@ async function isRegularFile(path: string): Promise<boolean> {
 		const stats = await lstat(path)
 		return stats.isFile() && !stats.isSymbolicLink()
 	} catch (error) {
-		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return false
+		if (hasCode(error, "ENOENT")) return false
 		throw error
 	}
 }
@@ -393,10 +365,10 @@ function renderTask(task: TaskListRow): string {
 					`Thinking: ${task.thinking}`,
 					`Queued Follow-ups: ${task.queuedFollowUps}`
 				]),
-		`Output lines: ${task.outputLines ?? "unknown"}`,
+		`Output lines: ${task.outputLines}`,
 		...(task.queueReason ? [`Waiting: ${task.queueReason}`] : []),
 		...(task.lastActivity ? [`Last activity: ${task.lastActivity.action} (${relativeTime(task.lastActivity.at, Date.now())})`] : []),
-		...(task.kind === "agent" ? [`Descendants: ${task.descendants.total}`] : []),
+		...(task.kind === "agent" ? [`Descendants: ${task.descendants}`] : []),
 		"",
 		`History: ${task.paths.history}`,
 		task.kind === "bash" ? `Output: ${task.paths.output}` : `Session: ${task.paths.session}`

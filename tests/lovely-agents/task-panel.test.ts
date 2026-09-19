@@ -2,8 +2,8 @@ import { afterEach, expect, test } from "bun:test"
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { type Component, visibleWidth } from "@earendil-works/pi-tui"
 import { createTaskPanel } from "../../extensions/lovely-agents/task-panel.js"
-import type { TaskListResult, TaskListRow } from "../../extensions/lovely-agents/tools.js"
-import { publishSchedulerUpdate, publishTaskUpdate } from "../../extensions/lovely-agents/updates.js"
+import { compareTaskRows, type TaskListResult, type TaskListRow } from "../../extensions/lovely-agents/tools.js"
+import { publishTaskUpdate } from "../../extensions/lovely-agents/updates.js"
 
 const down = "\x1b[B"
 const up = "\x1b[A"
@@ -58,41 +58,6 @@ test("navigation scrolls five rows, bounds width, and preserves selection across
 	expect(h.lines().join("\n")).toContain("→ a_00000005")
 })
 
-test("task rows use the full width for labels and prompt previews", async () => {
-	const h = harness()
-	h.result.tasks = [
-		{
-			...row(0),
-			label: "System prompt inspection",
-			model: "openai-codex/gpt-6-astra",
-			inputPreview: `Inspect the stored system prompt. ${"界🙂 ".repeat(80)}`
-		}
-	]
-	await h.panel.refresh()
-	expect(h.lines(240).join("\n")).toContain(' · "Inspect the stored system prompt.')
-	expect(h.lines(240).join("\n")).not.toContain("prompt=")
-	h.panel.focus()
-	const wide = h.lines(240).join("\n")
-	expect(wide).toContain("System prompt inspection · openai-codex/gpt-6-astra")
-	expect(wide).toContain(' · "Inspect the stored system prompt.')
-	expect(wide).not.toContain("prompt=")
-	for (const width of [1, 20, 40, 80, 120, 240]) {
-		expect(h.lines(width).every(line => visibleWidth(line) <= width)).toBe(true)
-		expect(h.lines(width).join("\n")).not.toContain("�")
-	}
-	expect(h.lines(80).join("\n")).toContain("System prompt inspection")
-	h.result.tasks = h.result.tasks.map(task => ({ ...task, progress: "Root cause found; testing 🙂" }))
-	await h.panel.refresh()
-	expect(h.lines(240).join("\n")).toContain("Root cause found; testing 🙂")
-	expect(h.lines(240).join("\n")).not.toContain("Inspect the stored system prompt.")
-	h.panel.handleInput(esc, true)
-	expect(h.lines(240).join("\n")).toContain("Root cause found; testing 🙂")
-	expect(h.lines(240).join("\n")).not.toContain("Inspect the stored system prompt.")
-	for (const task of h.result.tasks) delete task.progress
-	await h.panel.refresh()
-	expect(h.lines(240).join("\n")).toContain("Inspect the stored system prompt.")
-})
-
 test("passive and focused rows group agents then Bash and sort active statuses before idle", async () => {
 	const h = harness()
 	h.result.tasks = [
@@ -104,9 +69,9 @@ test("passive and focused rows group agents then Bash and sort active statuses b
 	]
 	const ids = () => h.lines().flatMap(line => line.match(/a_\d{8}/g) ?? [])
 	await h.panel.refresh()
-	expect(h.lines().join("\n")).toContain("Agents\n↳ a_00000002 running")
-	expect(h.lines().join("\n")).toContain("↳ a_00000001 queued")
-	expect(h.lines().join("\n")).toContain("Bash\n↳ b_00000003 running")
+	expect(h.lines().join("\n")).toContain("Agents\n  a_00000002 running")
+	expect(h.lines().join("\n")).toContain("  a_00000001 queued")
+	expect(h.lines().join("\n")).toContain("Bash\n  b_00000003 running")
 	expect(h.lines().join("\n")).not.toContain("a_00000000 idle")
 
 	for (const task of h.result.tasks) {
@@ -124,49 +89,6 @@ test("passive and focused rows group agents then Bash and sort active statuses b
 	await h.panel.refresh()
 	expect(h.lines().join("\n")).toContain("→ a_00000001")
 	expect(h.lines().join("\n")).toMatch(/a_00000000[\s\S]*a_00000002[\s\S]*a_00000001[\s\S]*Bash/)
-})
-
-test("Bash rows and footer use their own kind and capacity without an invented model", async () => {
-	const h = harness()
-	const task: TaskListRow = { ...row(0), id: "b_00000000", kind: "bash", inputPreview: "printf hello" }
-	delete task.model
-	h.result.tasks = [task]
-	h.result.bashCapacity = { active: 1, limit: 2 }
-	await h.panel.refresh()
-	expect(h.status).toBe("bash:1 slots:1/2")
-	h.panel.focus()
-	expect(h.lines().join("\n")).toContain('bash · "printf hello"')
-	expect(h.lines().join("\n")).not.toContain("undefined")
-})
-
-test("shows queue reasons without a heading or distracting internal activity", async () => {
-	const h = harness()
-	const task = h.result.tasks[0]
-	if (!task) throw new Error("Missing fixture task")
-	task.state = "queued"
-	task.queueReason = "capacity"
-	h.result.capacity = { active: 4, limit: 4 }
-	await h.panel.refresh()
-	expect(h.lines().join("\n")).toContain("waiting: capacity")
-	h.panel.focus()
-	expect(h.lines()[0]).toBe("Agents")
-	expect(h.lines()[1]).toStartWith("→ a_00000000")
-	task.queueReason = "provider-limit"
-	h.result.capacity = { active: 0, limit: 4 }
-	publishSchedulerUpdate()
-	await Bun.sleep(0)
-	expect(h.lines().join("\n")).toContain("waiting: provider-limit")
-	expect(h.lines()[1]).toStartWith("→ a_00000000")
-	task.state = "running"
-	task.queueReason = null
-	task.lastActivity = { at: Date.now() - 20_000, action: "thinking" }
-	publishTaskUpdate(h.ctx.cwd, "parent")
-	await Bun.sleep(0)
-	expect(h.lines().join("\n")).not.toContain("thinking")
-	expect(h.lines().join("\n")).not.toContain("ago")
-	h.panel.handleInput(esc, true)
-	expect(h.lines().join("\n")).not.toContain("thinking")
-	expect(h.lines().join("\n")).not.toContain("ago")
 })
 
 test("Enter opens the selected task once, hides duplicate rows, then returns to its selection", async () => {
@@ -278,7 +200,8 @@ function harness(open: () => Promise<void> = async () => {}) {
 			capacity: { active: 1, limit: 4 },
 			bashCapacity: { active: 0, limit: 4 }
 		} as TaskListResult,
-		load: (): Promise<TaskListResult> => Promise.resolve(h.result),
+		// Production rows arrive pre-sorted from loadTaskList.
+		load: (): Promise<TaskListResult> => Promise.resolve({ ...h.result, tasks: [...h.result.tasks].sort(compareTaskRows) }),
 		opened: [] as string[],
 		errors: [] as string[],
 		status: undefined as string | undefined,

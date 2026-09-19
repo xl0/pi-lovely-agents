@@ -29,6 +29,7 @@ import {
 	mutateTaskMetadata,
 	RETAINED_OUTPUT_MAX_BYTES,
 	RETAINED_OUTPUT_MAX_LINES,
+	RETAINED_OUTPUT_MAX_WAIT_MS,
 	readRetainedOutput,
 	readTaskMetadata,
 	reserveTaskStorage,
@@ -43,7 +44,9 @@ const BashParameters = Type.Object(
 		command: Type.String({ minLength: 1, description: "Literal bash -c command" }),
 		label: Type.String({ minLength: 1, description: "Short task label" }),
 		cwd: Type.Optional(Type.String({ minLength: 1, description: "Working directory, relative to the workspace or absolute" })),
-		waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 600_000, description: "Wait before detaching; default 0" }))
+		waitMs: Type.Optional(
+			Type.Integer({ minimum: 0, maximum: RETAINED_OUTPUT_MAX_WAIT_MS, description: "Wait before detaching; default 0" })
+		)
 	},
 	{ additionalProperties: false }
 )
@@ -102,18 +105,15 @@ export function registerBashTool(pi: ExtensionAPI, options: { getConfig: () => A
 			if (!config.backgroundBash) throw new Error("bash_bg requires backgroundBash to be enabled")
 			signal?.throwIfAborted()
 			if (process.platform === "win32") throw new Error("bash_bg requires POSIX process-group termination; Windows is unsupported")
-			if (typeof params.command !== "string" || !params.command.trim() || params.command.includes("\0")) {
+			if (!params.command.trim() || params.command.includes("\0")) {
 				throw new Error("command must be nonblank and contain no NUL bytes")
 			}
 			if (Buffer.byteLength(params.command) > MAX_AGENT_INPUT_BYTES) throw new Error("command must be at most 64 KiB")
-			if (typeof params.label !== "string" || !params.label.trim() || Buffer.byteLength(params.label.trim()) > MAX_AGENT_LABEL_BYTES) {
+			if (!params.label.trim() || Buffer.byteLength(params.label.trim()) > MAX_AGENT_LABEL_BYTES) {
 				throw new Error("label must be nonblank and at most 80 UTF-8 bytes")
 			}
 			const waitMs = params.waitMs ?? 0
-			if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 600_000) throw new Error("waitMs must be an integer from 0 to 600000")
-			if (params.cwd !== undefined && (typeof params.cwd !== "string" || !params.cwd || params.cwd.includes("\0"))) {
-				throw new Error("cwd must be a nonempty directory path")
-			}
+			if (params.cwd?.includes("\0")) throw new Error("cwd must contain no NUL bytes")
 			const cwd = resolve(ctx.cwd, params.cwd ?? ".")
 			if (!(await stat(cwd)).isDirectory()) throw new Error(`cwd is not a directory: ${cwd}`)
 			signal?.throwIfAborted()
@@ -153,7 +153,6 @@ export function registerBashTool(pi: ExtensionAPI, options: { getConfig: () => A
 						id: `r_${randomBytes(8).toString("hex")}`,
 						sequence: 1,
 						acceptanceOrder: pool.nextAcceptanceOrder(),
-						background: true,
 						kind: "initial",
 						state: "queued",
 						input: params.command,
@@ -308,7 +307,7 @@ class BashRuntime implements ResidentAgent {
 
 	async input(content: string, delivery: "followup" | "steer" | "stdin", options: ResidentInputOptions = {}): Promise<ResidentInputResult> {
 		if (delivery !== "stdin") throw new Error("Bash tasks accept stdin only, not Follow-up or Steer")
-		if (typeof content !== "string" || Buffer.byteLength(content) > MAX_AGENT_INPUT_BYTES) throw new Error("stdin must be at most 64 KiB")
+		if (Buffer.byteLength(content) > MAX_AGENT_INPUT_BYTES) throw new Error("stdin must be at most 64 KiB")
 		const operation = this.#inputLane.then(async () => {
 			options.signal?.throwIfAborted()
 			// Durable "running" precedes spawn; a caller that saw it must not race the child's creation.
@@ -391,7 +390,6 @@ class BashRuntime implements ResidentAgent {
 		try {
 			try {
 				permit = await getBashCoordinator().acquire({
-					tuple: { provider: "bash", model: "process" },
 					...(this.#run.acceptanceOrder ? { acceptanceOrder: this.#run.acceptanceOrder } : {}),
 					signal: this.#abort.signal
 				})

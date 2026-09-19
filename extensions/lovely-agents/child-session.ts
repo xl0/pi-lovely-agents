@@ -5,13 +5,13 @@ import {
 	type BuildSystemPromptOptions,
 	createAgentSession,
 	DefaultResourceLoader,
+	formatSkillsForPrompt,
 	getAgentDir,
 	type LoadExtensionsResult,
 	type PromptOptions,
 	type ScopedModel,
 	SessionManager,
-	SettingsManager,
-	type Skill
+	SettingsManager
 } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import { Value } from "typebox/value"
@@ -19,6 +19,7 @@ import { MODEL_ALIASES, type ModelAliasChoice } from "./config.js"
 import { getAgentCoordinator } from "./coordinator.js"
 import type { AgentDefinition, AgentThinkingLevel } from "./definitions.js"
 import { mutateTaskMetadata, TaskProgressSchema, type TaskStoragePaths } from "./state.js"
+import { hasCode } from "./utils.js"
 
 const PROMPT_EXTENSION_PATH = "<inline:lovely-agent-prompt>"
 const CREATION_TOOL_NAMES = new Set(["agent", "agent_roster"])
@@ -285,7 +286,7 @@ export function buildDefinitionSystemPrompt(options: BuildSystemPromptOptions): 
 	}
 	const skillReadTool = (["read", "bash"] as const).find(name => tools.includes(name))
 	if (skillReadTool && options.skills && options.skills.length > 0) {
-		prompt += formatSkillsForChild(options.skills, skillReadTool)
+		prompt += formatSkillsForPrompt(options.skills, skillReadTool)
 	}
 	prompt += `\nCurrent working directory: ${options.cwd.replace(/\\/g, "/")}\n`
 	return prompt
@@ -293,33 +294,6 @@ export function buildDefinitionSystemPrompt(options: BuildSystemPromptOptions): 
 
 function modelId(model: ScopedModel["model"]): string {
 	return `${model.provider}/${model.id}`
-}
-
-function formatSkillsForChild(skills: Skill[], fileReadTool: "read" | "bash"): string {
-	const visible = skills.filter(skill => !skill.disableModelInvocation)
-	if (visible.length === 0) return ""
-	const lines = [
-		"",
-		"",
-		"The following skills provide specialized instructions for specific tasks.",
-		`Use the ${fileReadTool} tool to load a skill's file when the task matches its description.`,
-		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
-		"",
-		"<available_skills>"
-	]
-	for (const skill of visible) {
-		lines.push("  <skill>")
-		lines.push(`    <name>${escapeXml(skill.name)}</name>`)
-		lines.push(`    <description>${escapeXml(skill.description)}</description>`)
-		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`)
-		lines.push("  </skill>")
-	}
-	lines.push("</available_skills>")
-	return lines.join("\n")
-}
-
-function escapeXml(value: string): string {
-	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;")
 }
 
 async function reserveSessionFile(path: string): Promise<void> {
@@ -331,8 +305,4 @@ async function reserveSessionFile(path: string): Promise<void> {
 		const stats = await lstat(path)
 		if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(`Child session path is not a regular file: ${path}`)
 	}
-}
-
-function hasCode(error: unknown, code: string): boolean {
-	return typeof error === "object" && error !== null && "code" in error && error.code === code
 }
