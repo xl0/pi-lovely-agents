@@ -265,6 +265,8 @@ export function registerAgentTool(pi: ExtensionAPI, options: AgentToolOptions): 
 	})
 }
 
+const TaskReference = Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" })
+
 export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOptions): void {
 	pi.registerTool({
 		name: "task_input",
@@ -328,8 +330,8 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 			label: action === "stop" ? "Task Stop" : "Task Discard",
 			description:
 				action === "stop"
-					? "Stop active or queued work for an owned Agent or Bash task while preserving its files."
-					: "Stop and permanently discard an owned task subtree from active work. Files stay at their original paths for read-only inspection. Unsupported metadata versions can also be discarded.",
+					? "Stop active or queued work for owned Agent or Bash tasks while preserving their files; id accepts one Task Reference or a list."
+					: "Stop and permanently discard owned task subtrees from active work; id accepts one Task Reference or a list. Files stay at their original paths for read-only inspection.",
 			promptSnippet: action === "stop" ? "Stop work for a durable task" : "Discard a durable task",
 			promptGuidelines:
 				action === "discard"
@@ -338,26 +340,39 @@ export function registerTaskInputTool(pi: ExtensionAPI, options: AgentToolOption
 						]
 					: [],
 			parameters: Type.Object(
-				{ id: Type.String({ pattern: TASK_REFERENCE_PATTERN.source, description: "Task Reference" }) },
+				{
+					id: Type.Union([TaskReference, Type.Array(TaskReference, { minItems: 1, maxItems: 64, uniqueItems: true })], {
+						description: "One Task Reference, or a list to handle in one call"
+					})
+				},
 				{ additionalProperties: false }
 			),
 			renderCall(args, theme) {
-				return new Text(`${theme.fg("toolTitle", theme.bold(`task_${action}`))}${args.id ? ` ${theme.fg("muted", args.id)}` : ""}`, 0, 0)
+				const ids = [args.id ?? []].flat().join(" ")
+				return new Text(`${theme.fg("toolTitle", theme.bold(`task_${action}`))}${ids ? ` ${theme.fg("muted", ids)}` : ""}`, 0, 0)
 			},
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-				const details = await controlTaskLifecycle(ctx, params.id, action)
-				return {
-					content: [
-						{
-							type: "text",
-							text:
-								action === "discard"
-									? `${details.id}: discarded (files retained at ${details.taskDirectory})`
-									: `${details.id}: stop complete (${details.state}; outcome ${details.latestOutcome ?? "none"}; ${details.queuedFollowUps} queued)`
-						}
-					],
-					details
+				const describe = (details: Awaited<ReturnType<typeof controlTaskLifecycle>>) =>
+					action === "discard"
+						? `${details.id}: discarded (files retained at ${details.taskDirectory})`
+						: `${details.id}: stop complete (${details.state}; outcome ${details.latestOutcome ?? "none"}; ${details.queuedFollowUps} queued)`
+				if (typeof params.id === "string") {
+					const details = await controlTaskLifecycle(ctx, params.id, action)
+					return { content: [{ type: "text", text: describe(details) }], details }
 				}
+				// One bad reference must not abandon the rest of a batch; only a total failure is a tool error.
+				const tasks: Array<Awaited<ReturnType<typeof controlTaskLifecycle>>> = []
+				const errors: Array<{ id: string; message: string }> = []
+				for (const id of params.id) {
+					try {
+						tasks.push(await controlTaskLifecycle(ctx, id, action))
+					} catch (error) {
+						errors.push({ id, message: error instanceof Error ? error.message : String(error) })
+					}
+				}
+				const text = [...tasks.map(describe), ...errors.map(error => `${error.id}: failed: ${error.message}`)].join("\n")
+				if (tasks.length === 0) throw new Error(text)
+				return { content: [{ type: "text", text }], details: { tasks, errors } }
 			}
 		})
 	}

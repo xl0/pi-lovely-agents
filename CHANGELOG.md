@@ -11,6 +11,7 @@
 
 ### Changed
 
+- Accept a list of Task References in `task_discard` and `task_stop`, so cleaning up many tasks takes one call; a bad reference is reported without abandoning the rest.
 - Require Pi 0.86.1 or newer; child prompts are now rendered by Pi, with the tool list and rules added as prompt sections.
 - Replace the shipped `scripts/prune-tasks.ts` with **`/lovely-agents` → Prune discarded tasks**, which shows a dry run and asks before deleting.
 - Write Bash output straight to `output.log` from the command, preserving the order of stdout and stderr, and read tails on demand instead of copying them into task metadata while it runs.

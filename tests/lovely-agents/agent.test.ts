@@ -926,6 +926,27 @@ describe("task lifecycle controls", () => {
 			await releaseParentLeaseFor(workspace.cwd, "parent-session")
 		})
 	})
+
+	test("discards a list in one call, reporting a bad reference without abandoning the rest", async () => {
+		await withTempWorkspace(async workspace => {
+			await workspace.write("agent/agents/reviewer.md", definitionSource("reviewer"))
+			const tools = captureAgentTools(workspace.agentDir, async () => fakeChild(async child => child.assistant("done")).handle)
+			const ctx = taskContext(workspace.cwd)
+			const ids: string[] = []
+			for (const label of ["One", "Two"]) {
+				const created = await tools.agent.execute("create", { definition: "reviewer", label, prompt: "finish" }, undefined, ctx)
+				ids.push((created.details as AgentCreationResult).id)
+			}
+			expect(Value.Check(tools.discard.parameters, { id: ids })).toBe(true)
+			expect(Value.Check(tools.discard.parameters, { id: [] })).toBe(false)
+
+			const batch = await tools.discard.execute("discard", { id: [...ids, "a_00000000"] }, undefined, ctx)
+			expect(batch.details).toMatchObject({ tasks: ids.map(id => ({ id, discarded: true })), errors: [{ id: "a_00000000" }] })
+			expect((await loadTaskList(workspace.cwd, "parent-session")).details.tasks).toHaveLength(0)
+			await expect(tools.discard.execute("discard", { id: ["a_00000000"] }, undefined, ctx)).rejects.toThrow("Unknown Task Reference")
+			await releaseParentLeaseFor(workspace.cwd, "parent-session")
+		})
+	})
 })
 
 describe("delegation and cancellation", () => {

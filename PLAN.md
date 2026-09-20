@@ -68,7 +68,7 @@ bash_bg({ command, label, cwd?, waitMs? })
 task_list({})
 task_output({ id, run?, lines?, waitMs? })
 task_input({ id, content, delivery?: "followup" | "steer", eof? })
-task_stop({ id })
+task_stop({ id })       // id: one Task Reference or a list
 task_discard({ id })
 task_update({ progress })   // child-only, never notifies the parent
 ```
