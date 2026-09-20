@@ -181,6 +181,8 @@ export async function createChildSession(options: CreateChildSessionOptions): Pr
 					// Pi omits its tool list and rules for a custom prompt; add them back as sections
 					// and let Pi render the rest (append text, context files, skills, cwd).
 					pi.on("before_agent_start", event => {
+						// Pi ignores peer ranges when installing extensions, so check the API itself.
+						if (!event.systemPromptOptions.sections) throw new Error("Lovely Agents requires Pi 0.86.1 or newer")
 						Object.assign(event.systemPromptOptions.sections, definitionPromptSections(event.systemPromptOptions))
 					})
 				}

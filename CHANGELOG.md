@@ -11,7 +11,7 @@
 
 ### Changed
 
-- Require a Pi release newer than 0.85.1; child prompts are now rendered by Pi, with the tool list and rules added as prompt sections.
+- Require Pi 0.86.1 or newer; child prompts are now rendered by Pi, with the tool list and rules added as prompt sections.
 - Replace the shipped `scripts/prune-tasks.ts` with **`/lovely-agents` → Prune discarded tasks**, which shows a dry run and asks before deleting.
 - Write Bash output straight to `output.log` from the command, preserving the order of stdout and stderr, and read tails on demand instead of copying them into task metadata while it runs.
 - Log agent inputs in `history.md` as the child session receives them, mark run ends as `<run N outcome>`, and no longer fail a run when writing the history log fails.

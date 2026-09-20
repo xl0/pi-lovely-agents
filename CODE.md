@@ -122,7 +122,9 @@ that is how task trees are walked (stop, discard, prune, descendant counts).
 - `skills/`: delegation guidance and Definition authoring; `README.md` is for humans
 
 ESM; Pi discovers `./extensions` and `./skills` from the manifest. Pi packages
-are peer dependencies (locally `bun link`ed from `../pi-mono`); Lovely Config is
+are peer dependencies that Pi provides at runtime and ignores at install, and
+exact-pinned dev dependencies so CI tests a known Pi (locally `bun link`ed from
+`../pi-mono`); Lovely Config is
 pinned and bundled.
 
 ## Details
@@ -171,7 +173,7 @@ extensions start.
 The Definition body is Pi's custom prompt, so Pi renders append text, context
 files, skills, and cwd itself. Pi omits its tool list and rules for custom
 prompts; a hidden first extension adds them back through
-`systemPromptOptions.sections` (needs Pi newer than 0.85.1; Pi does not export
+`systemPromptOptions.sections` (needs Pi 0.86.1 or newer; Pi does not export
 its rule builder, so `definitionPromptSections` mirrors it). The same extension
 registers child-only `task_update({ progress })`. The handle's `prompt` binds the
 run ID through async-local storage, so late callbacks cannot adopt a later run.

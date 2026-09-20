@@ -210,10 +210,6 @@ stop, discard. No slash-command mirror of the model tools.
 - [x] The eight interactive UI/trust scenarios in `TEST-PLAN.md` pass.
 - Verify OIDC staged publishing on the next tag; the first CI run skipped an
   already-published version. Publishing needs explicit approval.
-- Decide on committing a lockfile for the publish job; `bun.lock` is ignored
-  because local Pi packages are linked.
-- Release only after a Pi newer than 0.85.1 ships: the child prompt uses its
-  prompt `sections` API.
 
 ### [ ] Cache-preserving context forks
 
