@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-20
+
 ### Breaking Changes
 
 - Remove foreground mode and the `backgroundAgents` setting: agent calls wait up to `waitMs` and then detach, and Follow-ups are always accepted without waiting for their result.
