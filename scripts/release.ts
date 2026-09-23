@@ -37,7 +37,7 @@ const cmp = (a: readonly number[], b: readonly number[]) => a[0] - b[0] || a[1] 
 const stageList = async () => {
 	const list = await $`npm stage list ${PKG} --json`.nothrow().quiet()
 	if (list.exitCode !== 0) die(`npm stage list failed:\n${list.stderr.toString()}`)
-	return JSON.parse(list.stdout.toString()) as { id: string; version: string }[]
+	return JSON.parse(list.stdout.toString()) as { id: string; version: string; status?: string }[]
 }
 
 const args = process.argv.slice(2)
@@ -163,7 +163,7 @@ await $`git push origin ${`v${version}`}`
 
 console.log(`\n=== waiting for CI to stage ${version} on npm ===\n`)
 // CI runs in under a minute; ten is a hung workflow, not a slow one.
-const deadline = Date.now() + 10 * 60 * 1000
+const deadline = Date.now() + 15 * 60 * 1000
 let stageId: string | undefined
 while (!stageId) {
 	stageId = (await stageList()).find(item => item.version === version)?.id
@@ -175,11 +175,30 @@ while (!stageId) {
 }
 console.log(`staged as ${stageId}`)
 
-for (let attempt = 1; ; attempt++) {
+// npm reviews a staged build before it can be approved (409 until then). Wait here, so a
+// 2FA code is only asked for once it can actually be used.
+const awaitReview = async () => {
+	for (let status: string | undefined; ; await Bun.sleep(10_000)) {
+		status = (await stageList()).find(item => item.id === stageId)?.status
+		if (status !== "validating") return console.log(`\nnpm review status: ${status ?? "unknown"}`)
+		if (Date.now() > deadline) die(`npm review still running; approve later with: npm stage approve ${stageId}`)
+		process.stdout.write(".")
+	}
+}
+await awaitReview()
+
+for (let attempt = 1; ; ) {
 	const otp = prompt("2FA code to approve and publish:")?.trim()
 	if (!otp) die(`no code entered; approve manually with: npm stage approve ${stageId}`)
-	if ((await $`npm stage approve ${stageId} --otp ${otp}`.nothrow()).exitCode === 0) break
-	if (attempt === 3) die(`approve manually with: npm stage approve ${stageId}`)
+	const approved = await $`npm stage approve ${stageId} --otp ${otp}`.nothrow()
+	if (approved.exitCode === 0) break
+	// The list can report ready slightly before approval accepts it; that is not a bad code.
+	if (approved.stderr.toString().includes("automated review")) {
+		await Bun.sleep(15_000)
+		await awaitReview()
+		continue
+	}
+	if (attempt++ === 3) die(`approve manually with: npm stage approve ${stageId}`)
 }
 
 console.log(`
