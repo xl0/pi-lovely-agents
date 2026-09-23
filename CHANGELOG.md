@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reactivate Lovely tools on session start when a restored loadout omits them, such as after resuming a session that was open in another Pi process.
+- Report `detached: false` from `agent` when the run settled just as the wait ended, instead of promising a notification that never comes.
+- Keep `task_list` working when a running Bash task's `output.log` is missing.
+- Report the real latest outcome in `task_discard` details.
+- Wait for npm's automated review before asking for the 2FA code in the release script.
+
 ## [0.1.3] - 2026-09-20
 
 ### Breaking Changes

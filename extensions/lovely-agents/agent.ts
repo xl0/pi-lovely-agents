@@ -450,11 +450,12 @@ export async function controlTaskLifecycle(ctx: ExtensionContext, id: string, ac
 	const paths = taskStoragePaths(lease.paths, id)
 	if (action === "discard") {
 		await discardTask(paths)
+		const discarded = await readTaskMetadata(paths)
 		return {
 			id,
 			action,
 			state: "discarded",
-			latestOutcome: null,
+			latestOutcome: discarded.status === "ok" ? discarded.metadata.latestOutcome : null,
 			discarded: true,
 			queuedFollowUps: 0,
 			taskDirectory: displayWorkspacePath(ctx.cwd, paths.taskDirectory)
@@ -522,10 +523,7 @@ class AgentRuntime implements ResidentAgent {
 	}
 
 	async wait(waitMs: number, signal?: AbortSignal): Promise<boolean> {
-		if (waitMs === 0) {
-			await this.detach()
-			return true
-		}
+		if (waitMs === 0) return this.detach()
 		if (signal?.aborted) await this.stopTree()
 		let timer: ReturnType<typeof setTimeout> | undefined
 		let onAbort: (() => void) | undefined
@@ -550,11 +548,8 @@ class AgentRuntime implements ResidentAgent {
 			await this.stopTree()
 			return false
 		}
-		if (result === "timeout") {
-			await this.detach()
-			return true
-		}
-		return false
+		// Settlement can win the lane after the timer fires; report the synchronous result then.
+		return result === "timeout" && (await this.detach())
 	}
 
 	/** Cancellation owns the accepted run and any descendants it already detached. */
@@ -762,13 +757,18 @@ class AgentRuntime implements ResidentAgent {
 		if (!settled) await this.settle(run, outcome, this.#stopRequested)
 	}
 
-	private async detach(): Promise<void> {
+	/** True only if the run was still active, so a completion notice will follow. */
+	private async detach(): Promise<boolean> {
 		const detachedAt = Date.now()
+		let detached = false
 		await mutateTaskMetadata(this.#paths, metadata => {
 			const activeRun = metadata.activeRun
-			if (!activeRun || activeRun.id !== this.#initialRunId || activeRun.detachedAt !== undefined) return metadata
+			if (!activeRun || activeRun.id !== this.#initialRunId) return metadata
+			detached = true
+			if (activeRun.detachedAt !== undefined) return metadata
 			return { ...metadata, activeRun: { ...activeRun, detachedAt }, updatedAt: detachedAt }
 		})
+		return detached
 	}
 
 	private async settle(

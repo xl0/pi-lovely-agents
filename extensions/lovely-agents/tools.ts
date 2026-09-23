@@ -472,7 +472,7 @@ async function taskListRow(
 		// A running command's output exists only in its log until settlement.
 		outputLines: splitCompleteLines(
 			metadata.kind === "bash" && metadata.state === "running"
-				? (await readOutputTail(paths.output)).text
+				? (await readOutputTail(paths.output).catch(() => ({ text: "" }))).text
 				: (metadata.latestReply?.text ?? "")
 		).length,
 		lastActivity: metadata.lastActivity ?? null,

@@ -42,6 +42,8 @@ test("lease conflicts show a persistent warning without recovering, notifying, o
 				commands.set(name, command.handler)
 			},
 			getActiveTools: () => [...active],
+			// The SDK registry is already allowlist-filtered: task_stop is excluded here.
+			getAllTools: () => ["read", "other_tool", "agent", "bash_bg", "task_list", "task_output"].map(name => ({ name })),
 			setActiveTools: (names: string[]) => {
 				active = names
 			},
@@ -103,12 +105,13 @@ test("lease conflicts show a persistent warning without recovering, notifying, o
 			expect(await readFile(paths.metadata, "utf8")).toBe(originalMetadata)
 			expect(await readFile(parent.lease, "utf8")).toBe(lease)
 
-			// A different session in the same workspace is unaffected, including its tool allowlist.
+			// A different session is unaffected. Its loadout restored from a conflicted transcript
+			// lacks Lovely tools; registered ones come back, allowlist-excluded ones stay out.
 			sessionId = "independent"
-			active = ["read", "other_tool", "agent", "bash_bg", "task_list", "task_output"]
-			await emit("session_start", { reason: "reload" })
+			active = ["read", "other_tool"]
+			await emit("session_start", { reason: "resume" })
 			expect(status).toBeUndefined()
-			expect(active).toContain("agent")
+			expect(active).toEqual(["read", "other_tool", "agent", "bash_bg", "task_list", "task_output"])
 			expect(active).not.toContain("task_stop")
 			await emit("session_shutdown", { reason: "quit" })
 			expect(await readFile(paths.metadata, "utf8")).toBe(originalMetadata)
@@ -154,6 +157,7 @@ test("tools stay visible regardless of config, and SDK idle disposal unbinds wit
 				assertLive()
 				return [...active]
 			},
+			getAllTools: () => [...tools.keys()].map(name => ({ name })),
 			setActiveTools: (names: string[]) => {
 				assertLive()
 				active = names
@@ -217,6 +221,7 @@ test("manual discard notifies the parent only after it succeeds", async () => {
 			registerTool() {},
 			registerCommand() {},
 			getActiveTools: () => [],
+			getAllTools: () => [],
 			setActiveTools() {},
 			on(name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) {
 				handlers.set(name, [...(handlers.get(name) ?? []), handler])

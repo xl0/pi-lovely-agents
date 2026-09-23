@@ -152,6 +152,14 @@ export default function lovelyAgentsExtension(pi: ExtensionAPI) {
 			ctx.ui.notify(ownershipWarning, "warning")
 			return
 		}
+		// A conflicted session's hidden loadout can be restored from its transcript later;
+		// reactivate registered Lovely tools (the registry already honors SDK allowlists).
+		const active = pi.getActiveTools()
+		const inactive = pi
+			.getAllTools()
+			.map(tool => tool.name)
+			.filter(name => LOVELY_TOOLS.has(name) && !active.includes(name))
+		if (inactive.length > 0) pi.setActiveTools([...active, ...inactive])
 		const disposeSignal = getAgentCoordinator().getSessionContext(parentSessionId)?.disposeSignal
 		if (disposeSignal) {
 			disposeSignal.addEventListener("abort", disposeBindings, { once: true })
