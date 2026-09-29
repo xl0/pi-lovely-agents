@@ -122,9 +122,10 @@ that is how task trees are walked (stop, discard, prune, descendant counts).
 - `skills/`: delegation guidance and Definition authoring; `README.md` is for humans
 
 ESM; Pi discovers `./extensions` and `./skills` from the manifest. Pi packages
-are peer dependencies that Pi provides at runtime and ignores at install, and
-exact-pinned dev dependencies so CI tests a known Pi (locally `bun link`ed from
-`../pi-mono`); Lovely Config is
+are `"*"` peer dependencies, as Pi requires: Pi provides them at runtime and
+ignores peer ranges at install, so the minimum (0.86.1, prompt `sections`) is
+enforced by a runtime check instead. Locally they are `bun link`ed from
+`../pi-mono`; Lovely Config is
 pinned and bundled.
 
 ## Details

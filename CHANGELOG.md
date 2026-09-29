@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Declare Pi packages as `"*"` peer dependencies without pinned dev copies, as Pi expects; Pi 0.86.1 or newer is still required and checked at runtime.
 - Reactivate Lovely tools on session start when a restored loadout omits them, such as after resuming a session that was open in another Pi process.
 - Report `detached: false` from `agent` when the run settled just as the wait ended, instead of promising a notification that never comes.
 - Keep `task_list` working when a running Bash task's `output.log` is missing.

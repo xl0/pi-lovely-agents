@@ -42,15 +42,13 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.11",
-		"@earendil-works/pi-coding-agent": "0.86.1",
-		"@earendil-works/pi-tui": "0.86.1",
 		"@typescript/native-preview": "7.0.0-dev.20260707.2",
 		"bun-types": "1.4.0",
 		"typescript": "6.0.3"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": ">=0.86.1",
-		"@earendil-works/pi-tui": ">=0.86.1",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
 		"typebox": "*"
 	},
 	"pi": {
